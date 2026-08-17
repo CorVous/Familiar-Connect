@@ -49,6 +49,9 @@ timer fires / cut short    → generate experience (background slot)
 The model calls `start_activity(activity, note?)` — a text-registry
 tool whose `activity` enum is built from the catalog at
 registry-build time, so each familiar's sidecar shapes the schema.
+The tool description carries the whole when-to-go policy and is
+per-familiar text (`[prompt].start_activity_description`), not a
+constant in the tool module.
 The start is **deferred**: the tool stages it and the responder
 applies it via `end_turn()` after the current reply ships (same
 deferral pattern as `shift_focus`), so she says her goodbye in the

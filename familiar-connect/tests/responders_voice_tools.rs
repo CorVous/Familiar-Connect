@@ -24,8 +24,8 @@ use familiar_connect::tools::registry::{FnHandler, Tool, ToolContext, ToolOutput
 use familiar_connect::tts_player::protocol::TtsPlayer;
 
 use support::{
-    ScriptedToolLlm, activity_start, finish, make_assembler, store, tc_delta, text_delta,
-    voice_final,
+    ScriptedToolLlm, activity_start, default_config, finish, make_assembler, store, tc_delta,
+    text_delta, voice_final,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -234,4 +234,67 @@ async fn leaked_invoke_xml_content_never_reaches_tts_or_history() {
             .collect::<Vec<_>>()
     );
     assert!(turns.iter().all(|t| !t.content.contains("invoke")));
+}
+
+// ---------------------------------------------------------------------------
+// Voice tool nudge is config (#151)
+// ---------------------------------------------------------------------------
+
+/// Drive one tool-enabled voice turn and return the trailing system message.
+async fn trailing_with_ack(ack: &str) -> String {
+    let mut reg = ToolRegistry::new();
+    reg.register(Tool::new(
+        "set_alarm",
+        "",
+        json!({}),
+        Arc::new(FnHandler(|_args: Value, _ctx: ToolContext| async move {
+            Ok(ToolOutput::Text(json!({"ok": true}).to_string()))
+        })),
+    ))
+    .unwrap();
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        text_delta("Sure."),
+        finish("stop"),
+    ]]));
+    let s = store();
+    let assembler = make_assembler(Arc::clone(&s));
+    let r = VoiceResponder::new(
+        assembler,
+        Arc::clone(&llm) as Arc<dyn familiar_connect::processors::ResponderLlm>,
+        Arc::new(RecordingVoicePlayer {
+            spoken: Arc::new(Mutex::new(Vec::new())),
+        }),
+        s,
+        Arc::new(TurnRouter::new()),
+        "fam",
+    )
+    .with_tools(Arc::new(reg), voice_ctx_factory())
+    .with_voice_tool_ack(ack);
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    llm.calls()[0].last().unwrap().content_str()
+}
+
+#[tokio::test]
+async fn shipped_default_voice_tool_ack_reaches_the_trailing_reminder() {
+    let trailing = trailing_with_ack(&default_config().voice_tool_ack).await;
+    assert!(
+        trailing.contains(
+            "Always speak at least a brief acknowledgement before calling a tool. \
+             Never reply with a tool call alone."
+        ),
+        "{trailing}"
+    );
+}
+
+#[tokio::test]
+async fn overridden_voice_tool_ack_reaches_the_trailing_reminder() {
+    let trailing = trailing_with_ack("ACK_MARKER").await;
+    assert!(trailing.contains("ACK_MARKER"), "{trailing}");
+    assert!(!trailing.contains("brief acknowledgement"), "{trailing}");
 }

@@ -18,7 +18,7 @@ use familiar_connect::llm::{LlmClient, Message};
 use familiar_connect::processors::people_dossier_worker::PeopleDossierWorker;
 use serde_json::Value;
 
-use helpers::{ScriptedLlm, joined, store, system_text, user_text};
+use helpers::{ScriptedLlm, default_config, joined, store, system_text, user_text};
 
 const DOSSIER_DEFAULT: &str = "(no more scripted replies)";
 
@@ -47,7 +47,12 @@ fn seed_self_fact(store: &AsyncHistoryStore, text: &str, importance: Option<i64>
 }
 
 fn worker(store: &Arc<AsyncHistoryStore>, llm: &Arc<ScriptedLlm>) -> PeopleDossierWorker {
+    // Header prose has no in-code default; production threads the merged
+    // config, so the fixture threads the shipped `_default` profile.
+    let cfg = default_config();
     PeopleDossierWorker::new(store.clone(), llm.clone() as Arc<dyn LlmClient>, "fam")
+        .self_system(cfg.dossier_self_system)
+        .other_system(cfg.dossier_other_system)
 }
 
 fn self_worker(store: &Arc<AsyncHistoryStore>, llm: &Arc<ScriptedLlm>) -> PeopleDossierWorker {
@@ -473,4 +478,71 @@ async fn rebuild_racing_supersede_delete_does_not_resurrect_dossier() {
         .expect("dossier rebuilt on the next tick");
     assert_eq!(entry.last_fact_id, new_id);
     assert!(entry.dossier_text.contains("Aria"));
+}
+
+// ---------------------------------------------------------------------------
+// Header prose is config (#151)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn shipped_default_self_header_names_the_familiar() {
+    let store = store();
+    seed_self_fact(&store, "Sapphire guards her autonomy.", Some(9));
+    let llm = ScriptedLlm::new(["ok"], DOSSIER_DEFAULT);
+    self_worker(&store, &llm).tick().await.unwrap();
+    let system = system_text(&llm.calls()[0]);
+    assert!(
+        system.starts_with("You maintain Sapphire's evolving self-record — who she is becoming"),
+        "{system}"
+    );
+    assert!(!system.contains("{self_name}"), "{system}");
+}
+
+#[tokio::test]
+async fn shipped_default_other_header_names_the_subject() {
+    let store = store();
+    seed_subject_fact(&store, "Aria likes pho.", "discord:9", "Aria");
+    let llm = ScriptedLlm::new(["ok"], DOSSIER_DEFAULT);
+    self_worker(&store, &llm).tick().await.unwrap();
+    let system = system_text(&llm.calls()[0]);
+    // The subject label comes from the store's identity resolution (the raw
+    // key tail here), filled into the config template's `{display_name}`.
+    assert!(
+        system.starts_with(
+            "You maintain a short, retrieval-friendly dossier about one person (9) — \
+             3-5 sentences."
+        ),
+        "{system}"
+    );
+    assert!(!system.contains("{display_name}"), "{system}");
+}
+
+#[tokio::test]
+async fn overridden_self_header_reaches_the_llm_with_the_name_filled() {
+    let store = store();
+    seed_self_fact(&store, "Sapphire guards her autonomy.", Some(9));
+    let llm = ScriptedLlm::new(["ok"], DOSSIER_DEFAULT);
+    PeopleDossierWorker::new(store.clone(), llm.clone() as Arc<dyn LlmClient>, "fam")
+        .familiar_display_name("Sapphire")
+        .self_system("SELF_MARKER for {self_name}")
+        .other_system("OTHER_MARKER for {display_name}")
+        .tick()
+        .await
+        .unwrap();
+    assert_eq!(system_text(&llm.calls()[0]), "SELF_MARKER for Sapphire");
+}
+
+#[tokio::test]
+async fn overridden_other_header_reaches_the_llm_with_the_name_filled() {
+    let store = store();
+    seed_subject_fact(&store, "Aria likes pho.", "discord:9", "Aria");
+    let llm = ScriptedLlm::new(["ok"], DOSSIER_DEFAULT);
+    PeopleDossierWorker::new(store.clone(), llm.clone() as Arc<dyn LlmClient>, "fam")
+        .familiar_display_name("Sapphire")
+        .self_system("SELF_MARKER for {self_name}")
+        .other_system("OTHER_MARKER for {display_name}")
+        .tick()
+        .await
+        .unwrap();
+    assert_eq!(system_text(&llm.calls()[0]), "OTHER_MARKER for 9");
 }

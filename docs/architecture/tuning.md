@@ -721,6 +721,38 @@ reporting only — nothing trims against it. Token estimates use a fast
 `len(text) / 4` heuristic — no real tokenizer on the hot path;
 sub-microsecond per message.
 
+### Token-count calibration
+
+OpenRouter reports the *true* prompt-token count on every call, so the
+process keeps a running `Σ true / Σ estimated` ratio per model
+(`budget::TokenCalibration`, fed from the `[LLM call]` emit path). It is
+an in-memory, process-lifetime store — no I/O, nothing persisted, and it
+starts empty on every boot. A ratio of totals rather than an EWMA: it
+needs no decay constant and is exact from the very first sample.
+
+The learned ratio is surfaced on the `[LLM call]` line as `cal_ratio`
+(see below) and applied by `budget::estimate_tokens_calibrated(text,
+model)`.
+
+**Calibration only ever revises an estimate upward.** The estimate gates
+client-side trimming *before* a request is sent, so its failure modes are
+asymmetric: over-counting drops slightly more context than strictly
+necessary, while under-counting ships an oversized request the API
+rejects outright. A model whose learned ratio is below `1.0` — meaning it
+tokenizes more cheaply than `len / 4` — therefore gains nothing; its
+estimate stays at the raw heuristic. Ratios above `1.0` apply, capped at
+`4.0`. The cap guards against degenerate samples: multimodal image blocks
+contribute zero characters to the estimate while the provider bills real
+tokens for them, and an uncapped ratio from such a call would silently
+over-trim everything after it. `4.0` still covers the densest legitimate
+case (CJK text, roughly one token per character).
+
+Adoption is partial today. Prompt-assembly layers
+(`src/context/layers.rs`) still trim on the raw estimator, because no
+layer has the target model in scope — `AssemblyContext` does not carry
+one — so there is no key to look the ratio up by. Calibration is
+currently collected and reported, not yet enforced on the assembly path.
+
 Every cap is a hard number. No "auto-fill from a total" — the source
 of truth is `data/familiars/_default/character.toml`, which spells
 out each value per tier. Per-familiar overrides deep-merge over

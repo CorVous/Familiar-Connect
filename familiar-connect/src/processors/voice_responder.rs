@@ -80,6 +80,8 @@ struct VoiceInner {
     tool_filler_phrases: Vec<String>,
     tool_filler_idx: AtomicUsize,
     post_history_instructions: String,
+    mode_instructions: HashMap<String, String>,
+    voice_tool_ack: String,
     display_tz: String,
     focus_manager: Option<Arc<dyn FocusManagerApi>>,
     loop_max_iterations: usize,
@@ -121,6 +123,8 @@ impl VoiceResponder {
                     .collect(),
                 tool_filler_idx: AtomicUsize::new(0),
                 post_history_instructions: String::new(),
+                mode_instructions: HashMap::new(),
+                voice_tool_ack: String::new(),
                 display_tz: "UTC".to_owned(),
                 focus_manager: None,
                 loop_max_iterations: 5,
@@ -159,6 +163,19 @@ impl VoiceResponder {
     #[must_use]
     pub fn with_post_history_instructions(mut self, text: impl Into<String>) -> Self {
         self.inner_mut().post_history_instructions = text.into();
+        self
+    }
+    /// Set the per-mode operating directives (`[prompt].operating_mode_*`);
+    /// the same map `OperatingModeLayer` is built from.
+    #[must_use]
+    pub fn with_mode_instructions(mut self, modes: HashMap<String, String>) -> Self {
+        self.inner_mut().mode_instructions = modes;
+        self
+    }
+    /// Set the voice tool-preamble nudge (`[prompt].voice_tool_ack`).
+    #[must_use]
+    pub fn with_voice_tool_ack(mut self, text: impl Into<String>) -> Self {
+        self.inner_mut().voice_tool_ack = text.into();
         self
     }
     /// Set the trailing-reminder clock timezone.
@@ -381,7 +398,9 @@ impl VoiceInner {
         let mut trailing_b = FinalReminder::new("voice")
             .display_tz(&self.display_tz)
             .include_mode_instruction(true)
+            .mode_instructions(self.mode_instructions.clone())
             .tools_enabled(tool_mode)
+            .voice_tool_ack(&self.voice_tool_ack)
             .post_history_instructions(&self.post_history_instructions);
         if let Some(fm) = &self.focus_manager {
             trailing_b = trailing_b

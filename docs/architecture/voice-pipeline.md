@@ -432,10 +432,20 @@ OpenRouter routing-tax at a glance.
 | `llm.total.<slot>` | request initiation → stream end |
 
 The log line carries `slot`, `model`, `chars` (input payload size),
-`ttfb_ms` / `ttft_ms` / `total_ms`, and — when upstream returns them
+`ttfb_ms` / `ttft_ms` / `total_ms`, `est_in_tokens` (the `chars / 4`
+heuristic's guess), and — when upstream returns them
 via OpenRouter's `usage: { include: true }` flag — `provider`,
 `in_tokens`, `out_tokens`, and `cached` (prompt-cache hit count,
-surfaced when the underlying provider supports it). `voice.stt_to_ttft`
+surfaced when the underlying provider supports it).
+
+`cal_ratio` follows: the model's running `Σ in_tokens / Σ
+est_in_tokens` across this process, including the call being logged.
+It appears once the model has had at least one usage-bearing call, so
+`est_in_tokens` vs `in_tokens` vs `cal_ratio` read together show how
+far the heuristic is off and in which direction. The store behind it is
+described in [tuning § token-count
+calibration](tuning.md#token-count-calibration); note that it only ever
+raises an estimate, never lowers one. `voice.stt_to_ttft`
 covers the full STT-to-LLM-first-token gap; `llm.ttft.<slot>` is the
 LLM-only slice plus headers. Comparing the two isolates assembler /
 network from raw model latency.

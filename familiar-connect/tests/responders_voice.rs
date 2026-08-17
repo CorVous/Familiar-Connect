@@ -26,8 +26,8 @@ use familiar_connect::processors::{MemberResolver, ResponderLlm};
 use familiar_connect::tts_player::MockTTSPlayer;
 
 use support::{
-    CapturingLlm, LogCapture, ScriptedLlm, TestFocusManager, activity_start, make_assembler, store,
-    text_delta, voice_final,
+    CapturingLlm, LogCapture, ScriptedLlm, TestFocusManager, activity_start, default_config,
+    default_modes, make_assembler, store, text_delta, voice_final,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -41,7 +41,10 @@ fn voice_responder(
 ) -> (VoiceResponder, Arc<TurnRouter>) {
     let router = Arc::new(TurnRouter::new());
     let assembler = make_assembler(Arc::clone(&s));
-    let r = VoiceResponder::new(assembler, llm, player, s, Arc::clone(&router), "fam");
+    // Prompt prose is config-sourced; thread the shipped `_default` profile.
+    let r = VoiceResponder::new(assembler, llm, player, s, Arc::clone(&router), "fam")
+        .with_mode_instructions(default_modes())
+        .with_voice_tool_ack(default_config().voice_tool_ack);
     (r, router)
 }
 
@@ -1191,4 +1194,48 @@ async fn dispatcher_unblocked_during_in_flight_final() {
     responder.wait_until_idle().await;
     bus.shutdown().await;
     dispatcher.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Reminder prose is config (#151)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn trailing_voice_directive_matches_the_shipped_default_byte_for_byte() {
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let (r, _) = voice_responder(store(), llm.clone(), Arc::new(MockTTSPlayer::new(1, 5)));
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    let trailing = llm.captured()[0].last().unwrap().content_str();
+    assert!(
+        trailing.contains(
+            "You are speaking aloud. Keep replies short (one or two sentences). \
+             Avoid markdown."
+        ),
+        "{trailing}"
+    );
+}
+
+#[tokio::test]
+async fn overridden_operating_mode_reaches_the_trailing_reminder() {
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let (r, _) = voice_responder(store(), llm.clone(), Arc::new(MockTTSPlayer::new(1, 5)));
+    let r = r.with_mode_instructions(
+        std::iter::once(("voice".to_owned(), "WHISPER_MARKER".to_owned())).collect(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    let trailing = llm.captured()[0].last().unwrap().content_str();
+    assert!(trailing.contains("WHISPER_MARKER"), "{trailing}");
+    assert!(!trailing.contains("You are speaking aloud"), "{trailing}");
 }

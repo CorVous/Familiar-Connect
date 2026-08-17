@@ -120,6 +120,27 @@ Surface today:
   The shipped default is a short roleplay-etiquette note nudging the
   familiar to lean on `<silent>`. See
   [Context pipeline — Final reminder](context-pipeline.md#final-reminder).
+- `[prompt].operating_mode_voice` / `.operating_mode_text` — the per-mode
+  operating directive. **One source for two consumers**: the
+  `operating_mode` system-prompt layer and the trailing final reminder,
+  which restates it for recency. No in-code copy exists, so the two
+  cannot drift; a blank value drops the directive from both.
+- `[prompt].voice_tool_ack` — voice-tier nudge to speak before calling a
+  tool. Rendered only when the voice slot actually has tool calling; blank
+  omits it. See [Overview — voice tool ordering](overview.md#tool-calling).
+- `[prompt].start_activity_description` — the when-to-go policy carried by
+  the `start_activity` tool description. Roleplay guidance rather than API
+  contract, so it is config; the activity enum and its availability hints
+  stay code-built from the catalog. Keep it under ~450 characters — it
+  rides in every text-tier tool schema.
+- `[prompt].rolling_summary_system`, `reflection_system`,
+  `dossier_self_system`, `dossier_other_system` — static instruction text
+  for the memory projectors (rolling summary, reflection, self-record and
+  other-person dossiers). The window data (turns, facts, prior text,
+  importance annotations) and the reflection reply contract are assembled
+  in code; only the wording is configurable. Placeholders:
+  `dossier_self_system` takes `{self_name}`, `dossier_other_system` takes
+  `{display_name}`.
 - `[prompt].sleep_consolidation_system`, `sleep_stance_system`,
   `sleep_synthesis_system`, `dream_extraction_clause` — static
   instruction text for the sleep passes and the fact-extractor's

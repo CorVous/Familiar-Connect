@@ -10,9 +10,9 @@
     clippy::significant_drop_tightening
 )]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,6 +27,7 @@ use familiar_connect::bus::protocols::{BackpressurePolicy, EventBus};
 use familiar_connect::bus::topics::{
     TOPIC_DISCORD_TEXT, TOPIC_VOICE_ACTIVITY_START, TOPIC_VOICE_TRANSCRIPT_FINAL,
 };
+use familiar_connect::config::{CharacterConfig, load_character_config};
 use familiar_connect::context::{Assembler, CharacterCardLayer, RecentHistoryLayer};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
@@ -62,6 +63,45 @@ pub fn make_card() -> PathBuf {
 }
 
 /// An assembler with a character-card layer + a recent-history slot (window 20).
+/// The shipped `_default/character.toml`, loaded as a `CharacterConfig`.
+///
+/// Reminder prose has no in-code default (#151); production threads the merged
+/// config, so the fixtures thread the shipped profile.
+#[must_use]
+pub fn default_config() -> CharacterConfig {
+    let profile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml");
+    let projectors: BTreeSet<String> = [
+        "rolling_summary",
+        "rich_note",
+        "people_dossier",
+        "reflection",
+        "fact_supersede",
+        "fact_embedding",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    let embedders: BTreeSet<String> = ["off", "hash", "fastembed"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    load_character_config(&profile, &profile, &projectors, &embedders)
+        .expect("load the shipped default profile")
+}
+
+/// The shipped per-mode operating directives, keyed by viewer mode.
+#[must_use]
+pub fn default_modes() -> HashMap<String, String> {
+    let cfg = default_config();
+    [
+        ("voice".to_owned(), cfg.operating_mode_voice),
+        ("text".to_owned(), cfg.operating_mode_text),
+    ]
+    .into_iter()
+    .collect()
+}
+
 pub fn make_assembler(store: Arc<AsyncHistoryStore>) -> Arc<Assembler> {
     let card = make_card();
     Arc::new(

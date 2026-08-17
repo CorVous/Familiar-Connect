@@ -42,6 +42,7 @@ pub struct ReflectionWorker {
     max_turns_per_tick: usize,
     recent_facts_limit: i64,
     tick_interval: Duration,
+    persona: String,
 }
 
 impl ReflectionWorker {
@@ -64,6 +65,7 @@ impl ReflectionWorker {
             max_turns_per_tick: 50,
             recent_facts_limit: 20,
             tick_interval: Duration::from_secs_f64(60.0),
+            persona: String::new(),
         }
     }
 
@@ -99,6 +101,14 @@ impl ReflectionWorker {
     #[must_use]
     pub fn tick_interval_s(mut self, secs: f64) -> Self {
         self.tick_interval = Duration::from_secs_f64(secs);
+        self
+    }
+
+    /// Persona prose for the reflection writer (`[prompt].reflection_system`).
+    /// The reply contract is appended in code and is not overridable.
+    #[must_use]
+    pub fn persona(mut self, text: impl Into<String>) -> Self {
+        self.persona = text.into();
         self
     }
 
@@ -190,7 +200,7 @@ impl ReflectionWorker {
             .await?;
 
         let schema = reflection_schema(self.max_per_tick);
-        let prompt = build_reflection_prompt(&new_turns, &recent_facts, &schema);
+        let prompt = build_reflection_prompt(&self.persona, &new_turns, &recent_facts, &schema);
         let result =
             request_structured(self.llm.as_ref(), &prompt, &schema, DEFAULT_MAX_RETRIES).await?;
         let items = normalize_reflection_items(result.value.as_ref());
@@ -304,16 +314,13 @@ fn reflection_schema(max_reflections: i64) -> Schema {
     .with_empty_note("If nothing of substance is happening, reply with [].")
 }
 
+/// Persona prose (config) plus the code-rendered reply contract.
 fn build_reflection_prompt(
+    persona: &str,
     new_turns: &[HistoryTurn],
     recent_facts: &[Fact],
     schema: &Schema,
 ) -> Vec<Message> {
-    let persona = "You write short, high-level reflections over recent chat \
-        history — patterns, recurring tensions, open questions, \
-        themes the participants keep circling back to. Skip blow-by-\
-        blow recaps; that's what summaries are for. Each reflection \
-        is one or two sentences.";
     let header = format!("{persona}\n\n{}", render_contract(schema));
     let mut lines: Vec<String> = vec!["Recent turns (id prefixed):".to_string()];
     for t in new_turns {
@@ -484,7 +491,7 @@ mod tests {
         let turns = [named, none_dn, role_only];
         let facts: Vec<Fact> = Vec::new();
         let schema = reflection_schema(3);
-        let body = build_reflection_prompt(&turns, &facts, &schema)[1].content_str();
+        let body = build_reflection_prompt("", &turns, &facts, &schema)[1].content_str();
         // display_name present → the name; author present + display_name None
         // → literal "None"; author None → role.
         assert!(body.contains("[Cass] m1"), "{body}");

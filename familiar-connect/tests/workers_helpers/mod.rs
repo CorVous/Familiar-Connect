@@ -3,10 +3,12 @@
 //! binary itself.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use familiar_connect::config::{CharacterConfig, load_character_config};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
 use familiar_connect::llm::{LlmClient, Message};
@@ -122,4 +124,33 @@ pub fn user_text(messages: &[Message]) -> String {
         .find(|m| m.role == "user")
         .map(Message::content_str)
         .unwrap_or_default()
+}
+
+// --- config fixtures (the `_default` prose thread-through tests) ------------
+
+/// The shipped `_default/character.toml`, loaded as a `CharacterConfig`.
+///
+/// Worker prompt text has no in-code default; these tests assert the shipped
+/// profile still produces today's wording.
+#[must_use]
+pub fn default_config() -> CharacterConfig {
+    let profile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml");
+    let projectors: BTreeSet<String> = [
+        "rolling_summary",
+        "rich_note",
+        "people_dossier",
+        "reflection",
+        "fact_supersede",
+        "fact_embedding",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    let embedders: BTreeSet<String> = ["off", "hash", "fastembed"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    load_character_config(&profile, &profile, &projectors, &embedders)
+        .expect("load the shipped default profile")
 }
