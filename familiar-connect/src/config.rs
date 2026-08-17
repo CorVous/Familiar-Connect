@@ -870,7 +870,7 @@ fn parse_character_config(
 
     let display_tz = data
         .get("display_tz")
-        .map_or_else(|| "UTC".to_owned(), py_str);
+        .map_or_else(|| "UTC".to_owned(), value_str);
     if display_tz.parse::<chrono_tz::Tz>().is_err() {
         return Err(ConfigError(format!(
             "invalid display_tz '{display_tz}' — use an IANA name like 'America/Los_Angeles'"
@@ -882,11 +882,11 @@ fn parse_character_config(
 
     let aliases = match data.get("aliases") {
         None => Vec::new(),
-        Some(Value::Array(arr)) => arr.iter().map(py_str).collect(),
+        Some(Value::Array(arr)) => arr.iter().map(value_str).collect(),
         Some(other) => {
             return Err(ConfigError(format!(
                 "aliases must be a list of strings, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -912,7 +912,7 @@ fn parse_character_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[llm].max_concurrent_requests must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -964,7 +964,7 @@ fn parse_character_config(
                     other => {
                         return Err(ConfigError(format!(
                             "[discord].dm_allowlist entries must be integer user IDs, got {}",
-                            py_type_name(other)
+                            value_type_name(other)
                         )));
                     }
                 }
@@ -974,7 +974,7 @@ fn parse_character_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[discord].dm_allowlist must be a list of integer user IDs, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1031,7 +1031,7 @@ pub fn parse_hhmm_range(value: &Value, key: &str) -> Result<(NaiveTime, NaiveTim
     let err = || {
         ConfigError(format!(
             "{key} must be 'HH:MM-HH:MM' (may wrap midnight, start != end), got {}",
-            py_repr(value)
+            value_repr(value)
         ))
     };
     let Some(s) = value.as_str() else {
@@ -1081,7 +1081,7 @@ fn empty_table() -> &'static Table {
     LazyLock::force(&EMPTY_TABLE)
 }
 
-const fn py_type_name(v: &Value) -> &'static str {
+const fn value_type_name(v: &Value) -> &'static str {
     match v {
         Value::String(_) => "str",
         Value::Integer(_) => "int",
@@ -1117,7 +1117,7 @@ fn fmt_g(x: f64) -> String {
     }
 }
 
-fn py_repr(v: &Value) -> String {
+fn value_repr(v: &Value) -> String {
     match v {
         Value::String(s) => format!("'{s}'"),
         Value::Integer(n) => n.to_string(),
@@ -1129,14 +1129,14 @@ fn py_repr(v: &Value) -> String {
     }
 }
 
-fn py_str(v: &Value) -> String {
+fn value_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Integer(n) => n.to_string(),
         Value::Float(f) => fmt_num(*f),
         Value::Boolean(b) => (if *b { "True" } else { "False" }).to_owned(),
         Value::Datetime(d) => d.to_string(),
-        other => py_repr(other),
+        other => value_repr(other),
     }
 }
 
@@ -1156,7 +1156,7 @@ fn expect_table<'a>(value: Option<&'a Value>, label: &str) -> Result<&'a Table, 
         Some(Value::Table(t)) => Ok(t),
         Some(other) => Err(ConfigError(format!(
             "{label} must be a table, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1214,7 +1214,7 @@ fn field_int(raw: &Table, prefix: &str, key: &str, default: i64) -> Result<i64, 
         Some(Value::Integer(n)) => Ok(*n),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be an integer, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1226,7 +1226,7 @@ fn field_number(raw: &Table, prefix: &str, key: &str, default: f64) -> Result<f6
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1237,7 +1237,7 @@ fn field_bool(raw: &Table, prefix: &str, key: &str, default: bool) -> Result<boo
         Some(Value::Boolean(b)) => Ok(*b),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a bool, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1265,7 +1265,7 @@ fn positive_int(
             };
             Err(ConfigError(format!(
                 "{prefix}.{key} must be {kind}, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )))
         }
     }
@@ -1285,7 +1285,7 @@ fn positive_float(prefix: &str, raw: &Table, key: &str, default: f64) -> Result<
         ))),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1306,7 +1306,7 @@ fn parse_sleep_config(raw: &Table) -> Result<(Option<(NaiveTime, NaiveTime)>, i6
         Some(other) => {
             return Err(ConfigError(format!(
                 "[sleep].grace_minutes must be a positive integer, got {}",
-                py_repr(other)
+                value_repr(other)
             )));
         }
     };
@@ -1344,7 +1344,7 @@ fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "[providers.history].coalesce_max_gap_seconds must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1365,7 +1365,7 @@ fn parse_text_silence(raw: &Table) -> Result<f64, ConfigError> {
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "[providers.history].text_silence_gap_fold_seconds must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1395,7 +1395,7 @@ fn parse_ranged_float(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[llm.{slot}].{key} must be a number, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1425,7 +1425,7 @@ fn parse_provider_order(
                     other => {
                         return Err(ConfigError(format!(
                             "[llm.{slot}].provider_order entries must be non-empty strings, got {}",
-                            py_repr(other)
+                            value_repr(other)
                         )));
                     }
                 }
@@ -1434,7 +1434,7 @@ fn parse_provider_order(
         }
         Some(other) => Err(ConfigError(format!(
             "[llm.{slot}].provider_order must be a list of strings, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1455,7 +1455,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[llm.{name}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let model = match section.get("model") {
@@ -1473,7 +1473,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].temperature must be a number, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1485,7 +1485,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].top_k must be a positive integer, got {}",
-                    py_repr(other)
+                    value_repr(other)
                 )));
             }
         };
@@ -1512,7 +1512,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].reasoning must be a string, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1547,7 +1547,7 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
         Some(other) => {
             return Err(ConfigError(format!(
                 "[tts].provider must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1559,11 +1559,11 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
     }
     let greetings = match raw.get("greetings") {
         None => Vec::new(),
-        Some(Value::Array(arr)) => arr.iter().map(py_str).collect(),
+        Some(Value::Array(arr)) => arr.iter().map(value_str).collect(),
         Some(other) => {
             return Err(ConfigError(format!(
                 "[tts].greetings must be a list of strings, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1621,7 +1621,7 @@ fn parse_channel_overrides(raw: &Table) -> Result<BTreeMap<i64, ChannelOverrides
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[channels.{key}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let history_window_size = match section.get("history_window_size") {
@@ -1635,7 +1635,7 @@ fn parse_channel_overrides(raw: &Table) -> Result<BTreeMap<i64, ChannelOverrides
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[channels.{key}].history_window_size must be an integer, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1689,7 +1689,7 @@ fn parse_turn_detection_config(raw: &Table) -> Result<TurnDetectionConfig, Confi
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.turn_detection].strategy must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1738,7 +1738,7 @@ fn parse_stt_config(raw: &Table) -> Result<STTConfig, ConfigError> {
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.stt].backend must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1840,7 +1840,7 @@ fn mem_pos_int(section: &Table, name: &str, key: &str, default: i64) -> Result<i
         ))),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}].{key} must be a positive integer, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1859,7 +1859,7 @@ fn mem_pos_float(section: &Table, name: &str, key: &str, default: f64) -> Result
         ))),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}].{key} must be a positive number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1870,7 +1870,7 @@ fn worker_section<'a>(raw: &'a Table, name: &str) -> Result<&'a Table, ConfigErr
         Some(Value::Table(t)) => Ok(t),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}] must be a table, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -2082,7 +2082,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].backend must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2103,7 +2103,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2113,7 +2113,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].fastembed_model must be a non-empty string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2129,7 +2129,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].fastembed_cache_dir must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2155,7 +2155,7 @@ fn parse_budgets(raw: &Table) -> Result<BTreeMap<String, TierBudget>, ConfigErro
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[budget.{tier}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let default = out.get(tier).copied().unwrap_or_default();
@@ -2179,7 +2179,7 @@ fn parse_tier_budget(
             ))),
             Some(other) => Err(ConfigError(format!(
                 "[budget.{tier}].{key} must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };
@@ -2223,7 +2223,7 @@ fn parse_budget_curves(raw: &Table) -> Result<BTreeMap<String, ModelBudgetCurve>
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[budget.model_curves.'{model_name}'] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         check_unknown_keys(
@@ -2239,7 +2239,7 @@ fn parse_budget_curves(raw: &Table) -> Result<BTreeMap<String, ModelBudgetCurve>
                 other => {
                     return Err(ConfigError(format!(
                         "[budget.model_curves.'{model_name}'].{key} must be a positive number, got {}",
-                        py_type_name(other)
+                        value_type_name(other)
                     )));
                 }
             };
@@ -2318,7 +2318,7 @@ fn parse_prompt_config(raw: &Table) -> Result<PromptFields, ConfigError> {
             Some(Value::String(s)) => Ok(s.trim().to_owned()),
             Some(other) => Err(ConfigError(format!(
                 "[prompt].{key} must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };
@@ -2352,7 +2352,7 @@ fn parse_memory_retrieval(raw: &Table) -> Result<MemoryRetrievalConfig, ConfigEr
             Some(Value::Float(f)) => Ok(*f),
             Some(other) => Err(ConfigError(format!(
                 "[memory.retrieval].{key} must be a non-negative number, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };

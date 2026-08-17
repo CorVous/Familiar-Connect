@@ -329,7 +329,7 @@ impl FactExtractor {
                 source_ids = fallback;
             }
             let channel_id = channel_ids.get(&source_ids[0]).copied();
-            let mut text = py_str(&fact.text).trim().to_string();
+            let mut text = json_value_str(&fact.text).trim().to_string();
             if text.is_empty() {
                 continue;
             }
@@ -766,7 +766,7 @@ fn title_case(s: &str) -> String {
 }
 
 /// Stringify the JSON `text` field (identity on strings).
-fn py_str(v: &Value) -> String {
+fn json_value_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => "None".to_string(),
@@ -905,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn title_case_matches_python() {
+    fn title_case_uppercases_each_run() {
         assert_eq!(title_case("fam"), "Fam");
         assert_eq!(title_case("my-fam"), "My-Fam");
     }

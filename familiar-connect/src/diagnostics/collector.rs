@@ -130,7 +130,7 @@ impl SpanCollector {
 /// Linear-interpolated percentile over pre-sorted values.
 ///
 /// `rank = pct/100 * (n-1)`; empty → 0.0; single value → that value. Ported once
-/// and shared with `commands::diagnose` (spec 01 §24, §44).
+/// and shared with `commands::diagnose`.
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // values/indices are bounded (<= ring size)
 pub fn percentile(sorted_values: &[i64], pct: u32) -> f64 {
@@ -157,7 +157,7 @@ pub fn percentile(sorted_values: &[i64], pct: u32) -> f64 {
 // process-wide singleton
 // ---------------------------------------------------------------------------
 
-/// Default ring capacity (spec 01 § Config knobs).
+/// Default ring capacity.
 const DEFAULT_MAXLEN: usize = 2000;
 
 static COLLECTOR: Mutex<Option<Arc<SpanCollector>>> = Mutex::new(None);

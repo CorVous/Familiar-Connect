@@ -197,7 +197,7 @@ async fn leaked_nonsilent_call_stripped_not_silent() {
 }
 
 #[tokio::test]
-async fn python_style_leaked_silent_becomes_silent() {
+async fn call_style_leaked_silent_becomes_silent() {
     let leak = "silent(reasoning=\"not addressed to me; general chat\")";
     let mut msgs = vec![user("hi")];
     let result = run(
@@ -211,7 +211,7 @@ async fn python_style_leaked_silent_becomes_silent() {
 }
 
 #[tokio::test]
-async fn python_style_leaked_silent_case_insensitive() {
+async fn call_style_leaked_silent_case_insensitive() {
     let leak = "Silent(reasoning=\"sports chat, not aimed at me\")";
     let mut msgs = vec![user("hi")];
     let result = run(
@@ -225,7 +225,7 @@ async fn python_style_leaked_silent_case_insensitive() {
 }
 
 #[tokio::test]
-async fn python_style_leaked_read_channel_stripped_not_silent() {
+async fn call_style_leaked_read_channel_stripped_not_silent() {
     let mut msgs = vec![user("hi")];
     let result = run(
         vec![vec![

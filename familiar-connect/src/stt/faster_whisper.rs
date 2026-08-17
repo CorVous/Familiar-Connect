@@ -11,8 +11,8 @@
 //! `clone()`.
 //!
 //! No Rust CTranslate2/faster-whisper runtime is wired; the replacement engine
-//! (whisper-rs / sherpa-onnx behind the same contract, DESIGN §6 / spec 09
-//! F.43–46) has not been chosen, so the `local-stt` feature carries no engine
+//! (whisper-rs / sherpa-onnx behind the same contract) has not been chosen,
+//! so the `local-stt` feature carries no engine
 //! yet. Until one lands, [`crate::stt::factory::create_transcriber`] degrades a
 //! `faster_whisper` selection with
 //! [`crate::stt::SttError::LocalSttUnavailable`]. When an engine is picked, the

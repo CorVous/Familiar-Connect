@@ -6,8 +6,8 @@
 //! [`TierBudget::total_tokens`] is a *derived* sum of the per-section token caps,
 //! for reporting only — nothing trims against it.
 //!
-//! Token accounting uses the fast `len(text)/4` heuristic (DESIGN §4.9,
-//! chars-per-token 4) — no real tokenizer on the hot path; it slightly
+//! Token accounting uses the fast `len(text)/4` heuristic (chars-per-token
+//! 4) — no real tokenizer on the hot path; it slightly
 //! over-counts (safer for budgets). `len` counts **Unicode scalars**, not bytes.
 //!
 //! This is a leaf module: it names [`crate::llm::Message`] but pulls in nothing

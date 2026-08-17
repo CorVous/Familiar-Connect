@@ -7,7 +7,7 @@
 //! sub.put(ev).await }`), so a full `BLOCK` subscriber back-pressures the
 //! publisher and delays delivery to later-registered subscribers — this
 //! head-of-line coupling is test-pinned. A `Drop` on the [`Subscription`]
-//! handle unsubscribes (D7) without changing observable semantics.
+//! handle unsubscribes without changing observable semantics.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -228,7 +228,7 @@ impl Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         // Unsubscribe: mark closed so later `publish`es to this subscription are
-        // silently dropped and its queue stops accumulating (D7).
+        // silently dropped and its queue stops accumulating.
         self.handle.closed.cancel();
     }
 }
@@ -295,7 +295,7 @@ impl EventBus for InProcessEventBus {
 
     async fn publish(&self, event: Event) {
         // Refused only when STOPPED; publishing while STARTING/DRAINING is allowed
-        // (lifecycle is bookkeeping, not a gate — spec 01 §2).
+        // (lifecycle is bookkeeping, not a gate).
         if self.lifecycle() == Lifecycle::Stopped {
             warn!(target: "familiar_connect.bus.bus", "publish after stop: topic={}", event.topic);
             return;

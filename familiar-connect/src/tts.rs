@@ -754,7 +754,7 @@ impl Drop for RealCartesiaConn {
         // path reaching `close()`: close gracefully by
         // handing the still-open socket to a detached task that sends a graceful
         // Close (1000). Without this the server only ever observes an abnormal
-        // 1006 (DESIGN TtsStream drop contract). If `close()` already
+        // 1006. If `close()` already
         // ran the socket is gone and this is a no-op.
         let Some(mut ws) = self.ws.take() else {
             return;

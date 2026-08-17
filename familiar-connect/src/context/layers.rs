@@ -7,8 +7,7 @@
 //!
 //! Store access goes through the async facade (`build` and `invalidation_key` are
 //! both `async` so neither blocks the reactor). All truncation caps
-//! count Unicode scalars via a `limit-1 + "…"` helper (DESIGN §4.9, spec 05 port
-//! notes); chars-per-token is 4.
+//! count Unicode scalars via a `limit-1 + "…"` helper; chars-per-token is 4.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -81,7 +80,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 /// Short content hash of a file (BLAKE2b, 8-byte digest); `"missing"` when the
 /// file is absent or unreadable. Content-based, not mtime — sub-second edits
-/// flip the key (behavior 7).
+/// flip the key.
 fn content_hash(path: &Path) -> String {
     std::fs::read(path).map_or_else(
         |_| "missing".to_owned(),
@@ -463,8 +462,8 @@ async fn reply_prefix_body(
     }
 }
 
-/// Render one [`HistoryTurn`] into an LLM [`Message`] with all enrichment
-/// (behaviors 13–17). `pub(crate)` so subsystem 06 can reuse it.
+/// Render one [`HistoryTurn`] into an LLM [`Message`] with all enrichment.
+/// `pub(crate)` so subsystem 06 can reuse it.
 pub(crate) async fn turn_to_message_with_context(
     store: &AsyncHistoryStore,
     turn: &HistoryTurn,
@@ -562,7 +561,7 @@ impl RecentHistoryLayer {
     }
 
     /// Always the empty string — this slot contributes to `recent_history`, not
-    /// the system prompt (behavior 19).
+    /// the system prompt.
     #[allow(
         clippy::unused_async,
         reason = "mirrors the layer build contract; the slot opts out of the system prompt"
@@ -572,7 +571,7 @@ impl RecentHistoryLayer {
     }
 
     /// The last `window_size` turns of the consumed cross-channel stream as LLM
-    /// messages (behaviors 9–18).
+    /// messages.
     pub async fn recent_messages(&self, ctx: &AssemblyContext) -> Vec<Message> {
         let mut turns = self
             .store
@@ -1098,8 +1097,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     dot / (na * nb).sqrt()
 }
 
-/// Fuse BM25 / recency / importance / embedding signals into one rank
-/// (behavior 31); each signal is normalized to `[0, 1]` within the batch.
+/// Fuse BM25 / recency / importance / embedding signals into one rank;
+/// each signal is normalized to `[0, 1]` within the batch.
 fn rerank_fact_candidates(
     scored: Vec<(Fact, f32)>,
     limit: i64,
@@ -1175,7 +1174,7 @@ fn rerank_fact_candidates(
     ranked.into_iter().take(keep).map(|(_, _, f)| f).collect()
 }
 
-/// Render one fact line with optional rename annotations (behavior 33).
+/// Render one fact line with optional rename annotations.
 async fn render_fact_line(
     store: &AsyncHistoryStore,
     familiar_id: &str,
@@ -1221,7 +1220,7 @@ async fn render_fact_line(
     }
 }
 
-/// Cap RAG fact + turn lines together; facts win ties (behavior 35).
+/// Cap RAG fact + turn lines together; facts win ties.
 fn trim_rag_lines_to_tokens(
     fact_lines: Vec<String>,
     turn_lines: Vec<String>,
@@ -1335,7 +1334,7 @@ impl RagContextLayer {
     }
 
     /// Retrieve the fact results for `cue` — BM25-only (default) or the
-    /// over-fetch-and-rerank path when any non-BM25 weight is set (behavior 30).
+    /// over-fetch-and-rerank path when any non-BM25 weight is set.
     async fn retrieve_facts(&self, ctx: &AssemblyContext, cue: &str) -> Vec<Fact> {
         if !self.rerank_facts() {
             return self
@@ -2087,7 +2086,7 @@ mod tests {
     // Word boundaries fall
     // on cased characters only, so a letter after a digit begins a new word.
     #[test]
-    fn title_case_matches_python_str_title() {
+    fn title_case_word_boundaries_are_cased_chars() {
         assert_eq!(title_case("familiar"), "Familiar");
         assert_eq!(title_case("agent007bond"), "Agent007Bond");
         assert_eq!(title_case("3cats"), "3Cats");

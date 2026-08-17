@@ -1416,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn keyterm_space_encodes_as_plus_like_python_quote_plus() {
+    fn keyterm_space_encodes_as_plus() {
         // `quote_plus` renders a space as `+`, not `%20`; the produced URL string
         // is byte-pinned by this test.
         let mut c = DeepgramTranscriber::new("test-key");
@@ -1647,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_speaker_coerces_float_and_string_like_python_int() {
+    fn parse_speaker_coerces_float_and_string() {
         // `int(words[0]["speaker"])` coerces a JSON float (truncating
         // toward zero) and a JSON string; mirror both.
         let float_speaker = serde_json::json!({
@@ -1706,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_finalize_delay_matches_python() {
+    fn replay_finalize_delay_is_replay_plus_cushion() {
         // 48000 bytes at 48 kHz mono s16le == 0.5 s; delay = replay + cushion.
         let replay_s = replay_seconds(48000, 48000, 1);
         assert_eq!(replay_s, 0.5);

@@ -2,13 +2,13 @@
 //!
 //! Two independent focus pointers (text, voice). Focus shifts are model-decided
 //! (via the `shift_focus` tool) and applied immediately at tool-call time —
-//! no deferral (behavior 50; `end_turn` is a no-op). An unread nudge fires when
+//! no deferral (`end_turn` is a no-op). An unread nudge fires when
 //! a non-focused channel receives traffic, throttled by a debounce window with
 //! an injectable clock.
 //!
 //! A single [`std::sync::Mutex`] guards the focus state — this also closes
 //! the
-//! benign cross-modal double-pointer persist race (behavior 49). `on_shift` is
+//! benign cross-modal double-pointer persist race. `on_shift` is
 //! invoked outside the lock. The store dependency is a narrow [`FocusStore`]
 //! trait so tests inject a scripted double.
 
@@ -106,7 +106,7 @@ impl FocusStore for AsyncHistoryStore {
     }
 }
 
-/// Interior mutable focus state (single-mutex design; DESIGN port notes).
+/// Interior mutable focus state (single-mutex design).
 struct FocusState {
     text_focus: Option<i64>,
     voice_focus: Option<i64>,
@@ -337,7 +337,7 @@ impl FocusManager {
         }
     }
 
-    /// Whether a non-focused arrival warrants a nudge (behavior 51).
+    /// Whether a non-focused arrival warrants a nudge.
     #[must_use]
     pub fn should_wake(&self, channel_id: i64) -> bool {
         if !self.unread_nudge_enabled {
@@ -358,7 +358,7 @@ impl FocusManager {
         self.state.lock().expect("focus state mutex").last_nudge = now;
     }
 
-    /// Responder end-of-turn hook — intentionally a no-op (behavior 50).
+    /// Responder end-of-turn hook — intentionally a no-op.
     #[allow(
         clippy::unused_async,
         reason = "kept async so both responders can await it uniformly"

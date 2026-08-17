@@ -7,7 +7,7 @@
 //! the store's single owning actor thread (see [`super::db`]), so this only
 //! ensures the *await* never blocks a reactor worker.
 //!
-//! ## Ordering / concurrency (spec 03 behaviors 2–3)
+//! ## Ordering / concurrency
 //!
 //! Every SQL statement still serializes onto the one DB actor thread; multiple
 //! concurrent `spawn_blocking` tasks may run tantivy searches in genuine
@@ -18,7 +18,7 @@
 //!
 //! Cancelling an awaiting caller drops the `JoinHandle` but leaves the dispatched
 //! blocking job running to completion (standard `spawn_blocking` semantics),
-//! preserving at-most-once execution (behavior 6).
+//! preserving at-most-once execution.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

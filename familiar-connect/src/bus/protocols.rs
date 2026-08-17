@@ -33,7 +33,7 @@ pub enum BackpressurePolicy {
 
 impl BackpressurePolicy {
     /// Every policy variant, in declaration order. Pins "exactly these four
-    /// policies exist" (spec 01, `test_bus_protocols`).
+    /// policies exist".
     pub const ALL: [Self; 4] = [
         Self::Block,
         Self::DropOldest,

@@ -1,6 +1,6 @@
 //! Embedder factory registry + `known_embedders` (subsystem 04).
 //!
-//! DESIGN D14 / §4.8: explicit [`EmbedderRegistry::with_builtins`] builder plus
+//! An explicit [`EmbedderRegistry::with_builtins`] builder plus
 //! [`EmbedderRegistry::register`], **not** an import-time global dict. Names are
 //! kept sorted (a `BTreeMap`) and the error strings are byte-exact so config
 //! validation (02, which consults [`known_embedders`]) and the tests match on

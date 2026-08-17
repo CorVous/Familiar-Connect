@@ -236,7 +236,7 @@ mod client {
     /// OpenRouter chat-completions base URL.
     pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-    // Retry / concurrency / transport constants (spec 08 § Config knobs).
+    // Retry / concurrency / transport constants.
     const MAX_RETRIES: u32 = 4;
     const BASE_DELAY_S: f64 = 1.0;
     const MAX_DELAY_S: f64 = 30.0;
@@ -305,7 +305,7 @@ mod client {
 
     /// Decode one SSE `data` payload into a JSON object. `None` for `[DONE]`,
     /// blanks, non-JSON, non-object, or a top-level `error` frame (which is
-    /// logged at WARNING and skipped — spec 08 §13).
+    /// logged at WARNING and skipped).
     fn parse_sse_json(data: &str) -> Option<Value> {
         let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
@@ -449,7 +449,7 @@ mod client {
         }
 
         /// Records per-phase spans into the collector and one structured `[LLM
-        /// call]` INFO line (spec 01 §31). Both are wire contracts. Collector
+        /// call]` INFO line. Both are wire contracts. Collector
         /// failures are suppressed (poison-safe).
         #[allow(clippy::similar_names)] // ttfb_ms / ttft_ms are the wire keys
         fn emit(&self) {
@@ -961,7 +961,7 @@ mod client {
         }
 
         /// Build the OpenRouter request body from `messages` (+ optional
-        /// `tools`), applying every knob per spec 08 §7–11.
+        /// `tools`), applying every configured knob.
         #[must_use]
         pub fn build_payload(&self, messages: &[Message], tools: Option<&[Value]>) -> Value {
             let msgs: Vec<Value> = messages.iter().map(Message::to_dict).collect();
@@ -1352,8 +1352,8 @@ mod client {
     ///
     /// Plus a reserved `"__image_description__"` client when
     /// `image_description_model` is set. All clients share ONE injected
-    /// rate-limit semaphore sized from `[llm].max_concurrent_requests` (spec 08
-    /// §22). A missing slot is an `Err`.
+    /// rate-limit semaphore sized from `[llm].max_concurrent_requests`.
+    /// A missing slot is an `Err`.
     pub fn create_llm_clients(
         api_key: &str,
         config: &CharacterConfig,

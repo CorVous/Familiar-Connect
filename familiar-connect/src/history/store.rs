@@ -39,7 +39,7 @@ pub const FOCUS_STREAM_CHANNEL_ID: i64 = -1;
 /// ActivityEngine.
 const DEFAULT_CATCH_UP_LIMIT: usize = 20;
 
-/// Promotion `UPDATE ... WHERE id IN (...)` chunk size (SQLite param cap).
+/// Promotion `UPDATE... WHERE id IN (...)` chunk size (SQLite param cap).
 const STAMP_CHUNK: usize = 500;
 
 const TURN_COLS: &str = "id, timestamp, role, author_platform, author_user_id, \
@@ -765,7 +765,7 @@ fn placeholders(n: usize) -> String {
     vec!["?"; n].join(",")
 }
 
-/// Deterministic key for near-duplicate fact detection (behavior 26).
+/// Deterministic key for near-duplicate fact detection.
 fn normalize_fact_text(text: &str) -> String {
     let collapsed = text
         .to_lowercase()
@@ -883,7 +883,7 @@ fn subjects_to_json(subjects: &[FactSubject]) -> Option<String> {
     Some(serde_json::Value::Array(arr).to_string())
 }
 
-/// SQL fragment + params for the `facts` validity filter (behavior 28). `now`
+/// SQL fragment + params for the `facts` validity filter. `now`
 /// is captured per call so lexicographic text comparison stays chronological.
 fn facts_validity_where(
     include_superseded: bool,
@@ -1128,8 +1128,8 @@ impl HistoryStore {
 
     // -- turns -----------------------------------------------------------
 
-    /// Append a single turn; return its persisted form. Note the QUIRK
-    /// (behavior 11): the returned value leaves `guild_id` /
+    /// Append a single turn; return its persisted form. Note the QUIRK:
+    /// the returned value leaves `guild_id` /
     /// `platform_message_id` / `reply_to_message_id` at `None` even when
     /// persisted — callers that need them re-read.
     pub fn append_turn(&self, p: AppendTurn) -> Result<HistoryTurn, StoreError> {
@@ -1931,7 +1931,7 @@ impl HistoryStore {
     ///   still at watermark `w`. Zero rows affected means a concurrent supersede
     ///   deleted it (or another writer already moved the watermark); the write
     ///   is dropped and the next tick rebuilds cleanly from `prior = None`.
-    /// - `None` — no prior at read time: `INSERT ... ON CONFLICT DO NOTHING`, so
+    /// - `None` — no prior at read time: `INSERT... ON CONFLICT DO NOTHING`, so
     ///   a racing writer that already created the row is not clobbered.
     ///
     /// Returns whether the write landed.
@@ -2360,7 +2360,7 @@ impl HistoryStore {
             .collect())
     }
 
-    /// Unified mutation: retire, merge, or repoint obsolete facts (behavior 31).
+    /// Unified mutation: retire, merge, or repoint obsolete facts.
     pub fn supersede(
         &self,
         familiar_id: &str,
@@ -3600,7 +3600,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_subjects_coerces_non_string_values_like_python_str() {
+    fn parse_subjects_coerces_non_string_values() {
         // Keep any object with BOTH keys, coercing each via
         // `str(...)`; only non-dict items or items missing a key are dropped.
         let blob = "[{\"canonical_key\": \"discord:1\", \"display_at_write\": \"Cor\"}, \

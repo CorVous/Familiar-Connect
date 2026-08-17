@@ -9,7 +9,7 @@
 //!
 //! The assembler uses **explicit slots**, not `isinstance` downcasting:
 //! recent-history is a distinct slot (not a `Layer`), and the RAG cue is routed
-//! through an explicit handle. The layer-order pin (behavior 6) therefore
+//! through an explicit handle. The layer-order pin therefore
 //! applies to the system-prompt layer `Vec` only.
 
 use std::collections::HashMap;
@@ -106,7 +106,7 @@ impl Assembler {
 
     /// Compose the system prompt + recent history for `ctx`.
     ///
-    /// See behaviors 1–5: layers iterate in construction order, each cached on
+    /// Layers iterate in construction order, each cached on
     /// `(name, invalidation_key)`; non-empty texts join with `"\n\n"`; the
     /// recent-history slot (if present) yields `recent_history`.
     pub async fn assemble(&self, ctx: &AssemblyContext) -> AssembledPrompt {
@@ -156,7 +156,7 @@ pub struct AssemblerBuilder {
 }
 
 impl AssemblerBuilder {
-    /// Append one system-prompt layer (order matters — behavior 6).
+    /// Append one system-prompt layer (order matters).
     #[must_use]
     pub fn layer(mut self, layer: Arc<dyn Layer>) -> Self {
         self.layers.push(layer);

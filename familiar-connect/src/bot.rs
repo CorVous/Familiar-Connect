@@ -5,7 +5,7 @@
 //! [`BotHandle`] adapter bus-only processors post back through, and the
 //! `/subscribe-voice` intake pipeline.
 //!
-//! ## Port shape (DESIGN §4.8 + spec 10 "Rust port notes")
+//! ## Shape
 //!
 //! The serenity-independent logic — the [`BotHandle`] policy, image collection,
 //! embed composition, reaction/edit dispatch, the DM disclaimer + ingest
@@ -288,11 +288,11 @@ impl BotStore for HistoryStore {
 ///
 /// The serenity gateway handlers (reaction / edit dispatch, B-RX) run on the
 /// reactor; a direct synchronous store write there would block a tokio worker on
-/// the SQLite lock + disk I/O, which DESIGN §4.4 forbids ("DB work stays off the
-/// reactor"). This adapter keeps the cheap subscription / emoji gating inline
+/// the SQLite lock + disk I/O, and DB work must stay off the reactor. This
+/// adapter keeps the cheap subscription / emoji gating inline
 /// (`apply_message_edit` / `apply_reaction_*`) and spawns only the DB write,
-/// honouring spec 10's guidance: "in Rust use the async store, but keep the
-/// no-await-in-gateway-handler spirit by spawning if the write can block."
+/// keeping the no-await-in-gateway-handler property while still using the
+/// async store.
 ///
 /// Writes are fire-and-forget: the enqueue always succeeds (returns `Ok`), and
 /// each spawned task logs its own failure, so the dispatchers' `Err` branch is a
@@ -420,7 +420,7 @@ pub trait PresenceSink: Send + Sync {
 /// A slash-command interaction acknowledgement surface.
 ///
 /// Both methods treat a dead (`NotFound 10062`) interaction as benign — the
-/// action already ran (spec 10 B-SC1/2). A scripted double drives the defer/reply
+/// action already ran. A scripted double drives the defer/reply
 /// guard tests.
 #[async_trait]
 pub trait InteractionAck: Send + Sync {
@@ -2290,7 +2290,7 @@ mod serenity_glue {
 // ---------------------------------------------------------------------------
 //
 // The router → per-user-pump → transcriber-clone → fan-in → VoiceSource topology
-// (spec 10 B-VI34-41) is serenity-free: it drains the `(user_id, mono_pcm)`
+// is serenity-free: it drains the `(user_id, mono_pcm)`
 // channel the landed [`RecordingSink`](crate::voice::recording_sink) fills.
 // Songbird owns only the voice connection + DAVE/MLS; the `VoiceTick` receiver
 // converts songbird's decoded per-SSRC audio into a landed `VoiceTick` and hands

@@ -153,8 +153,8 @@ impl VoiceBudgetRecorder {
     ///
     /// `t` defaults to a monotonic clock read when `None`. First record per
     /// (turn, phase) wins — duplicates are dropped (but still refresh LRU
-    /// order. Gaps are emitted **after** releasing the internal lock, so the
-    /// lock order is never budget→collector (DESIGN §4.4 / spec 01 §30).
+    /// order). Gaps are emitted **after** releasing the internal lock, so the
+    /// lock order is never budget→collector.
     // The guard is deliberately block-scoped and dropped before `emit`.
     #[allow(clippy::significant_drop_tightening)]
     pub fn record(&self, turn_id: &str, phase: &str, t: Option<f64>) {

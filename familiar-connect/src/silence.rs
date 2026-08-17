@@ -84,9 +84,9 @@ static LEADING_INVOKE_RE: LazyLock<Regex> =
 static INVOKE_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<(?:\w+:)?invoke\b[^>]*\bname="([^"]+)""#).expect("valid regex")
 });
-static PYTHON_SILENT_RE: LazyLock<Regex> =
+static CALL_SILENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*silent\s*\(").expect("valid regex"));
-static PYTHON_TOOL_RE: LazyLock<Regex> =
+static CALL_TOOL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*(read_channel|shift_focus)\s*\(").expect("valid regex"));
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
@@ -100,9 +100,9 @@ pub(crate) enum LeadingLeak {
     /// true when it names the `silent` tool.
     Invoke { silent: bool },
     /// A leaked function-call-style `silent(…)` string — honoured as silence.
-    PythonSilent,
+    CallSilent,
     /// A leaked function-call-style `read_channel(…)` / `shift_focus(…)` string.
-    PythonTool,
+    CallTool,
 }
 
 /// Classify a leaked tool call that *leads* `content`; `None` when `content`
@@ -114,10 +114,10 @@ pub(crate) fn classify_leading_leak(content: &str) -> Option<LeadingLeak> {
             .captures_iter(content)
             .any(|c| &c[1] == "silent");
         Some(LeadingLeak::Invoke { silent })
-    } else if PYTHON_SILENT_RE.is_match(content) {
-        Some(LeadingLeak::PythonSilent)
-    } else if PYTHON_TOOL_RE.is_match(content) {
-        Some(LeadingLeak::PythonTool)
+    } else if CALL_SILENT_RE.is_match(content) {
+        Some(LeadingLeak::CallSilent)
+    } else if CALL_TOOL_RE.is_match(content) {
+        Some(LeadingLeak::CallTool)
     } else {
         None
     }
@@ -195,10 +195,10 @@ impl StreamGate {
         // persisted turn), so an as-yet-unnamed invoke latches suppress.
         if let Some(leak) = classify_leading_leak(stripped) {
             let decision = match leak {
-                LeadingLeak::Invoke { silent: true } | LeadingLeak::PythonSilent => {
+                LeadingLeak::Invoke { silent: true } | LeadingLeak::CallSilent => {
                     StreamDecision::Silent
                 }
-                LeadingLeak::Invoke { silent: false } | LeadingLeak::PythonTool => {
+                LeadingLeak::Invoke { silent: false } | LeadingLeak::CallTool => {
                     StreamDecision::Suppress
                 }
             };
@@ -414,14 +414,14 @@ mod tests {
     }
 
     #[test]
-    fn classify_python_and_none() {
+    fn classify_call_style_and_none() {
         assert_eq!(
             classify_leading_leak("Silent(reasoning=\"x\")"),
-            Some(LeadingLeak::PythonSilent)
+            Some(LeadingLeak::CallSilent)
         );
         assert_eq!(
             classify_leading_leak("read_channel(limit=10)"),
-            Some(LeadingLeak::PythonTool)
+            Some(LeadingLeak::CallTool)
         );
         assert_eq!(classify_leading_leak("Let me invoke my wit."), None);
     }
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_leaked_python_silent_is_silent() {
+    fn gate_leaked_call_silent_is_silent() {
         assert_eq!(
             gate_run(&["silent(", "reasoning=x)"]),
             StreamDecision::Silent
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_leaked_python_tool_suppresses() {
+    fn gate_leaked_call_tool_suppresses() {
         assert_eq!(
             gate_run(&["read_channel(limit=10)"]),
             StreamDecision::Suppress

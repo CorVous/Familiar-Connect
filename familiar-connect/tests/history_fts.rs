@@ -3,7 +3,7 @@
 //! sanitization, and `append_turn` resilience when the FTS write fails.
 //! Covers FTS search plus the FTS-backed
 //! `search_facts` / `search_facts_scored` cases
-//! (behavior 20 — both indexes are real `TantivyFts::in_memory()` under
+//! (both indexes are real `TantivyFts::in_memory()` under
 //! `HistoryStore::open(":memory:")`).
 //!
 //! The pure commit-retry tests live as in-module unit tests in
@@ -325,7 +325,7 @@ fn append_turn_survives_fts_commit_failure() {
     );
 }
 
-// --- search_facts / search_facts_scored (behavior 20) ---------------------
+// --- search_facts / search_facts_scored ---------------------
 //
 // The facts index is the real in-memory tantivy index (same analyzer as turns),
 // so these exercise: BM25 positivity / higher-is-better, the 4x overfetch, the
@@ -502,7 +502,7 @@ fn search_facts_scored_returns_positive_bm25_best_first() {
 #[test]
 fn search_facts_finds_merge_minted_fact() {
     // The atomic merge mints its replacement via the same append path, so the
-    // minted row must be FTS-searchable (behavior 20 + 31).
+    // minted row must be FTS-searchable.
     let store = HistoryStore::open(":memory:").unwrap();
     for i in 0..3 {
         store

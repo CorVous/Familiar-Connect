@@ -5,8 +5,8 @@
 //! [event builders](build_follow_event). No IO, no `twitch_api` dependency —
 //! that lives in `twitch_watcher` (Layer 3, feature `twitch`, dormant).
 //!
-//! The formatter output strings are a conformance contract (spec 11 §12, Data
-//! formats table): every string here is byte-for-byte pinned by tests, so a
+//! The formatter output strings are a conformance contract: every string
+//! here is byte-for-byte pinned by tests, so a
 //! future consumer that surfaces Twitch events into the conversation gets the
 //! exact phrasings the model was tuned against. The whole pipeline is currently
 //! dormant — nothing constructs a watcher and nothing subscribes to
@@ -69,7 +69,7 @@ impl TwitchEvent {
     ///
     /// Content is prefixed with `"[Twitch] "` so the model identifies the
     /// source. The message `name` is the viewer's `openai_name` when present,
-    /// else the literal `"Twitch"` (spec 11 Data formats).
+    /// else the literal `"Twitch"`.
     #[must_use]
     pub fn to_message(&self) -> Message {
         let name = self
@@ -90,7 +90,7 @@ impl TwitchEvent {
 ///
 /// All boolean flags default to `true`; `redemption_names` defaults to empty
 /// (channel-point redemptions are an opt-in allow-list). Programmatic only — no
-/// TOML/env source (spec 11 Config knobs).
+/// TOML/env source.
 // The five independent on/off toggles each gate a distinct event type, so
 // collapsing them into a bitflag/enum would diverge from the pinned surface.
 #[allow(clippy::struct_excessive_bools)]
@@ -362,7 +362,7 @@ pub fn build_ad_start_event(config: &TwitchWatcherConfig, channel: &str) -> Opti
 /// Ad break end event; `None` if ads disabled.
 ///
 /// Public and tested but currently has no watcher caller (ad end is not an
-/// EventSub subscription in v1; spec 11 §Public API).
+/// EventSub subscription in v1).
 #[must_use]
 pub fn build_ad_end_event(config: &TwitchWatcherConfig, channel: &str) -> Option<TwitchEvent> {
     if !config.ads_enabled {

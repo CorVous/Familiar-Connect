@@ -3,7 +3,7 @@
 //! One file, grep-friendly. Every topic the system routes on lives here. Dotted
 //! namespaces group related topics; the prefix names the subsystem. The
 //! declared-but-unused topics are the reserved namespace for planned streaming —
-//! keep them (spec 01 Data formats).
+//! keep them.
 
 // --- Inputs ---
 /// Discord text messages (and synthetic alarm wakes).

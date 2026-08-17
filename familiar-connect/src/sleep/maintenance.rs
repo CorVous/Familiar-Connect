@@ -3,8 +3,8 @@
 //!
 //! A *maintenance pass* is one discrete, one-shot consolidation over the
 //! familiar's database (run once per sleep). Today's two: `consolidation` (fact
-//! retire/rewrite) and `opinion` (opinion-formation). The registry (DESIGN D14 —
-//! an explicit [`PassRegistry::with_builtins`] builder, not an import-time global
+//! retire/rewrite) and `opinion` (opinion-formation). The registry (an
+//! explicit [`PassRegistry::with_builtins`] builder, not an import-time global
 //! dict) sequences them; the ONE thing it has that the projector registry lacks
 //! is an ordered inter-pass data-flow: consolidation's retirements feed the
 //! opinion pass's known-bits deny-list, threaded through a shared

@@ -35,7 +35,7 @@ fn is_terminator(ch: char) -> bool {
 /// pins the boundary contract to `isspace()`, so match it exactly rather than
 /// leaning on `char::is_whitespace` (which would withhold the sentence until a
 /// real space or flush). The two classifications agree on every other scalar.
-fn is_py_whitespace(ch: char) -> bool {
+fn is_boundary_whitespace(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
 }
 
@@ -94,7 +94,7 @@ impl SentenceStreamer {
                 // Punctuation at buffer end — wait for the next delta.
                 return None;
             }
-            if !is_py_whitespace(chars[end]) {
+            if !is_boundary_whitespace(chars[end]) {
                 // ".5" / "1.0" / "?<tag>" — not a boundary.
                 i = end;
                 continue;
@@ -106,7 +106,7 @@ impl SentenceStreamer {
             let head: String = chars[..end].iter().collect();
             // Consume all following whitespace so the next sentence starts clean.
             let mut rest_start = end;
-            while rest_start < n && is_py_whitespace(chars[rest_start]) {
+            while rest_start < n && is_boundary_whitespace(chars[rest_start]) {
                 rest_start += 1;
             }
             let rest: String = chars[rest_start..].iter().collect();
@@ -304,7 +304,7 @@ mod tests {
     //
     // The four ASCII information separators FS/GS/RS/US (U+001C–U+001F) count
     // as whitespace here, but Rust `char::is_whitespace` (Unicode White_Space)
-    // does not, so `is_py_whitespace` pins the boundary contract:
+    // does not, so `is_boundary_whitespace` pins the boundary contract:
     //   feed("Done.\x1cNext")           -> ["Done."]
     //   feed("First.\x1c\x1dSecond")    -> ["First."]   (separator run consumed)
 

@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn title_case_matches_python_title() {
+    fn title_case_uppercases_each_run() {
         assert_eq!(title_case("sapphire"), "Sapphire");
         assert_eq!(title_case("test-familiar"), "Test-Familiar");
         assert_eq!(title_case("aria"), "Aria");

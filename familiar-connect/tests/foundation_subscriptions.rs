@@ -244,7 +244,7 @@ fn sidecar_writes_dm_user_id_only_for_rows_that_carry_it() {
     assert!(text.contains("[[subscription]]\nchannel_id = 77\nkind = \"text\"\nguild_id = 999\n"));
 }
 
-// --- Byte-exact sidecar format (spec 02 Data formats) -----------------------
+// --- Byte-exact sidecar format ---------------------------------------------
 
 #[test]
 fn single_row_serializes_byte_exact() {

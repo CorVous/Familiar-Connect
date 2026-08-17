@@ -6,7 +6,7 @@
 //! a horizontal strip of up to four evenly-spaced frames so the vision model
 //! sees the animation arc. Output byte sizes differ from Pillow (no `optimize`
 //! equivalent); the conformance target is the ceiling / dimensions, not bytes
-//! (DESIGN / spec 08 port notes).
+//! themselves.
 
 use std::io::Cursor;
 

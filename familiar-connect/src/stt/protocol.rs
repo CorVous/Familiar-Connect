@@ -114,7 +114,7 @@ pub enum SttError {
     /// binary (the `local-stt` feature has no engine chosen yet).
     ///
     #[error(
-        "STT backend '{0}' requires a local-stt engine, which is not built into this binary (no engine chosen for the local-stt feature yet — see DESIGN §6)"
+        "STT backend '{0}' requires a local-stt engine, which is not built into this binary (no engine has been chosen for the local-stt feature yet)"
     )]
     LocalSttUnavailable(String),
     /// The Deepgram WebSocket connection could not be opened at `start`.
@@ -180,7 +180,7 @@ pub trait Transcriber: Send {
     }
 
     /// Per-user idle-close window (seconds); the wiring arms its idle watchdog
-    /// from this (spec 09 J.73). `0` disables. Default `30.0`.
+    /// from this. `0` disables. Default `30.0`.
     fn idle_close_s(&self) -> f64 {
         30.0
     }

@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn title_case_matches_python_str_title() {
+    fn title_case_word_boundaries_are_cased_chars() {
         assert_eq!(title_case("fam"), "Fam");
         assert_eq!(title_case("my-fam"), "My-Fam");
         assert_eq!(title_case("myFam"), "Myfam");

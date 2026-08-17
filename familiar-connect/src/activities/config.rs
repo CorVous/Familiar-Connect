@@ -246,7 +246,7 @@ fn parse_activities_config(data: &Table) -> Result<ActivitiesConfig, ConfigError
         let Some(n) = value.as_integer().filter(|n| *n > 0) else {
             return Err(ConfigError(format!(
                 "{knob} must be a positive integer, got {}",
-                py_value_repr(value)
+                value_repr(value)
             )));
         };
         match knob {
@@ -424,7 +424,7 @@ fn parse_active_days(value: &Value, entry_id: &str) -> Result<BTreeSet<u8>, Conf
             return Err(ConfigError(format!(
                 "[[catalog]] '{entry_id}': active_days has unknown weekday token \
                  {}; valid tokens: {valid}",
-                py_value_repr(token)
+                value_repr(token)
             )));
         };
         days.insert(u8::try_from(idx).expect("weekday index fits u8"));
@@ -437,7 +437,7 @@ fn parse_duration_minutes(value: &Value, entry_id: &str) -> Result<(i64, i64), C
         ConfigError(format!(
             "[[catalog]] '{entry_id}': duration_minutes must be a [lo, hi] pair \
              of minutes with 0 < lo <= hi, got {}",
-            py_value_repr(value)
+            value_repr(value)
         ))
     };
     let Value::Array(arr) = value else {
@@ -475,7 +475,7 @@ const fn toml_type_name(v: &Value) -> &'static str {
 /// Booleans render as `True`/`False` in error messages: a TOML
 /// `true` reaches these paths as a `Value::Boolean`, whose `to_string()` would
 /// otherwise emit the lowercase `true`/`false`.
-fn py_value_repr(v: &Value) -> String {
+fn value_repr(v: &Value) -> String {
     match v {
         Value::String(s) => format!("'{s}'"),
         Value::Boolean(b) => if *b { "True" } else { "False" }.to_owned(),

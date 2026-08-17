@@ -19,7 +19,7 @@ use crate::identity::Author;
 use crate::processors::DiscordTextPayload;
 
 /// Parameters for [`DiscordTextSource::publish_text`] — the exact `discord.text`
-/// payload fields (spec 10 § Data formats).
+/// payload fields.
 #[derive(Clone, Debug)]
 pub struct PublishText {
     /// Discord channel snowflake.
@@ -90,7 +90,7 @@ impl DiscordTextSource {
     /// Construct + publish a text event; return the envelope.
     ///
     /// `event_id = turn_id = "discord-text-" + 12 hex chars`; the payload keys and
-    /// optional-field defaults follow spec 10 § Data formats.
+    /// optional-field defaults are pinned by tests.
     pub async fn publish_text(&self, params: PublishText) -> Event {
         let seq = {
             let mut guard = self

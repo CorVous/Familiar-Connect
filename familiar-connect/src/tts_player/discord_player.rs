@@ -315,7 +315,7 @@ fn info_cut(turn: &str) {
 /// Build the streaming source, forwarding the client's duck-typed jitter hints
 /// (pre-roll + underrun padding) into the [`StreamingPcmSource`] knobs. Bursty
 /// providers (Azure) opt into a cushion; steady-cadence ones (Cartesia) keep the
-/// defaults (spec 09 §60). Extracted so the forwarding is guarded by
+/// defaults. Extracted so the forwarding is guarded by
 /// observing the built source's read behavior (its jitter fields are private).
 fn build_streaming_source(streaming: &dyn StreamingTtsClient) -> Arc<StreamingPcmSource> {
     let hints = streaming.jitter_hints();

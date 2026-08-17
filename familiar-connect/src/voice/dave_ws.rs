@@ -59,8 +59,7 @@
 //!   frames; a missing session is warn-drop, never a crash.
 //!
 //! Ops workflows grep the structured `decision=` / `close_code=` keys these
-//! handlers log; preserve them wherever the songbird glue lands (spec 09 port
-//! notes).
+//! handlers log; preserve them wherever the songbird glue lands.
 
 /// DAVE JSON gateway opcodes (documented for the Layer-4 songbird glue).
 pub mod opcodes {

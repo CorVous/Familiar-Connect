@@ -12,7 +12,7 @@
 //! [`tokio::task::spawn_blocking`] so the reactor keeps draining. `embed([])`
 //! returns `[]` without loading.
 //!
-//! **`dim` is mutable state** (spec 04 §4, Rust port note): known models seed
+//! **`dim` is mutable state**: known models seed
 //! `dim` at construction from a static table; an unknown model reports `0` until
 //! the first real vector probes it (a nonzero pre-known dim is never overwritten
 //! by the probe). The interior [`AtomicUsize`] backs the `&self` [`Embedder::dim`]

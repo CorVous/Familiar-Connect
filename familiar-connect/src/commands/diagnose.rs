@@ -4,7 +4,7 @@
 //! files (or stdin for `-`), groups by span, and prints the same code-fenced
 //! `count / p50 / p95 / last` table `/diagnostics` renders. The percentile /
 //! aggregation function is the one ported once in
-//! [`crate::diagnostics::collector`] and shared here (spec 01 §24, §44); the
+//! [`crate::diagnostics::collector`] and shared here; the
 //! in-process [`SpanCollector`](crate::diagnostics::collector::SpanCollector)
 //! resets on restart, so the durable log is the only cross-run record.
 

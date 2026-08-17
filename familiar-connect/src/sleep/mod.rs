@@ -93,43 +93,43 @@ pub(crate) fn subject_key_set(subjects: &[FactSubject]) -> HashSet<String> {
 
 /// Render a JSON-decoded value in `str()` form: strings pass through; null,
 /// true and false render as `None`/`True`/`False`; numbers render their
-/// decimal form; arrays and objects render as container repr via [`py_repr`]
+/// decimal form; arrays and objects render as container repr via [`render_repr`]
 /// (`['a', 'b']`, `{'k': 1}`).
 ///
 /// These are absurd inputs no prompt produces in the `text`/`reason`/`new_text`
 /// fields this backs; the one residual is object key order, which follows
 /// serde_json's sorted-key iteration (built without `preserve_order`).
-pub(crate) fn py_str(value: &Value) -> String {
+pub(crate) fn render_str(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Null => "None".to_owned(),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
         Value::Number(n) => n.to_string(),
-        Value::Array(_) | Value::Object(_) => py_repr(value),
+        Value::Array(_) | Value::Object(_) => render_repr(value),
     }
 }
 
 /// Render a JSON-decoded value in `repr()` form — the element rendering that
-/// container `str()` applies to its contents. Differs from [`py_str`] only for
-/// strings, which are quoted and escaped; scalars match [`py_str`] and
+/// container `str()` applies to its contents. Differs from [`render_str`] only for
+/// strings, which are quoted and escaped; scalars match [`render_str`] and
 /// containers recurse. Object keys iterate serde_json's sorted order (built
 /// without `preserve_order`).
-fn py_repr(value: &Value) -> String {
+fn render_repr(value: &Value) -> String {
     match value {
-        Value::String(s) => py_repr_str(s),
+        Value::String(s) => render_repr_string(s),
         Value::Null => "None".to_owned(),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
         Value::Number(n) => n.to_string(),
         Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr).collect();
+            let inner: Vec<String> = items.iter().map(render_repr).collect();
             format!("[{}]", inner.join(", "))
         }
         Value::Object(map) => {
             let inner: Vec<String> = map
                 .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v)))
+                .map(|(k, v)| format!("{}: {}", render_repr_string(k), render_repr(v)))
                 .collect();
             format!("{{{}}}", inner.join(", "))
         }
@@ -140,7 +140,7 @@ fn py_repr(value: &Value) -> String {
 /// holds a `'` but no `"`; escape `\`, the active quote, and `\n`/`\r`/`\t`;
 /// render other C0 controls and DEL as `\xNN`. Printable non-ASCII passes
 /// through.
-fn py_repr_str(s: &str) -> String {
+fn render_repr_string(s: &str) -> String {
     let quote = if s.contains('\'') && !s.contains('"') {
         '"'
     } else {
@@ -172,8 +172,8 @@ fn py_repr_str(s: &str) -> String {
     out
 }
 
-pub(crate) fn py_str_field(payload: &Value, key: &str) -> String {
-    payload.get(key).map_or_else(String::new, py_str)
+pub(crate) fn render_str_field(payload: &Value, key: &str) -> String {
+    payload.get(key).map_or_else(String::new, render_str)
 }
 
 /// A `usize` length as `i64`, saturating at `i64::MAX`. The lists this converts —
@@ -184,7 +184,7 @@ pub(crate) fn len_i64(n: usize) -> i64 {
 }
 
 /// Tuple repr for an int tuple: `()`, `(1,)`, `(1, 2)`.
-pub(crate) fn py_tuple_repr(ids: &[i64]) -> String {
+pub(crate) fn tuple_repr(ids: &[i64]) -> String {
     match ids {
         [] => "()".to_owned(),
         [x] => format!("({x},)"),
@@ -199,7 +199,7 @@ pub(crate) fn py_tuple_repr(ids: &[i64]) -> String {
 }
 
 /// List repr for a list of strings: `['a', 'b']`.
-pub(crate) fn py_str_list_repr(items: &[String]) -> String {
+pub(crate) fn str_list_repr(items: &[String]) -> String {
     format!(
         "[{}]",
         items
@@ -211,7 +211,7 @@ pub(crate) fn py_str_list_repr(items: &[String]) -> String {
 }
 
 /// List repr for a list of ints: `[1, 2]`.
-pub(crate) fn py_int_list_repr(ids: &[i64]) -> String {
+pub(crate) fn int_list_repr(ids: &[i64]) -> String {
     format!(
         "[{}]",
         ids.iter()
@@ -223,46 +223,49 @@ pub(crate) fn py_int_list_repr(ids: &[i64]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{py_repr, py_str};
+    use super::{render_repr, render_str};
     use serde_json::json;
 
     #[test]
-    fn py_str_scalars_follow_python() {
-        assert_eq!(py_str(&json!("hi")), "hi");
-        assert_eq!(py_str(&json!(null)), "None");
-        assert_eq!(py_str(&json!(true)), "True");
-        assert_eq!(py_str(&json!(false)), "False");
-        assert_eq!(py_str(&json!(3)), "3");
+    fn render_str_scalars() {
+        assert_eq!(render_str(&json!("hi")), "hi");
+        assert_eq!(render_str(&json!(null)), "None");
+        assert_eq!(render_str(&json!(true)), "True");
+        assert_eq!(render_str(&json!(false)), "False");
+        assert_eq!(render_str(&json!(3)), "3");
     }
 
     #[test]
-    fn py_str_list_uses_python_container_repr() {
+    fn render_str_list_uses_container_repr() {
         // ["a", "b"] renders as "['a', 'b']"
-        assert_eq!(py_str(&json!(["a", "b"])), "['a', 'b']");
+        assert_eq!(render_str(&json!(["a", "b"])), "['a', 'b']");
         // [1, true, null, "x"] renders as "[1, True, None, 'x']"
-        assert_eq!(py_str(&json!([1, true, null, "x"])), "[1, True, None, 'x']");
+        assert_eq!(
+            render_str(&json!([1, true, null, "x"])),
+            "[1, True, None, 'x']"
+        );
         // nesting: str([["a"], []]) == "[['a'], []]"
-        assert_eq!(py_str(&json!([["a"], []])), "[['a'], []]");
+        assert_eq!(render_str(&json!([["a"], []])), "[['a'], []]");
     }
 
     #[test]
-    fn py_str_object_uses_python_container_repr() {
+    fn render_str_object_uses_container_repr() {
         // single key: {"k": 1} renders as "{'k': 1}"
-        assert_eq!(py_str(&json!({"k": 1})), "{'k': 1}");
-        assert_eq!(py_str(&json!({"a": "b"})), "{'a': 'b'}");
+        assert_eq!(render_str(&json!({"k": 1})), "{'k': 1}");
+        assert_eq!(render_str(&json!({"a": "b"})), "{'a': 'b'}");
     }
 
     #[test]
-    fn py_repr_string_quoting_follows_cpython() {
+    fn render_repr_string_quoting() {
         // has ' and no " → double quotes, no escaping the '
-        assert_eq!(py_repr(&json!("it's")), "\"it's\"");
+        assert_eq!(render_repr(&json!("it's")), "\"it's\"");
         // has " and no ' → single quotes, no escaping the "
-        assert_eq!(py_repr(&json!("say \"hi\"")), "'say \"hi\"'");
+        assert_eq!(render_repr(&json!("say \"hi\"")), "'say \"hi\"'");
         // has both → single quotes, escape the '
-        assert_eq!(py_repr(&json!("a'b\"c")), "'a\\'b\"c'");
+        assert_eq!(render_repr(&json!("a'b\"c")), "'a\\'b\"c'");
         // control chars → named escapes
-        assert_eq!(py_repr(&json!("a\nb\t")), "'a\\nb\\t'");
+        assert_eq!(render_repr(&json!("a\nb\t")), "'a\\nb\\t'");
         // backslash doubles; C0 control → \xNN
-        assert_eq!(py_repr(&json!("x\\\u{0}")), "'x\\\\\\x00'");
+        assert_eq!(render_repr(&json!("x\\\u{0}")), "'x\\\\\\x00'");
     }
 }

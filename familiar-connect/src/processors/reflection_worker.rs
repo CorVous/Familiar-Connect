@@ -357,7 +357,7 @@ fn normalize_reflection_items(parsed: Option<&Value>) -> Vec<ReflectionItem> {
         let Value::Object(map) = item else {
             continue;
         };
-        let text = map.get("text").map_or_else(String::new, py_str);
+        let text = map.get("text").map_or_else(String::new, json_value_str);
         let cited_turn_ids = int_list(map.get("cited_turn_ids"));
         let cited_fact_ids = int_list(map.get("cited_fact_ids"));
         out.push(ReflectionItem {
@@ -385,7 +385,7 @@ fn int_list(raw: Option<&Value>) -> Vec<i64> {
 }
 
 /// Stringify the JSON `text` field (identity on strings).
-fn py_str(v: &Value) -> String {
+fn json_value_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => "None".to_string(),

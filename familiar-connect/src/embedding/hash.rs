@@ -31,8 +31,8 @@ static TOKEN_RE: LazyLock<Regex> =
 /// case-folding. The two agree for every token the tests exercise; they
 /// diverge only on characters like `ß` (casefold →
 /// `ss`, lowercase → `ß`), which do not occur in stored `hash-v1` data — a
-/// declared, unobservable deviation (spec 04 note 2 flags the tokenisation-drift
-/// risk and the `hash-v2` escape hatch).
+/// declared, unobservable deviation; `hash-v2` is the escape hatch if the
+/// tokenisation ever changes.
 fn tokens(text: &str) -> Vec<String> {
     TOKEN_RE
         .find_iter(text)
@@ -68,7 +68,7 @@ impl HashEmbedder {
         Ok(Self { dim })
     }
 
-    // f64 → f32 narrowing to the storage vector width is deliberate (spec 03
+    // f64 → f32 narrowing to the storage vector width is deliberate (the store
     // packs little-endian f32); the values are already normalised to [-1, 1].
     #[allow(clippy::cast_possible_truncation)]
     fn embed_one(&self, text: &str) -> Vec<f32> {
@@ -236,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::cast_possible_truncation)] // reference constant narrowed to f32
-    async fn byte_exact_parity_with_python_blake2b() {
+    async fn byte_exact_blake2b_reference_vectors() {
         // Reference vectors for `blake2b(digest_size=4)`:
         //   "hello" → bucket 7 (dim 8), sign +1; "world" → bucket 1, sign -1.
         // vec = [0,-1,0,0,0,0,0,1] → L2-normalised = ±1/sqrt(2).

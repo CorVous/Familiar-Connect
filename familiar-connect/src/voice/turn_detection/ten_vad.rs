@@ -64,7 +64,7 @@ pub trait Vad: Send {
     fn reset(&mut self);
 }
 
-/// The native TEN-VAD handle seam (Agora ten-vad; arrives as `ten-vad-sys`, D2).
+/// The native TEN-VAD handle seam (Agora ten-vad; arrives as `ten-vad-sys`).
 ///
 /// Mirrors the native `process(frame) -> (probability, flag)`; the wrapper reads
 /// only the probability. A `Box<dyn NativeTenVad>` is rebuilt on

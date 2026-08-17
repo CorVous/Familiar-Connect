@@ -6,12 +6,12 @@
 //! `:memory:` stores). Documents are `(row_id: i64 stored/indexed/fast,
 //! content: text unstored)`; upserts are delete-by-row_id then add.
 //!
-//! The analyzer chain is pinned **exactly** so BM25
-//! rankings are identical (spec 03 behavior 17): simple tokenizer →
+//! The analyzer chain is pinned **exactly** so BM25 rankings are identical:
+//! simple tokenizer →
 //! remove_long(64) → lowercase → ascii_fold → the custom stopwords →
 //! English stemmer. tantivy is native Rust here.
 //!
-//! ## Commit-retry seam (behavior 22)
+//! ## Commit-retry seam
 //!
 //! `commit` occasionally races a Windows antivirus segment-scan that briefly
 //! locks a freshly-written `.term` file, surfacing as a `PermissionDenied` I/O
@@ -284,7 +284,7 @@ impl TantivyFts {
         writer.commit().map(|_| ()).map_err(CommitErr::Tantivy)
     }
 
-    /// Commit with transient-lock retry (behavior 22).
+    /// Commit with transient-lock retry.
     fn commit(&self, writer: &mut IndexWriter) -> Result<(), StoreError> {
         let delays = self
             .retry_delays
@@ -394,7 +394,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn stopword_list_matches_python() {
+    fn stopword_list_is_pinned() {
         // The list holds 87 entries; this pins the exact set.
         assert_eq!(FTS_STOPWORDS.len(), 87);
     }

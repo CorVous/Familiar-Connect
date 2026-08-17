@@ -8,7 +8,7 @@
 //! `include_time=false`; tail copy with the clock, mode instruction, post-history
 //! and guild name).
 //!
-//! The block grammar is a byte-exact prompt-format contract (spec 05 behavior 44).
+//! The block grammar is a byte-exact prompt-format contract.
 
 use std::collections::HashMap;
 
@@ -18,7 +18,7 @@ use chrono_tz::Tz;
 use crate::focus::PRIVATE_MESSAGE_GUILD_NAME;
 
 /// Per-mode operating directive. Intentionally duplicates the strings
-/// `OperatingModeLayer` is configured with (spec 05 behavior 8) — keep in sync.
+/// `OperatingModeLayer` is configured with — keep in sync.
 const VOICE_INSTRUCTION: &str =
     "You are speaking aloud. Keep replies short (one or two sentences). Avoid markdown.";
 const TEXT_INSTRUCTION: &str =

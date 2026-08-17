@@ -15,7 +15,7 @@ pub use factory::{EmbedderFactory, EmbedderRegistry, create_embedder, known_embe
 pub use hash::HashEmbedder;
 pub use protocol::Embedder;
 
-/// Errors from the embedding subsystem (DESIGN §4.1 — one `thiserror` enum per
+/// Errors from the embedding subsystem (one `thiserror` enum per
 /// subsystem; byte-stable messages are test contracts).
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {

@@ -2,7 +2,7 @@
 //! (subsystem 03).
 //!
 //! The threading sandwich is reshaped into a
-//! single DB actor (see [`db`] and DESIGN §4.4 / decision D5):
+//! single DB actor (see [`db`]):
 //!
 //! - [`db`] — the single-owner DB actor over `rusqlite`. One OS thread owns the
 //!   [`rusqlite::Connection`]; callers submit whole-operation closures over an
@@ -39,7 +39,7 @@ pub use store::{
 /// violations such as an out-of-range `alarms.channel_kind`), an empty
 /// embedding vector, or an invalid `finish_activity` status. Reads that hit
 /// malformed *stored* data degrade to empty/`None` rather than erroring
-/// (behavior 27) — those paths never surface a `StoreError`.
+/// — those paths never surface a `StoreError`.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// A call arrived after [`Db::close`] — the owning actor thread is gone.

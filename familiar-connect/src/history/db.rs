@@ -10,7 +10,7 @@
 //! A statement-trace hook ([`Db::set_trace_callback`]) fires on the actor
 //! thread just before each traced statement.
 //!
-//! Calls after [`Db::close`] fail with [`StoreError::Closed`] (behavior 7).
+//! Calls after [`Db::close`] fail with [`StoreError::Closed`].
 
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};

@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::Value;
 
-use super::{SleepError, len_i64, normalize_fact_text, py_int_list_repr, py_str_field};
+use super::{SleepError, int_list_repr, len_i64, normalize_fact_text, render_str_field};
 use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::{FactSubject, HistoryTurn, SleepWatermark};
 use crate::identity::ego_canonical_key;
@@ -354,7 +354,7 @@ pub async fn extract_stance_moments(
         if !item.is_object() {
             continue;
         }
-        let text = py_str_field(item, "text").trim().to_owned();
+        let text = render_str_field(item, "text").trim().to_owned();
         if text.is_empty() {
             continue;
         }
@@ -401,7 +401,7 @@ pub fn build_synthesis_prompt(
             format!(
                 "- ({}) ids={}: {}",
                 c.date,
-                py_int_list_repr(&c.turn_ids),
+                int_list_repr(&c.turn_ids),
                 c.text
             )
         })
@@ -486,7 +486,7 @@ pub fn validate_opinions(
     let mut seen_norm: HashSet<String> = HashSet::new();
 
     for payload in raw {
-        let text = py_str_field(payload, "text").trim().to_owned();
+        let text = render_str_field(payload, "text").trim().to_owned();
         if text.is_empty() {
             rejected.push(RejectedOpinion {
                 payload: payload.clone(),
@@ -505,11 +505,7 @@ pub fn validate_opinions(
             rejected.push(RejectedOpinion {
                 payload: payload.clone(),
                 rail: "ungrounded".to_owned(),
-                detail: format!(
-                    "ids={} bad={}",
-                    py_int_list_repr(&ids),
-                    py_int_list_repr(&bad)
-                ),
+                detail: format!("ids={} bad={}", int_list_repr(&ids), int_list_repr(&bad)),
             });
             continue;
         }

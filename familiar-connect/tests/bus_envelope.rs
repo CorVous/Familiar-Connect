@@ -73,7 +73,7 @@ async fn scope_carries_identity() {
     let scope = TurnScope::new("t-1", "chan-42");
     assert_eq!(scope.turn_id, "t-1");
     assert_eq!(scope.session_id, "chan-42");
-    // D12: `started_at` is `Instant::now()`; pin that it is a real, past-or-present
+    // `started_at` is `Instant::now()`; pin that it is a real, past-or-present
     // stamp (a positive `started_at`).
     assert!(scope.started_at <= Instant::now());
     assert!(!scope.is_cancelled());
