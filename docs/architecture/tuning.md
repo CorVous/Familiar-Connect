@@ -747,11 +747,20 @@ tokens for them, and an uncapped ratio from such a call would silently
 over-trim everything after it. `4.0` still covers the densest legitimate
 case (CJK text, roughly one token per character).
 
-Adoption is partial today. Prompt-assembly layers
-(`src/context/layers.rs`) still trim on the raw estimator, because no
-layer has the target model in scope — `AssemblyContext` does not carry
-one — so there is no key to look the ratio up by. Calibration is
-currently collected and reported, not yet enforced on the assembly path.
+Calibration is enforced on the assembly path. `AssemblyContext` carries a
+`model` field, set by both responders from `LlmClient::model()`, and every
+layer trim in `src/context/layers.rs` — recent history, RAG lines,
+dossiers, summary, reflections, lorebook — estimates through it. A model
+that bills above the heuristic therefore trims *earlier*, keeping the
+request inside the caps the tier promises. Truncation inverts the same
+ratio (`budget::char_cap_for_tokens`) so a truncated section still
+measures under its own cap.
+
+`LlmClient::model()` defaults to `""`, which misses the calibration store
+and leaves the raw estimate — so a client that names no model, and every
+test double, behaves exactly as before. Only the OpenRouter client, which
+is also the only source of true counts, names one; a decorator wrapping it
+must forward `model()` or calibration goes silently dark.
 
 Every cap is a hard number. No "auto-fill from a total" — the source
 of truth is `data/familiars/_default/character.toml`, which spells
