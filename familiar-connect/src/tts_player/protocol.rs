@@ -1,7 +1,7 @@
 //! `TtsPlayer` seam (subsystem 09).
 //!
 //! The speak surface used by the voice responder (06). Production wraps
-//! Cartesia/Azure/Gemini + Discord voice playback via
+//! Cartesia + Discord voice playback via
 //! [`DiscordVoicePlayer`](super::discord_player::DiscordVoicePlayer); tests use
 //! [`MockTTSPlayer`](super::mock::MockTTSPlayer).
 
