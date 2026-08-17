@@ -11,6 +11,10 @@
 //! Tool-referencing prose is gated on `tools_enabled`: a slot with tool calling
 //! off is never told to call `shift_focus` (#221).
 //!
+//! Every configurable string (mode directives, voice tool nudge, post-history
+//! block) arrives from `[prompt]` — this module keeps no in-code copy, so the
+//! reminder and `OperatingModeLayer` cannot drift (#151).
+//!
 //! The block grammar is a byte-exact prompt-format contract.
 
 use std::collections::HashMap;
@@ -19,21 +23,6 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
 use crate::focus::{PRIVATE_MESSAGE_GUILD_NAME, UNNAMED_CHANNEL_PREFIX};
-
-/// Per-mode operating directive. Intentionally duplicates the strings
-/// `OperatingModeLayer` is configured with — keep in sync.
-const VOICE_INSTRUCTION: &str =
-    "You are speaking aloud. Keep replies short (one or two sentences). Avoid markdown.";
-const TEXT_INSTRUCTION: &str =
-    "You are chatting in a text channel. Markdown and multi-line replies are fine.";
-
-fn mode_instruction(viewer_mode: &str) -> Option<&'static str> {
-    match viewer_mode {
-        "voice" => Some(VOICE_INSTRUCTION),
-        "text" => Some(TEXT_INSTRUCTION),
-        _ => None,
-    }
-}
 
 /// Parenthetical count/ping suffix for one channel in the unread digest.
 fn unread_suffix(unread: i64, pings: i64) -> String {
@@ -116,7 +105,9 @@ pub struct FinalReminder {
     display_tz: String,
     include_time: bool,
     include_mode_instruction: bool,
+    mode_instructions: HashMap<String, String>,
     tools_enabled: bool,
+    voice_tool_ack: String,
     post_history_instructions: Option<String>,
     focus_channel_id: Option<i64>,
     unread_digest: Vec<(i64, (i64, i64))>,
@@ -136,7 +127,9 @@ impl FinalReminder {
             display_tz: "UTC".to_owned(),
             include_time: true,
             include_mode_instruction: false,
+            mode_instructions: HashMap::new(),
             tools_enabled: false,
+            voice_tool_ack: String::new(),
             post_history_instructions: None,
             focus_channel_id: None,
             unread_digest: Vec::new(),
@@ -168,6 +161,21 @@ impl FinalReminder {
     #[must_use]
     pub const fn include_mode_instruction(mut self, include: bool) -> Self {
         self.include_mode_instruction = include;
+        self
+    }
+    /// Set the per-mode operating directives, keyed by viewer mode. Same map
+    /// `OperatingModeLayer` is built from (`[prompt].operating_mode_*`) — the
+    /// single source for both copies.
+    #[must_use]
+    pub fn mode_instructions(mut self, modes: HashMap<String, String>) -> Self {
+        self.mode_instructions = modes;
+        self
+    }
+    /// Set the voice tool-preamble nudge (`[prompt].voice_tool_ack`); blank
+    /// omits it.
+    #[must_use]
+    pub fn voice_tool_ack(mut self, text: impl Into<String>) -> Self {
+        self.voice_tool_ack = text.into();
         self
     }
     /// Whether the slot can actually call tools. Gates the voice tool nudge
@@ -236,19 +244,24 @@ impl FinalReminder {
         }
 
         if self.include_mode_instruction {
-            if let Some(instruction) = mode_instruction(&self.viewer_mode) {
+            // Unknown mode → no directive (map miss), as does a blank one.
+            if let Some(instruction) = self
+                .mode_instructions
+                .get(&self.viewer_mode)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 lines.push(String::new());
                 lines.push(instruction.to_owned());
             }
         }
 
-        if self.tools_enabled && self.viewer_mode == "voice" {
+        if self.tools_enabled
+            && self.viewer_mode == "voice"
+            && !self.voice_tool_ack.trim().is_empty()
+        {
             lines.push(String::new());
-            lines.push(
-                "Always speak at least a brief acknowledgement before calling a tool. \
-                 Never reply with a tool call alone."
-                    .to_owned(),
-            );
+            lines.push(self.voice_tool_ack.trim().to_owned());
         }
 
         if self.focus_channel_id.is_some() || !self.unread_digest.is_empty() {
@@ -340,6 +353,26 @@ mod tests {
 
     fn names(pairs: &[(i64, &str)]) -> HashMap<i64, String> {
         pairs.iter().map(|(k, v)| (*k, (*v).to_owned())).collect()
+    }
+
+    /// Stand-in for the `[prompt].operating_mode_*` pair the wiring supplies.
+    fn modes() -> HashMap<String, String> {
+        [
+            (
+                "voice".to_owned(),
+                "You are speaking aloud. Keep replies short (one or two sentences). \
+                 Avoid markdown."
+                    .to_owned(),
+            ),
+            (
+                "text".to_owned(),
+                "You are chatting in a text channel. Markdown and multi-line replies \
+                 are fine."
+                    .to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect()
     }
 
     #[test]
@@ -445,6 +478,7 @@ mod tests {
         let out = FinalReminder::new("voice")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .render();
         assert!(out.contains("You are speaking aloud"));
         assert!(out.contains("Avoid markdown"));
@@ -455,6 +489,7 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .render();
         assert!(out.contains("chatting in a text channel"));
         assert!(out.contains("Markdown"));
@@ -464,6 +499,7 @@ mod tests {
     fn mode_instruction_omitted_by_default() {
         let out = FinalReminder::new("voice")
             .now(at(2026, 5, 4, 14, 30))
+            .mode_instructions(modes())
             .render();
         assert!(!out.contains("You are speaking aloud"));
     }
@@ -473,9 +509,70 @@ mod tests {
         let out = FinalReminder::new("other")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .render();
         assert!(!out.contains("You are speaking aloud"));
         assert!(!out.contains("Markdown"));
+    }
+
+    #[test]
+    fn unconfigured_mode_instruction_renders_nothing() {
+        // No `[prompt].operating_mode_*` supplied — no in-code fallback copy.
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .include_mode_instruction(true)
+            .render();
+        assert_eq!(out, "---\n\nIt is now: 2026-05-04 2:30PM UTC (+00:00)");
+    }
+
+    #[test]
+    fn blank_mode_instruction_appends_nothing() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .include_mode_instruction(true)
+            .mode_instructions(std::iter::once(("voice".to_owned(), "   ".to_owned())).collect())
+            .render();
+        assert_eq!(out, "---\n\nIt is now: 2026-05-04 2:30PM UTC (+00:00)");
+    }
+
+    // --- voice tool ack -----------------------------------------------------
+
+    #[test]
+    fn voice_tool_ack_rendered_when_tools_enabled() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .voice_tool_ack("Speak first, then call.")
+            .render();
+        assert!(out.contains("Speak first, then call."));
+    }
+
+    #[test]
+    fn voice_tool_ack_omitted_without_tools() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .voice_tool_ack("Speak first, then call.")
+            .render();
+        assert!(!out.contains("Speak first"));
+    }
+
+    #[test]
+    fn voice_tool_ack_never_rendered_in_text_mode() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .voice_tool_ack("Speak first, then call.")
+            .render();
+        assert!(!out.contains("Speak first"));
+    }
+
+    #[test]
+    fn unconfigured_voice_tool_ack_renders_nothing() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .render();
+        assert_eq!(out, "---\n\nIt is now: 2026-05-04 2:30PM UTC (+00:00)");
     }
 
     #[test]
@@ -493,6 +590,7 @@ mod tests {
         let out = FinalReminder::new("voice")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .post_history_instructions("ETIQUETTE_MARKER")
             .render();
         assert!(out.trim_end().ends_with("ETIQUETTE_MARKER"));

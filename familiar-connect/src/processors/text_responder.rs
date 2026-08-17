@@ -174,6 +174,7 @@ pub struct TextResponder {
     tool_registry: Option<Arc<ToolRegistry>>,
     tool_context_factory: Option<ToolContextFactory>,
     post_history_instructions: String,
+    mode_instructions: HashMap<String, String>,
     display_tz: String,
     focus_manager: Option<Arc<dyn FocusManagerApi>>,
     loop_max_iterations: usize,
@@ -208,6 +209,7 @@ impl TextResponder {
             tool_registry: None,
             tool_context_factory: None,
             post_history_instructions: String::new(),
+            mode_instructions: HashMap::new(),
             display_tz: "UTC".to_owned(),
             focus_manager: None,
             loop_max_iterations: 5,
@@ -239,6 +241,13 @@ impl TextResponder {
     #[must_use]
     pub fn with_post_history_instructions(mut self, text: impl Into<String>) -> Self {
         self.post_history_instructions = text.into();
+        self
+    }
+    /// Set the per-mode operating directives (`[prompt].operating_mode_*`);
+    /// the same map `OperatingModeLayer` is built from.
+    #[must_use]
+    pub fn with_mode_instructions(mut self, modes: HashMap<String, String>) -> Self {
+        self.mode_instructions = modes;
         self
     }
     /// Set the trailing-reminder clock timezone.
@@ -781,6 +790,7 @@ impl TextResponder {
         let mut trailing_b = FinalReminder::new("text")
             .display_tz(&self.display_tz)
             .include_mode_instruction(true)
+            .mode_instructions(self.mode_instructions.clone())
             .tools_enabled(tool_mode)
             .post_history_instructions(&self.post_history_instructions)
             .channel_names(ch_names)

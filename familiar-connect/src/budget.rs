@@ -10,8 +10,17 @@
 //! 4) — no real tokenizer on the hot path; it slightly
 //! over-counts (safer for budgets). `len` counts **Unicode scalars**, not bytes.
 //!
+//! [`TokenCalibration`] refines that with the *true* prompt-token counts
+//! OpenRouter reports per call (#183). Calibration is **upward-only**: the
+//! estimate drives client-side trimming, so over-counting merely drops a little
+//! extra context while under-counting risks an oversized request the API
+//! rejects. See [`estimate_tokens_calibrated`].
+//!
 //! This is a leaf module: it names [`crate::llm::Message`] but pulls in nothing
 //! from `config`/`context`, so `config` can depend on it without a cycle.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::llm::Message;
 use crate::support::round::half_even;
@@ -26,11 +35,16 @@ const MESSAGE_OVERHEAD_TOKENS: i64 = 4;
 /// the empty string. Over-counts mildly so budgets stay safe.
 #[must_use]
 pub fn estimate_tokens(text: &str) -> i64 {
-    if text.is_empty() {
-        return 0;
-    }
     // Count Unicode scalars, not bytes.
-    let n = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
+    estimate_tokens_from_chars(text.chars().count())
+}
+
+/// [`estimate_tokens`] for callers holding a Unicode-scalar count, not the text.
+///
+/// Single home for `CHARS_PER_TOKEN` so no call site re-derives `/ 4` (N5).
+#[must_use]
+pub fn estimate_tokens_from_chars(char_count: usize) -> i64 {
+    let n = i64::try_from(char_count).unwrap_or(i64::MAX);
     (n + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
 }
 
@@ -50,6 +64,133 @@ pub fn estimate_message_tokens(msg: &Message) -> i64 {
 #[must_use]
 pub fn estimate_messages_tokens(messages: &[Message]) -> i64 {
     messages.iter().map(estimate_message_tokens).sum()
+}
+
+// ---------------------------------------------------------------------------
+// calibration (#183)
+// ---------------------------------------------------------------------------
+
+/// Upper bound on an applied calibration ratio.
+///
+/// Degenerate samples are reachable: multimodal `Content::Blocks` contribute 0
+/// chars to the estimate while the provider bills real tokens for them, so one
+/// image-heavy call implies an absurd ratio. Calibration only ever *raises* the
+/// estimate, so an unbounded ratio would silently over-trim context. `4.0`
+/// still covers the densest legitimate case (CJK text, ~1 token per char
+/// against the heuristic's 0.25).
+const MAX_CALIBRATION_RATIO: f64 = 4.0;
+
+/// Running true-vs-estimated input-token ratio, keyed by model.
+///
+/// Keyed by **model, not `model.slot`**: chars-per-token is a property of the
+/// model's tokenizer, so slots sharing a model share a rate, and pooling their
+/// samples converges faster. Readers only know a model anyway.
+///
+/// The ratio is a running *ratio of totals* (`Σ actual / Σ estimated`) rather
+/// than an EWMA: it needs no decay constant, it is exact from the very first
+/// sample (an EWMA seeded at `1.0` would spend its early calls biased toward
+/// the seed), and weighting by prompt size is what budget accuracy wants. The
+/// trade-off is no adaptation to a mid-life tokenizer change — acceptable for a
+/// process-lifetime, in-memory store.
+#[derive(Debug, Default)]
+pub struct TokenCalibration {
+    totals: Mutex<HashMap<String, Totals>>,
+}
+
+/// Per-model accumulators; the ratio is `actual / estimated`.
+#[derive(Clone, Copy, Debug, Default)]
+struct Totals {
+    estimated: i64,
+    actual: i64,
+}
+
+impl TokenCalibration {
+    /// Empty store — no model has a ratio yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one observation (heuristic estimate vs provider-reported truth).
+    ///
+    /// Non-positive pairs carry no ratio and are dropped. Saturating adds keep a
+    /// long-lived process from overflowing the accumulators.
+    // The guard's scope is the whole update (lookup + both adds).
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn record(&self, model: &str, estimated: i64, actual: i64) {
+        if estimated <= 0 || actual <= 0 {
+            return;
+        }
+        let mut guard = self.totals.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = guard.entry(model.to_owned()).or_default();
+        entry.estimated = entry.estimated.saturating_add(estimated);
+        entry.actual = entry.actual.saturating_add(actual);
+    }
+
+    /// Learned ratio for `model`; `None` until the model has a sample.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "token totals stay far below f64's exact-integer range"
+    )]
+    pub fn ratio(&self, model: &str) -> Option<f64> {
+        // Copy out under the lock; release before doing arithmetic.
+        let t = {
+            let guard = self.totals.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.get(model).copied()
+        }?;
+        (t.estimated > 0).then(|| t.actual as f64 / t.estimated as f64)
+    }
+}
+
+static CALIBRATION: Mutex<Option<Arc<TokenCalibration>>> = Mutex::new(None);
+
+/// Return the process-wide [`TokenCalibration`], creating it on first use.
+///
+/// Fetched at call time (not import time) so `reset_token_calibration` takes
+/// effect immediately.
+#[must_use]
+pub fn get_token_calibration() -> Arc<TokenCalibration> {
+    let mut guard = CALIBRATION.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .get_or_insert_with(|| Arc::new(TokenCalibration::new()))
+        .clone()
+}
+
+/// Reset the singleton so the next `get` creates a fresh instance — tests only.
+#[cfg(any(test, feature = "test-util"))]
+pub fn reset_token_calibration() {
+    *CALIBRATION.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+/// [`estimate_tokens`] refined by what `model` actually charged on past calls.
+///
+/// **Upward-only, by design.** The estimate gates client-side trimming *before*
+/// a request is sent, so the failure modes are asymmetric: over-counting drops
+/// slightly more context than needed, under-counting ships an oversized request
+/// the API rejects. A learned ratio at or below `1.0` is therefore discarded and
+/// the raw heuristic stands; only ratios above `1.0` (capped at
+/// `MAX_CALIBRATION_RATIO`) apply. An unseen model passes straight through.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "prompt-token counts are far below f64's exact-integer range; the i64::MAX guard covers truncation"
+)]
+pub fn estimate_tokens_calibrated(text: &str, model: &str) -> i64 {
+    let raw = estimate_tokens(text);
+    let Some(ratio) = get_token_calibration().ratio(model) else {
+        return raw;
+    };
+    if ratio <= 1.0 {
+        return raw;
+    }
+    let scaled = (raw as f64 * ratio.min(MAX_CALIBRATION_RATIO)).ceil();
+    if scaled >= i64::MAX as f64 {
+        return i64::MAX;
+    }
+    // Clamp: calibration may only ever revise upward.
+    (scaled as i64).max(raw)
 }
 
 /// Per-section multipliers for a specific model.
@@ -215,9 +356,11 @@ impl TierBudget {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelBudgetCurve, TierBudget, estimate_message_tokens, estimate_messages_tokens,
-        estimate_tokens,
+        ModelBudgetCurve, TierBudget, TokenCalibration, estimate_message_tokens,
+        estimate_messages_tokens, estimate_tokens, estimate_tokens_calibrated,
+        estimate_tokens_from_chars, get_token_calibration, reset_token_calibration,
     };
+    use crate::diagnostics::testutil::singleton_guard;
     use crate::llm::Message;
 
     // --- estimate_tokens ---------------------------------------------------
@@ -262,6 +405,137 @@ mod tests {
         ];
         let expected: i64 = msgs.iter().map(estimate_message_tokens).sum();
         assert_eq!(estimate_messages_tokens(&msgs), expected);
+    }
+
+    #[test]
+    fn from_chars_matches_text_estimate() {
+        assert_eq!(estimate_tokens_from_chars(0), 0);
+        assert_eq!(estimate_tokens_from_chars(5), estimate_tokens("hello"));
+        // Unicode scalars, not bytes: 3 CJK chars -> ceil(3/4) = 1.
+        assert_eq!(estimate_tokens_from_chars(3), estimate_tokens("日本語"));
+    }
+
+    // --- TokenCalibration (direct; no singleton, parallel-safe) ------------
+
+    #[test]
+    fn first_sample_sets_the_ratio() {
+        let cal = TokenCalibration::new();
+        cal.record("m", 100, 120);
+        let r = cal.ratio("m").expect("a ratio after one sample");
+        assert!((r - 1.2).abs() < 1e-9, "ratio: {r}");
+    }
+
+    #[test]
+    fn ratio_is_totals_weighted_across_samples() {
+        let cal = TokenCalibration::new();
+        cal.record("m", 100, 120);
+        cal.record("m", 300, 280);
+        // (120 + 280) / (100 + 300) = 1.0
+        let r = cal.ratio("m").expect("a ratio");
+        assert!((r - 1.0).abs() < 1e-9, "ratio: {r}");
+    }
+
+    #[test]
+    fn unknown_model_has_no_ratio() {
+        let cal = TokenCalibration::new();
+        cal.record("m", 100, 120);
+        assert!(cal.ratio("other").is_none());
+    }
+
+    #[test]
+    fn models_do_not_share_ratios() {
+        let cal = TokenCalibration::new();
+        cal.record("a", 100, 200);
+        cal.record("b", 100, 100);
+        assert!((cal.ratio("a").unwrap() - 2.0).abs() < 1e-9);
+        assert!((cal.ratio("b").unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nonpositive_samples_are_ignored() {
+        let cal = TokenCalibration::new();
+        cal.record("m", 0, 500);
+        cal.record("m", 100, 0);
+        cal.record("m", -5, -5);
+        assert!(cal.ratio("m").is_none());
+    }
+
+    #[test]
+    fn concurrent_records_are_all_counted() {
+        let cal = std::sync::Arc::new(TokenCalibration::new());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cal = std::sync::Arc::clone(&cal);
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        cal.record("m", 10, 15);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker thread");
+        }
+        let r = cal.ratio("m").expect("a ratio");
+        assert!((r - 1.5).abs() < 1e-9, "ratio: {r}");
+    }
+
+    // --- estimate_tokens_calibrated (singleton) ----------------------------
+
+    #[test]
+    fn calibration_unknown_model_passes_through() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        let text = "a".repeat(400);
+        assert_eq!(estimate_tokens_calibrated(&text, "never-seen"), 100);
+    }
+
+    #[test]
+    fn calibration_raises_the_estimate() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        get_token_calibration().record("dense", 100, 150);
+        let text = "a".repeat(400);
+        // ceil(100 * 1.5) = 150
+        assert_eq!(estimate_tokens_calibrated(&text, "dense"), 150);
+    }
+
+    #[test]
+    fn calibration_never_lowers_the_estimate() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        // Model bills FEWER tokens than the heuristic guesses (ratio 0.5).
+        get_token_calibration().record("sparse", 100, 50);
+        let text = "a".repeat(400);
+        assert_eq!(estimate_tokens_calibrated(&text, "sparse"), 100);
+    }
+
+    #[test]
+    fn calibration_ratio_is_capped() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        // Degenerate sample (e.g. image blocks count 0 chars): ratio 100.
+        get_token_calibration().record("wild", 10, 1000);
+        let text = "a".repeat(400);
+        // 100 raw tokens * MAX_CALIBRATION_RATIO (4.0), not * 100.
+        assert_eq!(estimate_tokens_calibrated(&text, "wild"), 400);
+    }
+
+    #[test]
+    fn calibrated_estimate_of_empty_text_is_zero() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        get_token_calibration().record("dense", 100, 400);
+        assert_eq!(estimate_tokens_calibrated("", "dense"), 0);
+    }
+
+    #[test]
+    fn reset_clears_learned_ratios() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        get_token_calibration().record("dense", 100, 150);
+        reset_token_calibration();
+        assert!(get_token_calibration().ratio("dense").is_none());
     }
 
     // --- TierBudget fields -------------------------------------------------

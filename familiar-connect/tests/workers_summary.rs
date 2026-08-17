@@ -12,7 +12,7 @@ use familiar_connect::history::store::{AppendTurn, FOCUS_STREAM_CHANNEL_ID, Summ
 use familiar_connect::llm::LlmClient;
 use familiar_connect::processors::summary_worker::SummaryWorker;
 
-use helpers::{ScriptedLlm, joined, store};
+use helpers::{ScriptedLlm, default_config, joined, store, system_text};
 
 const SUMMARY_DEFAULT: &str = "(nothing to summarise)";
 
@@ -162,4 +162,39 @@ async fn per_channel_summary_no_longer_written() {
 
     assert!(store.sync().get_summary("fam", 1).unwrap().is_none());
     assert!(focus_summary(&store).is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Prompt text is config (#151)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn shipped_default_supplies_the_summariser_system_prompt() {
+    let store = store();
+    seed_turns(&store, 10, 1, true);
+    let llm = ScriptedLlm::new(["ok"], SUMMARY_DEFAULT);
+    worker(&store, &llm, None)
+        .system_prompt(default_config().rolling_summary_system)
+        .tick()
+        .await
+        .unwrap();
+    assert_eq!(
+        system_text(&llm.calls()[0]),
+        "You produce concise, retrieval-friendly summaries of a familiar's \
+         attended conversation across channels. 3-5 sentences. Preserve \
+         proper nouns, commitments, and open questions. Omit small talk."
+    );
+}
+
+#[tokio::test]
+async fn overridden_summariser_prompt_reaches_the_llm() {
+    let store = store();
+    seed_turns(&store, 10, 1, true);
+    let llm = ScriptedLlm::new(["ok"], SUMMARY_DEFAULT);
+    worker(&store, &llm, None)
+        .system_prompt("SUMMARY_PERSONA_MARKER")
+        .tick()
+        .await
+        .unwrap();
+    assert_eq!(system_text(&llm.calls()[0]), "SUMMARY_PERSONA_MARKER");
 }

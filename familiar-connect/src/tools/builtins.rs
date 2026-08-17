@@ -46,7 +46,8 @@ pub fn build_voice_registry(scheduler: &AlarmScheduler, with_focus_manager: bool
 ///
 /// `set_alarm` + `cancel_alarm` + `silent`; plus `view_image` (when
 /// `image_tools`), `shift_focus` + `read_channel` (when a focus manager is
-/// present), and `start_activity` (when an activity engine is provided).
+/// present), and `start_activity` (when an activity engine is provided, with
+/// its config-sourced description).
 #[must_use]
 pub fn build_text_registry(
     scheduler: &AlarmScheduler,
@@ -54,6 +55,7 @@ pub fn build_text_registry(
     describe_constraints: &str,
     with_focus_manager: bool,
     activity_engine: Option<Arc<dyn StartActivityEngine>>,
+    start_activity_description: &str,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry
@@ -84,7 +86,10 @@ pub fn build_text_registry(
     // text-only by design — absence while voice-connected is refused by the engine
     if let Some(engine) = activity_engine {
         registry
-            .register(build_start_activity_tool(engine))
+            .register(build_start_activity_tool(
+                engine,
+                start_activity_description,
+            ))
             .expect("unique tool");
     }
     registry
@@ -139,7 +144,15 @@ mod tests {
     #[test]
     fn text_registry_includes_silent() {
         assert!(
-            names(&build_text_registry(&scheduler(), false, "", false, None)).contains("silent")
+            names(&build_text_registry(
+                &scheduler(),
+                false,
+                "",
+                false,
+                None,
+                ""
+            ))
+            .contains("silent")
         );
     }
 
@@ -151,10 +164,24 @@ mod tests {
 
     #[test]
     fn text_registry_shift_focus_and_read_channel_gated_on_fm() {
-        let with = names(&build_text_registry(&scheduler(), false, "", true, None));
+        let with = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            true,
+            None,
+            "",
+        ));
         assert!(with.contains("shift_focus"));
         assert!(with.contains("read_channel"));
-        let without = names(&build_text_registry(&scheduler(), false, "", false, None));
+        let without = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            false,
+            None,
+            "",
+        ));
         assert!(!without.contains("shift_focus"));
     }
 
@@ -174,10 +201,37 @@ mod tests {
             "",
             false,
             Some(Arc::new(FakeEngine)),
+            "",
         ));
         assert!(with.contains("start_activity"));
-        let without = names(&build_text_registry(&scheduler(), false, "", false, None));
+        let without = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            false,
+            None,
+            "",
+        ));
         assert!(!without.contains("start_activity"));
+    }
+
+    /// #151: the roleplay policy is config text threaded through the builder,
+    /// not a constant in `start_activity.rs`.
+    #[test]
+    fn start_activity_description_threads_from_the_builder() {
+        let reg = build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            false,
+            Some(Arc::new(FakeEngine)),
+            "POLICY_MARKER",
+        );
+        let tool = reg
+            .tools()
+            .find(|t| t.name == "start_activity")
+            .expect("start_activity registered");
+        assert_eq!(tool.description, "POLICY_MARKER");
     }
 
     #[cfg(feature = "images")]
@@ -189,9 +243,17 @@ mod tests {
             "be brief",
             false,
             None,
+            "",
         ));
         assert!(with.contains("view_image"));
-        let without = names(&build_text_registry(&scheduler(), false, "", false, None));
+        let without = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            false,
+            None,
+            "",
+        ));
         assert!(!without.contains("view_image"));
     }
 }

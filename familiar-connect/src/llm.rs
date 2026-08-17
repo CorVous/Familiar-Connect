@@ -318,6 +318,7 @@ pub trait LlmClient: Send + Sync {
 #[cfg(feature = "net")]
 mod client {
     use super::{AbandonStatus, Content, LlmClient, LlmDelta, LlmStream, Message};
+    use crate::budget::{estimate_tokens_from_chars, get_token_calibration};
     use crate::config::{CharacterConfig, LLM_SLOT_NAMES, LLMSlotConfig};
     use crate::diagnostics::collector::get_span_collector;
     use crate::log_style as ls;
@@ -606,12 +607,11 @@ mod client {
             if let Some(p) = &self.provider {
                 parts.push(ls::kv_styled("provider", p, ls::W, ls::LM));
             }
-            // Estimated prompt tokens via the char/4 heuristic (mirrors
-            // `budget::estimate_tokens`, CHARS_PER_TOKEN=4; `input_chars` is
-            // already a Unicode-scalar count). Emitted next to the true
-            // `in_tokens` so the estimated-vs-actual ratio is observable
-            // (issues #183/#184) — no calibration, purely a metric.
-            let est_in_tokens = self.input_chars.div_ceil(4);
+            // Estimated prompt tokens through the shared estimator
+            // (`input_chars` is already a Unicode-scalar count). Emitted next to
+            // the true `in_tokens` so the estimated-vs-actual ratio is
+            // observable (issues #183/#184).
+            let est_in_tokens = estimate_tokens_from_chars(self.input_chars);
             parts.push(ls::kv_styled(
                 "est_in_tokens",
                 &est_in_tokens.to_string(),
@@ -626,6 +626,22 @@ mod client {
             }
             if let Some(v) = self.cached_tokens {
                 parts.push(ls::kv_styled("cached", &v.to_string(), ls::W, ls::LW));
+            }
+            // Feed the calibration store, then surface the model's running
+            // true/estimated ratio (this call included) as `cal_ratio` so the
+            // learned rate is collectable from logs (#183). Absent until the
+            // model has a usage-bearing call.
+            let calibration = get_token_calibration();
+            if let Some(actual) = self.in_tokens {
+                calibration.record(&self.model, est_in_tokens, actual);
+            }
+            if let Some(ratio) = calibration.ratio(&self.model) {
+                parts.push(ls::kv_styled(
+                    "cal_ratio",
+                    &format!("{ratio:.3}"),
+                    ls::W,
+                    ls::LC,
+                ));
             }
             tracing::info!(target: "familiar_connect.llm", "{}", parts.join(" "));
         }
@@ -1541,6 +1557,7 @@ mod client {
     #[cfg(test)]
     mod tests {
         use super::{MAX_DELAY_S, OpenRouterClient, backoff_delay, create_llm_clients};
+        use crate::budget::reset_token_calibration;
         use crate::config::{CharacterConfig, LLMSlotConfig};
         use crate::diagnostics::collector::{get_span_collector, reset_span_collector};
         use crate::diagnostics::testutil::{Capture, install_capture, singleton_guard, strip_ansi};
@@ -2743,6 +2760,56 @@ mod client {
             drop(s);
             let line = call_line(&cap);
             assert!(line.contains("cached=800"), "line: {line}");
+        }
+
+        /// #183: the learned true/estimated ratio rides the `[LLM call]` line.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn calibration_ratio_surfaces_in_call_log() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            reset_token_calibration();
+            let server = MockServer::start().await;
+            let usage = json!({ "prompt_tokens": 150, "completion_tokens": 10 });
+            mount_sse(&server, sse_with_usage(&["x"], Some(usage), None)).await;
+            let c = OpenRouterClient::builder("k", "cal/one")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            // 400 scalars -> est 100 tokens; the provider bills 150 -> ratio 1.5.
+            let mut s = c
+                .chat_stream(vec![Message::new("user", "A".repeat(400))])
+                .await
+                .unwrap();
+            while s.next().await.is_some() {}
+            drop(s);
+            let line = call_line(&cap);
+            assert!(line.contains("est_in_tokens=100"), "line: {line}");
+            assert!(line.contains("cal_ratio=1.500"), "line: {line}");
+        }
+
+        /// No reported usage → nothing learned → no `cal_ratio` key.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn no_usage_means_no_calibration_key() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            reset_token_calibration();
+            let server = MockServer::start().await;
+            mount_sse(&server, sse_content(&["x"])).await;
+            let c = OpenRouterClient::builder("k", "cal/two")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            let mut s = c.chat_stream(vec![user("hi")]).await.unwrap();
+            while s.next().await.is_some() {}
+            drop(s);
+            let line = call_line(&cap);
+            assert!(!line.contains("cal_ratio="), "line: {line}");
         }
 
         fn call_line(cap: &Capture) -> String {

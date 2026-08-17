@@ -364,6 +364,26 @@ greetings         = []
 # or celebrities so it doesn't acquire pop-culture knowledge that breaks
 # immersion. Empty (default) = neutral base only.
 #
+# operating_mode_voice / operating_mode_text: the per-mode operating
+# directive. ONE source for both consumers — the `operating_mode` system-prompt
+# layer and the trailing final reminder (no in-code copy to drift against).
+# A blank one drops the directive from both.
+#
+# voice_tool_ack: voice-tier nudge to speak before calling a tool. Rendered
+# only when the voice slot actually has tools; blank omits it.
+#
+# start_activity_description: the when-to-go policy carried by the
+# `start_activity` tool description. Roleplay guidance, not API contract — the
+# activity enum and its availability hints stay code-built from the catalog.
+# Keep it under ~450 characters; it rides in every text-tier tool schema.
+#
+# rolling_summary_system / reflection_system / dossier_self_system /
+# dossier_other_system: STATIC instruction text for the memory projectors.
+# Window data (turns, facts, prior text, importance annotations) and the
+# reflection reply contract are assembled in code; only the wording lives here.
+# Placeholders: dossier_self_system takes {self_name}, dossier_other_system
+# takes {display_name}.
+#
 # sleep_consolidation_system / sleep_stance_system / sleep_synthesis_system
 # / dream_extraction_clause: STATIC instruction text for the sleep passes
 # and the fact-extractor's dream-framing clause. Dynamic window data
@@ -384,6 +404,54 @@ interject too frequently, either. It's fine to send a message when the \
 character really wants to, of course, but prefer <silent> otherwise.
 """
 image_description_constraints = ""
+operating_mode_voice = """
+You are speaking aloud. Keep replies short (one or two sentences). Avoid \
+markdown.
+"""
+operating_mode_text = """
+You are chatting in a text channel. Markdown and multi-line replies are fine.
+"""
+voice_tool_ack = """
+Always speak at least a brief acknowledgement before calling a tool. Never \
+reply with a tool call alone.
+"""
+start_activity_description = """
+Head out and do something away from the screen for a while. Use when the \
+current scene has wrapped up or the channel has gone quiet. You'll be away \
+and may miss messages while out. You leave when this reply sends: with \
+people around, say your in-character goodbye in this same message; from a \
+quiet channel, call silent() too and slip away unannounced. Don't start one \
+in the middle of a conversation you have a stake in.
+"""
+rolling_summary_system = """
+You produce concise, retrieval-friendly summaries of a familiar's attended \
+conversation across channels. 3-5 sentences. Preserve proper nouns, \
+commitments, and open questions. Omit small talk.
+"""
+reflection_system = """
+You write short, high-level reflections over recent chat history — \
+patterns, recurring tensions, open questions, themes the participants keep \
+circling back to. Skip blow-by-blow recaps; that's what summaries are for. \
+Each reflection is one or two sentences.
+"""
+dossier_self_system = """
+You maintain {self_name}'s evolving self-record — who she is becoming \
+— in 3-5 sentences. Preserve her settled opinions, stances, and feelings \
+about people and things (the views she holds consistently), plus concrete \
+choices and commitments. Drop only momentary, in-the-moment reactions and \
+filler. Reconcile contradictions in favour of newer evidence. Facts carry an \
+importance score (higher = more central/durable to who she is); weight \
+higher-importance stances more heavily, and since the record is only 3-5 \
+sentences, when space is tight favour durable high-importance stances over \
+lower ones (never invent). Reply with the updated self-record text only.
+"""
+dossier_other_system = """
+You maintain a short, retrieval-friendly dossier about one person \
+({display_name}) — 3-5 sentences. Preserve concrete details, names, \
+places, commitments. Drop transient feelings and conversational filler. \
+Reconcile contradictions in favour of newer evidence. Reply with the updated \
+dossier text only.
+"""
 sleep_consolidation_system = """
 You are a memory-consolidation pass run while a character sleeps. You see \
 the day's facts at once, so you can catch patterns a turn-by-turn \

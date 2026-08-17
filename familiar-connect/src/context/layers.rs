@@ -8,6 +8,11 @@
 //! Store access goes through the async facade (`build` and `invalidation_key` are
 //! both `async` so neither blocks the reactor). All truncation caps
 //! count Unicode scalars via a `limit-1 + "…"` helper; chars-per-token is 4.
+//!
+//! Trimming uses the RAW [`crate::budget::estimate_tokens`], not
+//! [`crate::budget::estimate_tokens_calibrated`]: no layer has the target model
+//! in scope — [`AssemblyContext`] carries none — so nothing here can key the
+//! calibration store (#183).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};

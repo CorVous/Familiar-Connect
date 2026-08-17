@@ -24,6 +24,7 @@ use crate::history::store::Fact;
 use crate::identity::is_ego_key;
 use crate::llm::{LlmClient, Message};
 use crate::log_style as ls;
+use crate::prompt_fill::fill_placeholders;
 
 /// Log/task label + registry name for this projector.
 const NAME: &str = "people-dossier-worker";
@@ -72,6 +73,8 @@ pub struct PeopleDossierWorker {
     familiar_id: String,
     familiar_display_name: Option<String>,
     tick_interval: Duration,
+    self_system: String,
+    other_system: String,
 }
 
 impl PeopleDossierWorker {
@@ -89,6 +92,8 @@ impl PeopleDossierWorker {
             familiar_id: familiar_id.into(),
             familiar_display_name: None,
             tick_interval: Duration::from_secs_f64(20.0),
+            self_system: String::new(),
+            other_system: String::new(),
         }
     }
 
@@ -103,6 +108,22 @@ impl PeopleDossierWorker {
     #[must_use]
     pub fn tick_interval_s(mut self, secs: f64) -> Self {
         self.tick_interval = Duration::from_secs_f64(secs);
+        self
+    }
+
+    /// Self-record instruction text (`[prompt].dossier_self_system`,
+    /// `{self_name}`). No in-code default — `_default` is the source.
+    #[must_use]
+    pub fn self_system(mut self, text: impl Into<String>) -> Self {
+        self.self_system = text.into();
+        self
+    }
+
+    /// Other-person dossier instruction text
+    /// (`[prompt].dossier_other_system`, `{display_name}`).
+    #[must_use]
+    pub fn other_system(mut self, text: impl Into<String>) -> Self {
+        self.other_system = text.into();
         self
     }
 
@@ -217,6 +238,11 @@ impl PeopleDossierWorker {
                 .await?
         };
         let prompt = build_dossier_prompt(
+            if is_self {
+                &self.self_system
+            } else {
+                &self.other_system
+            },
             &display_label,
             prior.as_ref().map(|p| p.dossier_text.as_str()),
             &facts,
@@ -279,38 +305,19 @@ fn log_raced_supersede(canonical_key: &str, stage: &str) {
 /// Compounding prompt for one subject. Self and non-self differ in header
 /// (opinion-preserving vs transient-dropping) and body (importance-annotated vs
 /// plain).
+///
+/// `header_template` is the config-sourced phrasing for whichever variant
+/// `is_self` selects; the subject name fills `{self_name}` (self) /
+/// `{display_name}` (other). Body assembly stays in code.
 fn build_dossier_prompt(
+    header_template: &str,
     display_name: &str,
     prior_dossier: Option<&str>,
     new_facts: &[Fact],
     is_self: bool,
 ) -> Vec<Message> {
-    let header = if is_self {
-        // The self-record is the substrate for consistently-forming opinions
-        // (feeds the sleep cycle) — keep settled feelings/stances, shed only
-        // momentary reactions. Do NOT blanket-drop feelings.
-        format!(
-            "You maintain {display_name}'s evolving self-record — who she \
-             is becoming — in 3-5 sentences. Preserve her settled opinions, \
-             stances, and feelings about people and things (the views she \
-             holds consistently), plus concrete choices and commitments. \
-             Drop only momentary, in-the-moment reactions and filler. \
-             Reconcile contradictions in favour of newer evidence. Facts \
-             carry an importance score (higher = more central/durable to \
-             who she is); weight higher-importance stances more heavily, \
-             and since the record is only 3-5 sentences, when space is \
-             tight favour durable high-importance stances over lower ones \
-             (never invent). Reply with the updated self-record text only."
-        )
-    } else {
-        format!(
-            "You maintain a short, retrieval-friendly dossier about one \
-             person ({display_name}) — 3-5 sentences. Preserve concrete \
-             details, names, places, commitments. Drop transient feelings \
-             and conversational filler. Reconcile contradictions in favour \
-             of newer evidence. Reply with the updated dossier text only."
-        )
-    };
+    let key = if is_self { "self_name" } else { "display_name" };
+    let header = fill_placeholders(header_template, &[(key, display_name)]);
     let mut body_lines: Vec<String> = Vec::new();
     match prior_dossier {
         Some(prior) if !prior.is_empty() => {
