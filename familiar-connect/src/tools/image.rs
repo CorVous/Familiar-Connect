@@ -1,6 +1,12 @@
 //! `view_image` tool: fetch → compress → vision-describe (subsystem 08;
 //! feature `images`).
 //!
+//! The describe leg runs at most once per view. Which model runs it depends on
+//! whether the calling slot is multimodal: a slot that cannot see the image
+//! needs the substitution model (`ctx.description_llm`), one that can needs
+//! only the cheap caption (`ctx.caption_llm`) that carries the image into
+//! long-term memory. See `docs/architecture/overview.md` § Image viewing.
+//!
 //! The image fetch is injected via the [`ImageFetcher`] seam so tests can
 //! supply canned bytes. The production fetcher uses `reqwest` (feature `net`):
 //! a fresh client per call with a 15s timeout, a content-type allow-list, and a
@@ -212,8 +218,17 @@ async fn view_image_handler(
         }
     };
 
-    // Describe at high quality (result persists in history); degrade gracefully.
-    let desc = if let Some(llm) = ctx.description_llm.as_ref() {
+    // Exactly one text leg, never two. A multimodal caller sees the image
+    // itself, so the substitution model is skipped and the cheap caption model
+    // runs for memory alone — the image never survives into history (#204). A
+    // text-only caller runs the substitution model, whose output doubles as the
+    // caption because the tool result IS the description.
+    let llm = if ctx.multimodal {
+        ctx.caption_llm.as_ref().or(ctx.description_llm.as_ref())
+    } else {
+        ctx.description_llm.as_ref().or(ctx.caption_llm.as_ref())
+    };
+    let desc = if let Some(llm) = llm {
         match describe_leg(llm.as_ref(), &raw, constraints).await {
             Ok(d) => d,
             Err(e) => {

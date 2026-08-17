@@ -40,6 +40,12 @@ pub struct ConfigError(pub String);
 
 /// Canonical LLM call-site slot names.
 pub const LLM_SLOT_NAMES: [&str; 3] = ["fast", "prose", "background"];
+/// `[llm]` keys that are shared settings, not slot tables.
+const LLM_SHARED_KEYS: [&str; 3] = [
+    "image_description_model",
+    "image_caption_model",
+    "max_concurrent_requests",
+];
 /// Canonical assembly-tier names.
 pub const BUDGET_TIER_NAMES: [&str; 3] = ["voice", "text", "background"];
 /// Allowed values for `[llm.<slot>].reasoning`.
@@ -128,9 +134,29 @@ pub struct LLMSlotConfig {
     /// Surface-only tool-calling flag.
     pub tool_calling: bool,
     /// Gate for `view_image` registration.
+    ///
+    /// Deliberately NOT tri-state (unlike [`multimodal`](Self::multimodal)):
+    /// it is an intent knob, not a capability fact. `view_image` works on a
+    /// text-only model too — the substitution description stands in for the
+    /// image — and an operator may not want image fetches at all on a
+    /// vision-capable one. Neither direction is inferable from the catalog, so
+    /// it stays an explicit opt-in.
     pub image_tools: bool,
-    /// Send image content blocks in tool-result messages.
-    pub multimodal: bool,
+    /// Send image content blocks in tool-result messages. Tri-state: `None` =
+    /// auto-detect from the OpenRouter catalog, `Some(_)` = operator override
+    /// detection must never contradict.
+    pub multimodal: Option<bool>,
+}
+
+impl LLMSlotConfig {
+    /// Resolve [`multimodal`](Self::multimodal) against catalog metadata.
+    ///
+    /// Explicit config always wins. Unset follows `detected`; with no catalog
+    /// (`None`) the answer is `false` — the pre-detection default.
+    #[must_use]
+    pub fn resolve_multimodal(&self, detected: Option<bool>) -> bool {
+        self.multimodal.or(detected).unwrap_or(false)
+    }
 }
 
 impl Default for LLMSlotConfig {
@@ -147,7 +173,7 @@ impl Default for LLMSlotConfig {
             reasoning: None,
             tool_calling: false,
             image_tools: false,
-            multimodal: false,
+            multimodal: None,
         }
     }
 }
@@ -704,8 +730,13 @@ pub struct CharacterConfig {
     pub memory_providers: MemoryProvidersConfig,
     /// Embedder backend selection.
     pub embedding: EmbeddingConfig,
-    /// Model for vision-based image descriptions; `""` disables.
+    /// Substitution model: describes the image for a slot that cannot see it.
+    /// `""` disables.
     pub image_description_model: String,
+    /// Persistence model: the durable caption written to history (and thus to
+    /// facts / summaries / dossiers). `""` falls back to
+    /// [`image_description_model`](Self::image_description_model).
+    pub image_caption_model: String,
     /// Process-wide cap on concurrent LLM requests.
     pub llm_max_concurrent_requests: i64,
     /// Attentional unread-nudge controls.
@@ -752,6 +783,7 @@ impl Default for CharacterConfig {
             memory_providers: MemoryProvidersConfig::default(),
             embedding: EmbeddingConfig::default(),
             image_description_model: String::new(),
+            image_caption_model: String::new(),
             llm_max_concurrent_requests: 4,
             focus: FocusConfig::default(),
             tools: ToolsConfig::default(),
@@ -940,6 +972,15 @@ fn parse_character_config(
             ));
         }
     };
+    let image_caption_model = match llm_raw.get("image_caption_model") {
+        None => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => {
+            return Err(ConfigError(
+                "[llm].image_caption_model must be a string".into(),
+            ));
+        }
+    };
     let llm_max_concurrent_requests = match llm_raw.get("max_concurrent_requests") {
         None => 4,
         Some(Value::Integer(n)) if *n > 0 => *n,
@@ -957,7 +998,7 @@ fn parse_character_config(
     };
     let mut llm_slots_raw = Table::new();
     for (k, v) in llm_raw {
-        if k != "image_description_model" && k != "max_concurrent_requests" {
+        if !LLM_SHARED_KEYS.contains(&k.as_str()) {
             llm_slots_raw.insert(k.clone(), v.clone());
         }
     }
@@ -1066,6 +1107,7 @@ fn parse_character_config(
         memory_providers,
         embedding,
         image_description_model,
+        image_caption_model,
         llm_max_concurrent_requests,
         focus,
         tools,
@@ -1280,9 +1322,15 @@ fn field_number(raw: &Table, prefix: &str, key: &str, default: f64) -> Result<f6
 }
 
 fn field_bool(raw: &Table, prefix: &str, key: &str, default: bool) -> Result<bool, ConfigError> {
+    Ok(field_bool_opt(raw, prefix, key)?.unwrap_or(default))
+}
+
+/// Tri-state bool: absent stays `None` so a caller can tell "unset" from an
+/// explicit `false`. Same error string as [`field_bool`].
+fn field_bool_opt(raw: &Table, prefix: &str, key: &str) -> Result<Option<bool>, ConfigError> {
     match raw.get(key) {
-        None => Ok(default),
-        Some(Value::Boolean(b)) => Ok(*b),
+        None => Ok(None),
+        Some(Value::Boolean(b)) => Ok(Some(*b)),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a bool, got {}",
             value_type_name(other)
@@ -1566,7 +1614,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
         };
         let tool_calling = field_bool(section, &prefix, "tool_calling", false)?;
         let image_tools = field_bool(section, &prefix, "image_tools", false)?;
-        let multimodal = field_bool(section, &prefix, "multimodal", false)?;
+        let multimodal = field_bool_opt(section, &prefix, "multimodal")?;
         slots.insert(
             name.clone(),
             LLMSlotConfig {

@@ -66,10 +66,13 @@ cp -r data/familiars/_default "$FAMILIARS_ROOT/my-familiar"
 # then edit "$FAMILIARS_ROOT/my-familiar/character.toml"
 ```
 
-If a slot points at a vision-capable model, also set
-`multimodal = true` in that `[llm.<slot>]` table: it defaults to
-`false`, which silently sends the model only a text description of any
-image rather than the image itself.
+Leave `multimodal` out of the `[llm.<slot>]` tables unless you mean to
+override it: omitted, it is auto-detected from the model's OpenRouter
+metadata, so a vision-capable slot starts receiving images natively on
+its own. Writing `true` or `false` pins the flag and detection will not
+argue. To keep images in long-term memory, also set
+`[llm].image_caption_model` to something cheap — the raw image never
+survives a turn, so that caption is all the memory pipeline ever sees.
 
 ## Start
 

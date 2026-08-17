@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use familiar_connect::llm::{Content, LlmClient, Message};
+use familiar_connect::tools::agentic::{serialize_image_result, tool_content_as_text};
 use familiar_connect::tools::image::{
     GuardedFetcher, ImageFetcher, build_view_image_tool_with_fetcher,
 };
@@ -31,6 +32,11 @@ impl CaptureLlm {
             reply: reply.to_owned(),
             captured: Mutex::new(Vec::new()),
         }
+    }
+
+    /// How many `chat` calls this double has served.
+    fn calls(&self) -> usize {
+        self.captured.lock().unwrap().len()
     }
 }
 
@@ -235,6 +241,118 @@ async fn view_image_constraints_flow_into_description() {
             && last_text_block(m).contains("Do not name characters.")
     });
     assert!(found);
+}
+
+// ---------------------------------------------------------------------------
+// Substitution vs. persistence (#204)
+// ---------------------------------------------------------------------------
+
+/// A context with both image clients wired and the caller's vision capability
+/// declared.
+fn ctx_split(
+    multimodal: bool,
+    substitution: &Arc<CaptureLlm>,
+    caption: &Arc<CaptureLlm>,
+) -> ToolContext {
+    let sub: Arc<dyn LlmClient> = substitution.clone();
+    let cap: Arc<dyn LlmClient> = caption.clone();
+    ctx_with_images(&[("img_0", "http://cdn.example.com/cat.png")], None)
+        .with_description_llm(sub)
+        .with_caption_llm(cap)
+        .with_multimodal(multimodal)
+}
+
+async fn view(ctx: &ToolContext) -> familiar_connect::tools::registry::ImageResult {
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let out = tool
+        .handler
+        .call(serde_json::json!({"image_id": "img_0"}), ctx)
+        .await
+        .unwrap();
+    let ToolOutput::Image(img) = out else {
+        panic!("expected image result");
+    };
+    img
+}
+
+#[tokio::test]
+async fn a_multimodal_caller_never_pays_for_the_substitution_description() {
+    let substitution = Arc::new(CaptureLlm::new("long substitution description"));
+    let caption = Arc::new(CaptureLlm::new("a cat"));
+    let img = view(&ctx_split(true, &substitution, &caption)).await;
+    assert_eq!(
+        substitution.calls(),
+        0,
+        "the caller sees the image itself; describing it again is double-pay"
+    );
+    assert_eq!(caption.calls(), 1, "exactly one call, for memory");
+    assert_eq!(img.description, "a cat");
+}
+
+#[tokio::test]
+async fn a_multimodal_caller_still_persists_a_caption() {
+    let substitution = Arc::new(CaptureLlm::new("sub"));
+    let caption = Arc::new(CaptureLlm::new("a tabby on a windowsill"));
+    let img = view(&ctx_split(true, &substitution, &caption)).await;
+    // The image never survives into history, so the caption is the ONLY thing
+    // the fact extractor, summaries, and dossiers will ever see.
+    assert_eq!(img.description, "a tabby on a windowsill");
+    let content = serialize_image_result(&img, true);
+    assert_eq!(
+        tool_content_as_text(&content),
+        "a tabby on a windowsill",
+        "the persisted projection must carry the caption"
+    );
+    let Content::Blocks(blocks) = content else {
+        panic!("multimodal content is blocks");
+    };
+    assert!(
+        blocks.iter().any(|b| b["type"] == "image_url"),
+        "and the image still reaches the model natively"
+    );
+}
+
+#[tokio::test]
+async fn a_text_only_caller_makes_one_call_serving_both_roles() {
+    let substitution = Arc::new(CaptureLlm::new("a detailed description"));
+    let caption = Arc::new(CaptureLlm::new("caption"));
+    let img = view(&ctx_split(false, &substitution, &caption)).await;
+    assert_eq!(substitution.calls(), 1);
+    assert_eq!(
+        caption.calls(),
+        0,
+        "no second call — the description IS both"
+    );
+    assert_eq!(img.description, "a detailed description");
+    // Text-only serialization sends that same string as the tool result.
+    assert_eq!(
+        serialize_image_result(&img, false),
+        Content::Text("a detailed description".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn a_multimodal_caller_falls_back_to_the_substitution_model_for_the_caption() {
+    // Legacy profile: only `image_description_model` is set. Memory must not
+    // silently lose images just because the slot gained vision.
+    let substitution = Arc::new(CaptureLlm::new("a cat"));
+    let sub: Arc<dyn LlmClient> = substitution.clone();
+    let ctx = ctx_with_images(&[("img_0", "http://cdn.example.com/cat.png")], None)
+        .with_description_llm(sub)
+        .with_multimodal(true);
+    assert_eq!(view(&ctx).await.description, "a cat");
+    assert_eq!(substitution.calls(), 1);
+}
+
+#[tokio::test]
+async fn a_text_only_caller_falls_back_to_the_caption_model() {
+    let caption = Arc::new(CaptureLlm::new("a cat"));
+    let cap: Arc<dyn LlmClient> = caption.clone();
+    let ctx = ctx_with_images(&[("img_0", "http://cdn.example.com/cat.png")], None)
+        .with_caption_llm(cap)
+        .with_multimodal(false);
+    assert_eq!(view(&ctx).await.description, "a cat");
+    assert_eq!(caption.calls(), 1);
 }
 
 #[tokio::test]
