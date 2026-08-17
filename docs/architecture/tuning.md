@@ -838,7 +838,7 @@ the store side; non-numeric input drops to NULL.
 ```toml
 [providers.embedding]
 backend          = "off"   # "off" | "hash" | "fastembed"
-dim              = 256     # hash only — vector size
+# dim            = 256     # hash only — vector size; unset defaults to 256
 fastembed_model  = "BAAI/bge-small-en-v1.5"
 fastembed_cache_dir = ""   # blank = ./.fastembed_cache (CWD-relative!)
 ```
@@ -897,6 +897,29 @@ embed.)
 | `BAAI/bge-small-en-v1.5` | 384 | ~130 MB | Default. Best speed/quality tradeoff. |
 | `BAAI/bge-base-en-v1.5` | 768 | ~440 MB | Higher quality, ~2× slower. |
 | `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB | Smallest; older but well-tested. |
+
+### `dim` under `fastembed`
+
+The model fixes the vector width, so `dim` is not a free knob here.
+Config load cross-checks the two against a static model → native-dim
+table (no download, no ONNX — the table compiles without
+`local-embed`):
+
+- **`dim` unset** — resolves to the model's native dim (384 for the
+  BGE-small default), so `EmbeddingConfig.dim` never advertises a
+  width the model cannot produce.
+- **`dim` set and matching** — accepted unchanged.
+- **`dim` set and contradicting** — rejected at load:
+
+  ```text
+  [providers.embedding].dim = 256 contradicts fastembed_model
+  'BAAI/bge-small-en-v1.5' (native dim 384); remove `dim` or set it to 384.
+  ```
+
+- **Model not in the table** — the check is skipped; the true dim is
+  only knowable once the first real vector probes it at runtime.
+
+Other backends are unaffected: `hash` owns its `dim` outright.
 
 Vectors tag with the embedder's `name` (`fastembed:<model>`), so
 upgrading from BGE-small to BGE-base accumulates new vectors beside

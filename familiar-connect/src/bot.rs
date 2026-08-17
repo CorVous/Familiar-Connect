@@ -2816,14 +2816,50 @@ pub mod voice_intake {
         }
     }
 
+    /// Register the `VoiceTick` + `SpeakingStateUpdate` handlers on `call`.
+    ///
+    /// **Must run before the connect resolves.** `add_global_event` only
+    /// enqueues an `AddEvent` control message; songbird's events task drains
+    /// control and fired events in strict arrival order and never replays for
+    /// late registrants. `SpeakingStateUpdate` (op-5) is effectively one-shot
+    /// per user per session, so any Speaking event that fires during the
+    /// WS+UDP+crypto handshake reaches zero handlers and is lost permanently —
+    /// leaving every SSRC unmapped and every transcript anonymous (#199, #205).
+    /// Needs no live connection: the driver's tasks start with the `Call`.
+    ///
+    /// Clears prior global handlers first — the `Call` is per-guild and
+    /// outlives a channel hop, so a rejoin would otherwise stack receivers
+    /// feeding dead audio channels. Track events (`TrackEvent::End`) are
+    /// per-track and unaffected.
+    pub fn register_receivers(
+        call: &mut songbird::Call,
+        sink: &Arc<RecordingSink>,
+        ssrc_map: &Arc<SsrcMap>,
+    ) {
+        call.remove_all_global_events();
+        call.add_global_event(
+            songbird::CoreEvent::VoiceTick.into(),
+            TickReceiver::new(sink.clone(), ssrc_map.clone()),
+        );
+        call.add_global_event(
+            songbird::CoreEvent::SpeakingStateUpdate.into(),
+            TickReceiver::new(sink.clone(), ssrc_map.clone()),
+        );
+    }
+
     /// Join `channel_id` in `guild_id` via songbird (songbird owns the DAVE/MLS
     /// handshake) and wire the [`RecordingSink`] to its `VoiceTick` stream.
+    ///
+    /// Uses songbird's two-stage join rather than `Songbird::join` so
+    /// [`register_receivers`] runs before stage 1 sends the gateway request —
+    /// `Songbird::join` only hands back the `Call` once the handshake has
+    /// completed, by which point Speaking events are already lost.
     ///
     /// Returns the live voice client (for TTS playback) and the sink's audio
     /// channel receiver — the caller passes both to [`start_voice_intake`].
     ///
     /// # Errors
-    /// Propagates a songbird join failure.
+    /// Propagates a songbird join failure from either stage.
     pub async fn join_voice(
         manager: &songbird::Songbird,
         guild_id: u64,
@@ -2836,21 +2872,18 @@ pub mod voice_intake {
         let cid = songbird::id::ChannelId(
             std::num::NonZeroU64::new(channel_id).unwrap_or(std::num::NonZeroU64::MIN),
         );
-        let call_lock = manager.join(gid, cid).await?;
         let (audio_tx, audio_rx) = unbounded_channel();
         let sink = Arc::new(RecordingSink::new(audio_tx));
         let ssrc_map = Arc::new(SsrcMap::default());
-        {
+        let call_lock = manager.get_or_insert(gid);
+        let stage_2 = {
             let mut call = call_lock.lock().await;
-            call.add_global_event(
-                songbird::CoreEvent::VoiceTick.into(),
-                TickReceiver::new(sink.clone(), ssrc_map.clone()),
-            );
-            call.add_global_event(
-                songbird::CoreEvent::SpeakingStateUpdate.into(),
-                TickReceiver::new(sink, ssrc_map),
-            );
-        }
+            register_receivers(&mut call, &sink, &ssrc_map);
+            call.join(cid).await?
+        };
+        // Stage 2 awaits the driver's connection attempt and must not hold the
+        // `Call` mutex — songbird deadlocks otherwise.
+        stage_2.await?;
         let voice_client: Arc<dyn VoiceClientLike> = Arc::new(SongbirdVoiceClient::new(call_lock));
         Ok((voice_client, audio_rx))
     }
@@ -3030,6 +3063,60 @@ pub mod voice_intake {
         }
         fn byte_len(&self) -> Option<u64> {
             None
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{RecordingSink, SsrcMap, SsrcResolver, TickReceiver, register_receivers};
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        fn speaking(ssrc: u32, user_id: u64) -> songbird::model::payload::Speaking {
+            songbird::model::payload::Speaking {
+                delay: Some(0),
+                speaking: songbird::model::SpeakingState::MICROPHONE,
+                ssrc,
+                user_id: Some(songbird::model::id::UserId(user_id)),
+            }
+        }
+
+        /// A Speaking event arriving before any tick must be recorded — that is
+        /// the whole point of registering handlers pre-connect (#199).
+        #[tokio::test]
+        async fn speaking_before_any_tick_is_recorded() {
+            use songbird::EventHandler as _;
+
+            let (audio_tx, _audio_rx) = unbounded_channel();
+            let sink = Arc::new(RecordingSink::new(audio_tx));
+            let ssrc_map = Arc::new(SsrcMap::default());
+            let receiver = TickReceiver::new(sink, ssrc_map.clone());
+
+            assert_eq!(ssrc_map.user_id(4242), None);
+            receiver
+                .act(&songbird::EventContext::SpeakingStateUpdate(speaking(
+                    4242, 99,
+                )))
+                .await;
+            assert_eq!(ssrc_map.user_id(4242), Some(99));
+        }
+
+        /// Handler registration must not need a live connection: `join_voice`
+        /// registers on a freshly inserted `Call` before stage 1 runs.
+        #[tokio::test]
+        async fn receivers_register_without_a_connection() {
+            let mut call = songbird::Call::standalone(
+                songbird::id::GuildId(std::num::NonZeroU64::new(1).expect("nonzero")),
+                songbird::id::UserId(std::num::NonZeroU64::new(2).expect("nonzero")),
+            );
+            assert!(call.current_connection().is_none());
+
+            let (audio_tx, _audio_rx) = unbounded_channel();
+            let sink = Arc::new(RecordingSink::new(audio_tx));
+            let ssrc_map = Arc::new(SsrcMap::default());
+            register_receivers(&mut call, &sink, &ssrc_map);
+
+            assert!(call.current_connection().is_none());
         }
     }
 }

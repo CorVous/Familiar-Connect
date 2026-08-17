@@ -108,6 +108,21 @@ separate per-channel summary. Each user turn renders with a
 which channel a line came from once multiple channels share the
 window.
 
+The `HH:MM` is local to `display_tz` and deliberately carries no date
+and no offset: the final-reminder clock anchor
+(`"It is now: 2026-05-04 2:30PM PDT (-07:00)"`) supplies both once per
+prompt, and repeating them on every line would spend the
+`[budget.<tier>]` allowance on redundant tokens. Two markers are
+interleaved into the window instead, each emitted only when the
+surviving turns actually span more than one value:
+
+- a `YYYY-MM-DD:` day marker (same shape as the RAG date headers)
+  before each new local calendar day;
+- a `{server}/{channel}` marker before each channel change.
+
+A single-day single-channel window — the common case — passes through
+byte-for-byte with no markers at all.
+
 Past `tool` turns (e.g. `view_image` results) are **folded into
 user-side narration text**, not replayed as protocol `tool`
 messages. Recent-history replay carries no tool-call linkage, so a bare
@@ -796,7 +811,7 @@ opt in; production wiring sets it).
 **Rendering.** Retrieved hits are no longer flat ``- [Alice] text``
 lines — each hit pulls ``id ± context_window`` neighbours from the
 same channel (default 1, dropping any neighbour the recent-history
-window already shows) and the result is grouped by UTC date:
+window already shows) and the result is grouped by `display_tz` date:
 
 ```
 ## Possibly relevant earlier turns
@@ -868,7 +883,7 @@ turn for me?" without a separate gating LLM call:
 
 1. **Message format carries speaker + time.** `RecentHistoryLayer`
    renders user turns as `[HH:MM Display Name #channel_id] content`
-   (UTC). Different speakers get different prefixes; the rhythm of
+   (in `display_tz`). Different speakers get different prefixes; the rhythm of
    timestamps tells the model whether a conversation is flowing
    between humans. The `#channel_id` disambiguates source once the
    cross-channel window mixes multiple channels.

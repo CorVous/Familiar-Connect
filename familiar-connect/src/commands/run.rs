@@ -597,8 +597,7 @@ impl crate::llm::LlmClient for ResponderLlmAdapter {
         &self,
         messages: Vec<crate::llm::Message>,
         tools: Option<Vec<serde_json::Value>>,
-    ) -> anyhow::Result<futures::stream::BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-    {
+    ) -> anyhow::Result<crate::llm::LlmStream> {
         self.inner.stream_completion(messages, tools).await
     }
     fn slot(&self) -> Option<&str> {
@@ -1088,6 +1087,7 @@ async fn async_main(
     projector_context.memory = familiar.config.memory_providers.clone();
     projector_context.familiar_display_name = Some(familiar.display_name());
     projector_context.dream_extraction_clause = familiar.config.dream_extraction_clause.clone();
+    projector_context.display_tz = familiar.config.display_tz.clone();
     let projectors = create_projectors(
         &familiar.config.memory_providers.projectors,
         &projector_context,
@@ -1443,7 +1443,7 @@ mod tests {
 
     fn fake_clients() -> std::collections::HashMap<String, Arc<dyn crate::llm::LlmClient>> {
         use async_trait::async_trait;
-        use futures::stream::{self, BoxStream};
+        use futures::stream;
         use serde_json::Value;
 
         struct FakeLlm(String);
@@ -1459,9 +1459,8 @@ mod tests {
                 &self,
                 _messages: Vec<crate::llm::Message>,
                 _tools: Option<Vec<Value>>,
-            ) -> anyhow::Result<BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-            {
-                Ok(Box::pin(stream::empty()))
+            ) -> anyhow::Result<crate::llm::LlmStream> {
+                Ok(crate::llm::LlmStream::new(stream::empty()))
             }
             fn slot(&self) -> Option<&str> {
                 Some(&self.0)
