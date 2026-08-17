@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
-use crate::focus::PRIVATE_MESSAGE_GUILD_NAME;
+use crate::focus::{PRIVATE_MESSAGE_GUILD_NAME, UNNAMED_CHANNEL_PREFIX};
 
 /// Per-mode operating directive. Intentionally duplicates the strings
 /// `OperatingModeLayer` is configured with — keep in sync.
@@ -71,10 +71,14 @@ fn fmt_when(now: DateTime<Utc>, display_tz: &str) -> String {
     )
 }
 
+/// Focus-line label. An unnamed channel says so — `#<snowflake>` would tell the
+/// model the channel is *named* after its id (#222) — and keeps the id, which
+/// `shift_focus` needs.
 fn channel_label(names: &HashMap<i64, String>, cid: i64) -> String {
-    names
-        .get(&cid)
-        .map_or_else(|| format!("#{cid}"), |name| format!("#{name}"))
+    names.get(&cid).map_or_else(
+        || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
+        |name| format!("#{name}"),
+    )
 }
 
 /// Unread-list item label: named channels **must** carry the numeric id so the
@@ -650,9 +654,25 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(42)
+            .channel_names(names(&[(42, "general")]))
             .render();
-        assert!(out.contains("attention is currently on #42"));
+        assert!(out.contains("attention is currently on #general"));
         assert!(!out.contains("shift_focus"));
+    }
+
+    // An unnamed focus channel used to render as `#<snowflake>`, telling the
+    // model the channel is *named* after its id (#222).
+    #[test]
+    fn unnamed_focus_channel_announces_the_missing_name() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .focus_channel_id(1_221_605_022_102_458_421)
+            .render();
+        assert!(
+            out.contains("attention is currently on unnamed channel (id 1221605022102458421)."),
+            "{out}"
+        );
+        assert!(!out.contains("#1221605022102458421"), "{out}");
     }
 
     #[test]
@@ -669,9 +689,13 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(7)
+            .channel_names(names(&[(7, "general")]))
             .post_history_instructions("ETIQUETTE")
             .render();
-        assert!(out.find("attention is currently on #7").unwrap() < out.find("ETIQUETTE").unwrap());
+        assert!(
+            out.find("attention is currently on #general").unwrap()
+                < out.find("ETIQUETTE").unwrap()
+        );
     }
 
     // --- unread digest ------------------------------------------------------
@@ -724,9 +748,10 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(3)
+            .channel_names(names(&[(3, "general")]))
             .unread_digest(vec![(10, (4, 0))])
             .render();
-        assert!(out.contains("attention is currently on #3"));
+        assert!(out.contains("attention is currently on #general"));
         assert!(out.contains("#10 (4)"));
     }
 

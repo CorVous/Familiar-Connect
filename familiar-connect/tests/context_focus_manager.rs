@@ -549,11 +549,39 @@ fn presence_text_returns_channel_name() {
     assert_eq!(fm.presence_text().as_deref(), Some("#general"));
 }
 
+// A bare id reads as the channel's *name* in presence ("✨ Server -> #1221…"),
+// which is what #222 reported. The miss must announce itself instead.
 #[test]
-fn presence_text_falls_back_to_channel_id_when_name_unknown() {
+fn presence_text_falls_back_to_unnamed_channel_with_id() {
     let (_dir, fm) = bare_fm();
     fm.set_focus_immediately(42, "text");
-    assert_eq!(fm.presence_text().as_deref(), Some("#42"));
+    assert_eq!(
+        fm.presence_text().as_deref(),
+        Some("unnamed channel (id 42)")
+    );
+}
+
+#[test]
+fn presence_text_fallback_stays_short_for_a_snowflake() {
+    // Discord truncates the presence state line.
+    let (_dir, fm) = bare_fm();
+    fm.set_focus_immediately(1_221_605_022_102_458_421, "text");
+    let text = fm.presence_text().unwrap();
+    assert!(text.contains("1221605022102458421"), "{text}");
+    assert!(text.chars().count() < 64, "{text}");
+}
+
+#[test]
+fn channel_label_falls_back_to_unnamed_with_id() {
+    let (_dir, fm) = bare_fm();
+    assert_eq!(fm.channel_label(Some(42)), "#unnamed(42)");
+}
+
+#[test]
+fn channel_label_uses_name_when_known() {
+    let (_dir, fm) = bare_fm();
+    fm.set_channel_name(42, "general");
+    assert_eq!(fm.channel_label(Some(42)), "#general(42)");
 }
 
 #[test]

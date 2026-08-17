@@ -1,19 +1,24 @@
 //! Alarm waker processor (subsystem 08).
 //!
 //! Listens on [`TOPIC_ALARM_FIRED`] and republishes a synthetic
-//! `discord.text`-shaped event so the existing `TextResponder` picks it up and
+//! `discord.text` event so the existing `TextResponder` picks it up and
 //! produces a follow-up reply. Voice-origin alarms fall back to text in the same
 //! channel id (MVP). The synthetic payload carries the *waker's* configured
 //! `familiar_id` (alarm payloads carry none); per-familiar filtering happens in
 //! the responder. The `alarm: true` marker pierces activity absence gating.
+//!
+//! Payload type and `session_id` shape must match the real text source: the
+//! subscribers `downcast_ref::<DiscordTextPayload>()` and drop anything else,
+//! and the router keys barge-in on the exact session string.
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::bus::envelope::{Event, payload};
 use crate::bus::protocols::{EventBus, Processor};
 use crate::bus::topics::{TOPIC_ALARM_FIRED, TOPIC_DISCORD_TEXT};
 use crate::log_style as ls;
+use crate::processors::DiscordTextPayload;
 
 /// Translate `alarm.fired` into a synthetic text-channel turn.
 pub struct AlarmWaker {
@@ -97,22 +102,19 @@ impl Processor for AlarmWaker {
             .get("alarm_id")
             .and_then(Value::as_str)
             .unwrap_or(&synth_event_id);
-        let synth_payload: Value = json!({
-            "familiar_id": self.familiar_id,
-            "channel_id": channel_id,
-            "content": format!("[alarm fired: {reason}]"),
-            "author": null,
-            "guild_id": null,
-            "message_id": null,
-            "reply_to_message_id": null,
-            "mentions": [],
-            "alarm": true,
-        });
+        let synth_payload = DiscordTextPayload {
+            familiar_id: self.familiar_id.clone(),
+            channel_id,
+            content: format!("[alarm fired: {reason}]"),
+            author: None,
+            alarm: true,
+            ..DiscordTextPayload::default()
+        };
 
         bus.publish(Event {
             event_id: synth_event_id.clone(),
             turn_id: format!("wake-{alarm_id}"),
-            session_id: channel_id.to_string(),
+            session_id: format!("discord:{channel_id}"),
             parent_event_ids: vec![event.event_id.clone()],
             topic: TOPIC_DISCORD_TEXT.to_owned(),
             timestamp: chrono::Utc::now(),

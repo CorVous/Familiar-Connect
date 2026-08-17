@@ -301,11 +301,30 @@ silently mislead the model long after they stopped being true.
 1. **Prompt-side**: the extractor's system message explicitly
    instructs the LLM not to emit facts about itself, the assistant,
    or its own limitations.
-2. **Post-filter**: `_is_self_capability(text)` matches a small set of
+2. **Post-filter**: `is_self_capability(text, …)` matches a small set of
    first-person and "the assistant/AI/model" patterns at the start of
    the fact. Matched facts are dropped (logged at DEBUG) before
    `append_fact`. Belt-and-braces — even if the model ignores the
    prompt, the row never lands.
+
+The post-filter is deliberately weak-handed (issue #153). Every
+alternative needs a negation or inability tail, not just an opening
+word: *the familiar loves rainy days*, *I can juggle*, *I have no
+siblings*, *I don't like Mondays*, and *as an AI researcher, Cor works
+on alignment* are prose and survive, while *the assistant cannot browse
+the web*, *the familiar has no internet access*, *as an AI, I have no
+personal preferences*, and *I don't have access to the internet* still
+drop. A separate, narrower rail matches the familiar's own display name
+followed by an inability tail (*Sapphire cannot remember names*), so
+third-person self-descriptions are caught without touching narrative
+(*Sapphire cancelled the movie night*).
+
+Operators tune it under `[providers.memory.rich_note]`:
+`self_capability_filter = false` disables the drop entirely (both
+rails); `self_capability_pattern = "<regex>"` replaces the built-in
+matcher. The pattern is compiled at config load, so a typo fails startup
+rather than the first tick. See
+[Configuration model](configuration-model.md#2-character-config).
 
 The capability ban is **narrow**: it drops *capabilities/limitations*,
 not the familiar's *narrative*. The familiar's own bits/performances,
@@ -997,9 +1016,29 @@ Pointers persist in the `focus_pointers` table
 startup `initialize()` loads them, **dropping any pointer whose channel
 is no longer subscribed** (a since-removed subscription would otherwise
 strand focus on a dead channel), then falling back to the first text and
-first voice subscription as defaults (`set_focus_immediately`). The
-`channel_names` map (channel_id → display name) is populated from
-Discord on `on_ready` purely for readable logs and the unread digest.
+first voice subscription as defaults (`set_focus_immediately`).
+
+The `channel_names` map (channel_id → display name) and its
+`guild_names` sibling drive readable logs, the unread digest, and the
+Discord presence line (`✨ <server> -> #<channel>`). Four sites
+populate them:
+
+- `on_ready` — bulk snapshot of every cached guild channel.
+- `/subscribe-text` and `/subscribe-voice` — the interaction's own
+  channel object plus the gateway-cached server name, so a channel
+  created *after* boot (absent from the ready snapshot) is still named.
+- `register_dm_channel` — the DM peer's display name, refreshed on
+  every DM, under the `Private Message` sentinel server name.
+- `rehydrate_dm_naming` at boot — the peer name recovered from history,
+  falling back to `user <peer_id>` when a freshly-allowlisted peer has
+  no history yet.
+
+There is no `ChannelUpdate` handler, so a rename mid-session is only
+picked up on the next restart. A channel that still misses the cache
+never renders as a bare snowflake: labels read `unnamed channel
+(id <cid>)` (presence, focus line) or `#unnamed(<cid>)` (logs, tool
+labels), which says *name unknown* instead of implying the channel is
+named after its id.
 
 Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N
 missed=N` on a text shift, `[👁️ Focus]` once names are known on ready.
