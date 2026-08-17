@@ -21,9 +21,9 @@ No comments were posted to any GitHub issue.
 | 208 | Close out familiar location migration | bounded chore | |
 | 214 | Add Privacy Policy and Terms of Use | bounded docs | |
 | 218 | Detect issues with model configuration via diagnostics | bounded feature | New `src/model_diagnostics.rs`. Two checks, both outside config loading so loading stays offline. (1) A detached post-boot task fetches `GET /models` and compares each slot's `tool_calling` / `multimodal` / `image_tools` against `supported_parameters` + `architecture.input_modalities`: declared-but-unsupported → `ERROR`, the inverse → `INFO` advisory; unknown id, unreachable catalog, or unparseable body → one line then silence. Never gates readiness. (2) The motivating case from #221 — `tool_calling = false` on a focus-managed slot — needs no network, so it is checked unconditionally at composition time and logged at `ERROR`. Comparison + parsing are pure and unit-tested without network. |
-| 183 | Improve token-counting heuristic | bounded feature | |
+| 183 | Improve token-counting heuristic | bounded feature | Collection and reporting landed; enforcement on the assembly path deliberately did not. `budget::TokenCalibration` is a process-wide, in-memory singleton (same shape as `SpanCollector`: poison-safe `Mutex<Option<Arc<…>>>`, `reset_token_calibration` test seam) keyed by **model**, not `model.slot` — chars-per-token is a tokenizer property, so slots sharing a model share a rate and pooling their samples converges faster, and readers only know a model anyway. It holds `Σ estimated` / `Σ actual` and reports the ratio of those totals rather than an EWMA: no decay constant to tune and exact from the first sample, where an EWMA seeded at `1.0` would spend its early calls biased toward the seed. Fed from `CallMetrics::emit`, where the heuristic's guess and OpenRouter's `prompt_tokens` are both already in hand; the running ratio is then emitted on the `[LLM call]` line as the additive `cal_ratio` key (existing keys and formats untouched; the line carries no `span=`, so `diagnose` does not scrape it). `budget::estimate_tokens_calibrated(text, model)` is an additive wrapper — `estimate_tokens` and `CHARS_PER_TOKEN` are unchanged and every pinned estimator test stands. **Calibration may only ever revise an estimate upward**: the estimate gates client-side trimming before the request is sent, so over-counting merely drops extra context while under-counting risks an API rejection; a ratio at or below `1.0` is discarded and a ratio above it is capped at `4.0` (image blocks contribute 0 chars but real tokens, so an uncapped degenerate sample would over-trim; `4.0` still covers CJK density). **Not wired into `src/context/layers.rs`:** no call site there has a model in scope — `AssemblyContext` carries none — and threading one through would mean changing `AssemblyContext` plus both responders in `processors/`, well past this change's blast radius. Layers still trim on the raw estimator, noted in the module header. |
 | 153 | Reduce strength of Regex rules for prose formatting | bounded feature | |
-| 151 | Relocate hard-coded context to default/instance pattern | bounded feature | |
+| 151 | Relocate hard-coded context to default/instance pattern | bounded feature | Eight prompt strings moved out of Rust into `[prompt]` in `_default/character.toml`, joining the six already there: `operating_mode_voice` / `operating_mode_text` (the per-mode directive — this collapses N9's verbatim duplication between `final_reminder.rs` and `run.rs::operating_modes()` into one config pair feeding both consumers), `voice_tool_ack` (the speak-before-you-call nudge), `start_activity_description` (the tool description's roleplay policy — persona guidance that happened to live in a schema field), `rolling_summary_system`, `reflection_system`, `dossier_self_system`, `dossier_other_system` (the memory projectors' instruction text). Each shipped default is byte-identical to the string it replaced, so a default-config run produces the same prompts; blanking the profile now yields no text at all rather than a stale in-code copy, which is what the new tests pin. Doctrine held: only phrasing moved — the reflection JSON contract, the `start_activity` enum + availability hints, the dossier importance ordering, and every validation rail stay in code, so a bad override degrades tone and can never break parsing. Deliberately **not** relocated: `fact_extractor.rs`'s `self_clause` / `intro` / `guidance` (~2400 chars welded to `render_contract(&FACT_SCHEMA)`, several rules with no code-level rail — needs its own override-boundary tests), the remaining `Tool::new` schema text (API surface, not persona), `structured_request.rs`'s contract renderer, and `layers.rs`'s markdown section headers. |
 | 180 | Time format hygiene | medium feature | |
 | 196 | ten-vad-sys FFI crate | large | |
 | 200 | Break out character.toml by file | large | |
@@ -89,11 +89,16 @@ vectors differ in length rather than surfacing the mismatch. Currently
 unreachable in normal operation (the embedder name keys storage), but it is
 the silent-failure surface behind #219.
 
-### N5 — `est_in_tokens` duplicates the estimator constant
+### N5 — `est_in_tokens` duplicates the estimator constant `[fixed]`
 
-`src/llm.rs:510` hand-rolls `input_chars.div_ceil(4)` instead of calling
+`src/llm.rs:510` hand-rolled `input_chars.div_ceil(4)` instead of calling
 `budget::estimate_tokens`, duplicating `CHARS_PER_TOKEN` (`src/budget.rs:20`).
 Recalibrating one silently desynchronizes the other. Relevant to #183.
+
+Fixed with #183. The call site holds a scalar count, not the text, so
+`estimate_tokens` itself was not callable; `budget::estimate_tokens_from_chars`
+now owns the arithmetic and `estimate_tokens` delegates to it, leaving one home
+for the constant.
 
 ### N6 — alarms never fire: the waker publishes an undowncastable payload `[fixed]`
 
@@ -150,12 +155,19 @@ that `text_responder.rs:878-883` uses. A mid-voice-turn shift commits straight
 to global focus with no turn-local staging. It does not misroute audio, but it
 lets a voice turn silently move the *text* focus pointer.
 
-### N9 — operating-mode instructions duplicated in two places
+### N9 — operating-mode instructions duplicated in two places `[fixed]`
 
 `src/context/final_reminder.rs:22-25` (`VOICE_INSTRUCTION` / `TEXT_INSTRUCTION`)
 and `src/commands/run.rs:171-186` (`operating_modes()`) hold the same strings
 verbatim. The latter's comment admits it: "Intentionally duplicates the strings
 `OperatingModeLayer` is configured with — keep in sync." Folded into #151.
+
+Fixed on this branch: both constants are gone. `operating_modes(&config)`
+builds one map from `[prompt].operating_mode_voice` / `.operating_mode_text`
+and hands it to both consumers — `OperatingModeLayer` and `FinalReminder`
+(via each responder's `with_mode_instructions`). The reminder holds no
+fallback copy, so an unconfigured or blank directive renders nothing rather
+than resurrecting a stale duplicate.
 
 ### N10 — stale Python-era symbol name in docs
 
