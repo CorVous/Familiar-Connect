@@ -14,7 +14,8 @@
 //! OpenRouter reports per call (#183). Calibration is **upward-only**: the
 //! estimate drives client-side trimming, so over-counting merely drops a little
 //! extra context while under-counting risks an oversized request the API
-//! rejects. See [`estimate_tokens_calibrated`].
+//! rejects. See [`estimate_tokens_calibrated`]; the assembly layers trim
+//! through it, and [`char_cap_for_tokens`] inverts it for truncation.
 //!
 //! This is a leaf module: it names [`crate::llm::Message`] but pulls in nothing
 //! from `config`/`context`, so `config` can depend on it without a cycle.
@@ -163,6 +164,18 @@ pub fn reset_token_calibration() {
     *CALIBRATION.lock().unwrap_or_else(PoisonError::into_inner) = None;
 }
 
+/// Calibration multiplier actually applied for `model`.
+///
+/// `1.0` (identity) for an unseen model or a learned ratio at or below `1.0`;
+/// otherwise the learned ratio capped at `MAX_CALIBRATION_RATIO`. Single home
+/// for the upward-only clamp — estimator and cap inverter share it.
+fn applied_ratio(model: &str) -> f64 {
+    get_token_calibration()
+        .ratio(model)
+        .filter(|r| *r > 1.0)
+        .map_or(1.0, |r| r.min(MAX_CALIBRATION_RATIO))
+}
+
 /// [`estimate_tokens`] refined by what `model` actually charged on past calls.
 ///
 /// **Upward-only, by design.** The estimate gates client-side trimming *before*
@@ -179,18 +192,53 @@ pub fn reset_token_calibration() {
 )]
 pub fn estimate_tokens_calibrated(text: &str, model: &str) -> i64 {
     let raw = estimate_tokens(text);
-    let Some(ratio) = get_token_calibration().ratio(model) else {
-        return raw;
-    };
+    let ratio = applied_ratio(model);
     if ratio <= 1.0 {
         return raw;
     }
-    let scaled = (raw as f64 * ratio.min(MAX_CALIBRATION_RATIO)).ceil();
+    let scaled = (raw as f64 * ratio).ceil();
     if scaled >= i64::MAX as f64 {
         return i64::MAX;
     }
     // Clamp: calibration may only ever revise upward.
     (scaled as i64).max(raw)
+}
+
+/// [`estimate_message_tokens`] under `model`'s calibration.
+///
+/// Content and name scale; the fixed chat framing does not.
+#[must_use]
+pub fn estimate_message_tokens_calibrated(msg: &Message, model: &str) -> i64 {
+    let mut n = estimate_tokens_calibrated(&msg.content_str(), model) + MESSAGE_OVERHEAD_TOKENS;
+    if let Some(name) = &msg.name {
+        n += estimate_tokens_calibrated(name, model);
+    }
+    n
+}
+
+/// Most Unicode scalars whose calibrated estimate still fits `max_tokens` —
+/// inverse of [`estimate_tokens_calibrated`]. `0` for a non-positive cap.
+///
+/// Truncation call sites need the *char* budget, so the calibration ratio
+/// divides here where it multiplies in the estimator; without it a truncated
+/// string would still measure over its own cap.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "token caps are small positive integers; the ratio is >= 1.0 so the quotient never exceeds max_tokens * 4"
+)]
+pub fn char_cap_for_tokens(max_tokens: i64, model: &str) -> usize {
+    if max_tokens <= 0 {
+        return 0;
+    }
+    let raw_cap = max_tokens.saturating_mul(CHARS_PER_TOKEN);
+    let scaled = (raw_cap as f64 / applied_ratio(model)).floor();
+    if scaled >= usize::MAX as f64 {
+        return usize::MAX;
+    }
+    scaled as usize
 }
 
 /// Per-section multipliers for a specific model.
@@ -356,9 +404,10 @@ impl TierBudget {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelBudgetCurve, TierBudget, TokenCalibration, estimate_message_tokens,
-        estimate_messages_tokens, estimate_tokens, estimate_tokens_calibrated,
-        estimate_tokens_from_chars, get_token_calibration, reset_token_calibration,
+        ModelBudgetCurve, TierBudget, TokenCalibration, char_cap_for_tokens,
+        estimate_message_tokens, estimate_message_tokens_calibrated, estimate_messages_tokens,
+        estimate_tokens, estimate_tokens_calibrated, estimate_tokens_from_chars,
+        get_token_calibration, reset_token_calibration,
     };
     use crate::diagnostics::testutil::singleton_guard;
     use crate::llm::Message;
@@ -527,6 +576,52 @@ mod tests {
         reset_token_calibration();
         get_token_calibration().record("dense", 100, 400);
         assert_eq!(estimate_tokens_calibrated("", "dense"), 0);
+    }
+
+    #[test]
+    fn calibrated_message_estimate_scales_content_not_framing() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        get_token_calibration().record("dense", 100, 200);
+        let msg = Message::new("user", "a".repeat(400)).with_name("Alice");
+        // Content 100 -> 200, name "Alice" 2 -> 4, framing 4 flat.
+        assert_eq!(estimate_message_tokens_calibrated(&msg, "dense"), 208);
+        // Empty model misses the store: the raw estimate, byte for byte.
+        assert_eq!(
+            estimate_message_tokens_calibrated(&msg, ""),
+            estimate_message_tokens(&msg)
+        );
+    }
+
+    // --- char_cap_for_tokens -----------------------------------------------
+
+    #[test]
+    fn char_cap_shrinks_under_calibration() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        get_token_calibration().record("dense", 100, 200);
+        assert_eq!(char_cap_for_tokens(50, "dense"), 100);
+        // Unseen and empty models keep the plain chars-per-token budget.
+        assert_eq!(char_cap_for_tokens(50, "never-seen"), 200);
+        assert_eq!(char_cap_for_tokens(50, ""), 200);
+    }
+
+    #[test]
+    fn char_cap_of_nonpositive_is_zero() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        assert_eq!(char_cap_for_tokens(0, ""), 0);
+        assert_eq!(char_cap_for_tokens(-5, ""), 0);
+    }
+
+    #[test]
+    fn char_cap_inverts_the_calibrated_estimate() {
+        let _g = singleton_guard();
+        reset_token_calibration();
+        get_token_calibration().record("dense", 100, 150);
+        let cap = char_cap_for_tokens(60, "dense");
+        let text = "a".repeat(cap);
+        assert!(estimate_tokens_calibrated(&text, "dense") <= 60);
     }
 
     #[test]

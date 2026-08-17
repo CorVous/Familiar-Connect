@@ -28,7 +28,9 @@ use familiar_connect::bus::topics::{
     TOPIC_DISCORD_TEXT, TOPIC_VOICE_ACTIVITY_START, TOPIC_VOICE_TRANSCRIPT_FINAL,
 };
 use familiar_connect::config::{CharacterConfig, load_character_config};
-use familiar_connect::context::{Assembler, CharacterCardLayer, RecentHistoryLayer};
+use familiar_connect::context::{
+    Assembler, AssemblyContext, CharacterCardLayer, Layer, RecentHistoryLayer,
+};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
 use familiar_connect::identity::Author;
@@ -100,6 +102,45 @@ pub fn default_modes() -> HashMap<String, String> {
     ]
     .into_iter()
     .collect()
+}
+
+/// Records the `model` every `build` saw — the #183 threading probe.
+#[derive(Default)]
+pub struct ModelSpyLayer {
+    seen: Mutex<Vec<String>>,
+}
+
+impl ModelSpyLayer {
+    /// Models observed, in build order.
+    pub fn seen(&self) -> Vec<String> {
+        self.seen.lock().expect("spy seen").clone()
+    }
+}
+
+#[async_trait]
+impl Layer for ModelSpyLayer {
+    fn name(&self) -> &'static str {
+        "model_spy"
+    }
+    async fn build(&self, ctx: &AssemblyContext) -> String {
+        self.seen.lock().expect("spy seen").push(ctx.model.clone());
+        String::new()
+    }
+    async fn invalidation_key(&self, ctx: &AssemblyContext) -> String {
+        ctx.model.clone()
+    }
+}
+
+/// [`make_assembler`] plus a [`ModelSpyLayer`] the caller keeps a handle on.
+pub fn spy_assembler(store: Arc<AsyncHistoryStore>, spy: &Arc<ModelSpyLayer>) -> Arc<Assembler> {
+    let card = make_card();
+    Arc::new(
+        Assembler::builder()
+            .layer(Arc::new(CharacterCardLayer::new(card)))
+            .layer(Arc::clone(spy) as Arc<dyn Layer>)
+            .recent_history(RecentHistoryLayer::builder(store).window_size(20).build())
+            .build(),
+    )
 }
 
 pub fn make_assembler(store: Arc<AsyncHistoryStore>) -> Arc<Assembler> {
@@ -230,6 +271,7 @@ pub struct ScriptedLlm {
     tool_calling: bool,
     image_tools: bool,
     abandon: AbandonStatus,
+    model: String,
 }
 
 impl ScriptedLlm {
@@ -240,7 +282,15 @@ impl ScriptedLlm {
             tool_calling: false,
             image_tools: false,
             abandon: AbandonStatus::default(),
+            model: String::new(),
         }
+    }
+
+    /// Name a model, as an OpenRouter client would (#183 calibration key).
+    #[must_use]
+    pub fn with_model(mut self, model: &str) -> Self {
+        model.clone_into(&mut self.model);
+        self
     }
 
     pub fn with_delay(deltas: &[&str], delay_ms: u64) -> Self {
@@ -279,6 +329,9 @@ impl LlmClient for ScriptedLlm {
     }
     fn slot(&self) -> Option<&str> {
         None
+    }
+    fn model(&self) -> &str {
+        &self.model
     }
     fn multimodal(&self) -> bool {
         false

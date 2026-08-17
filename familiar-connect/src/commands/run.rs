@@ -612,6 +612,11 @@ impl crate::llm::LlmClient for ResponderLlmAdapter {
     fn slot(&self) -> Option<&str> {
         self.inner.slot()
     }
+    // Forwarded, not defaulted: the trait's `""` would silently disable #183
+    // calibration for every responder.
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
     fn multimodal(&self) -> bool {
         self.inner.multimodal()
     }

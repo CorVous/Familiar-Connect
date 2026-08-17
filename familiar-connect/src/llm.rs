@@ -271,8 +271,9 @@ impl Stream for LlmStream {
 
 /// The narrow LLM client seam the rest of the system types against.
 ///
-/// Only these five methods are ever touched from outside the transport module,
-/// so a ~5-line scripted stub satisfies it (the 04/07 worker doubles and the 06
+/// Only these methods are ever touched from outside the transport module, and
+/// `model` has a default, so a ~5-line scripted stub satisfies it (the 04/07
+/// worker doubles and the 06
 /// responder doubles implement exactly this). The OpenRouter client (Layer 2,
 /// subsystem 08) implements the trait; the streaming/chat bodies, the rate-limit
 /// semaphore, and `create_llm_clients` are that later task's remit.
@@ -298,6 +299,18 @@ pub trait LlmClient: Send + Sync {
 
     /// The config slot label (`"fast"` / `"prose"` / `"background"`), or `None`.
     fn slot(&self) -> Option<&str>;
+
+    /// The model id, keying #183 token calibration.
+    ///
+    /// Defaults to `""` — a calibration miss, leaving the raw estimate — so
+    /// stubs need not implement it. Decorators must forward the inner value.
+    #[allow(
+        clippy::unnecessary_literal_bound,
+        reason = "only this default returns a literal; overrides borrow from self"
+    )]
+    fn model(&self) -> &str {
+        ""
+    }
 
     /// Whether `ImageResult`s serialize as multimodal blocks for this client.
     fn multimodal(&self) -> bool;
@@ -1422,6 +1435,10 @@ mod client {
             self.slot.as_deref()
         }
 
+        fn model(&self) -> &str {
+            &self.model
+        }
+
         fn multimodal(&self) -> bool {
             self.multimodal
         }
@@ -1645,6 +1662,17 @@ mod client {
 
         fn user(text: &str) -> Message {
             Message::new("user", text)
+        }
+
+        // --- trait surface -------------------------------------------------
+
+        /// #183: the model must reach calibration through the trait object the
+        /// responders hold, not just the inherent accessor.
+        #[test]
+        fn model_reaches_through_the_trait_object() {
+            let c = OpenRouterClient::builder("k", "vendor/model-x").build();
+            let erased: &dyn crate::llm::LlmClient = &c;
+            assert_eq!(erased.model(), "vendor/model-x");
         }
 
         // --- build_payload -------------------------------------------------
@@ -3040,7 +3068,7 @@ pub use client::{
 
 #[cfg(test)]
 mod tests {
-    use super::{Content, LlmDelta, Message, sanitize_name};
+    use super::{Content, LlmClient, LlmDelta, LlmStream, Message, sanitize_name};
     use serde_json::{Value, json};
 
     // --- sanitize_name -----------------------------------------------------
@@ -3226,5 +3254,40 @@ mod tests {
     #[test]
     fn content_default_is_empty_text() {
         assert_eq!(Content::default(), Content::Text(String::new()));
+    }
+
+    // --- LlmClient::model default (#183) -----------------------------------
+
+    struct BareStub;
+
+    #[async_trait::async_trait]
+    impl LlmClient for BareStub {
+        async fn chat(&self, _messages: Vec<Message>) -> anyhow::Result<Message> {
+            Ok(Message::new("assistant", "ok"))
+        }
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<Value>>,
+        ) -> anyhow::Result<LlmStream> {
+            Ok(LlmStream::new(futures::stream::empty()))
+        }
+        fn slot(&self) -> Option<&str> {
+            None
+        }
+        fn multimodal(&self) -> bool {
+            false
+        }
+        fn tool_calling_enabled(&self) -> bool {
+            false
+        }
+    }
+
+    // A stub that never names a model keeps the raw estimator: `""` misses the
+    // calibration store.
+    #[test]
+    fn model_defaults_to_empty_string() {
+        let c: &dyn LlmClient = &BareStub;
+        assert_eq!(c.model(), "");
     }
 }

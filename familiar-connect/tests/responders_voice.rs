@@ -26,8 +26,8 @@ use familiar_connect::processors::{MemberResolver, ResponderLlm};
 use familiar_connect::tts_player::MockTTSPlayer;
 
 use support::{
-    CapturingLlm, LogCapture, ScriptedLlm, TestFocusManager, activity_start, default_config,
-    default_modes, make_assembler, store, text_delta, voice_final,
+    CapturingLlm, LogCapture, ModelSpyLayer, ScriptedLlm, TestFocusManager, activity_start,
+    default_config, default_modes, make_assembler, spy_assembler, store, text_delta, voice_final,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -1238,4 +1238,34 @@ async fn overridden_operating_mode_reaches_the_trailing_reminder() {
     let trailing = llm.captured()[0].last().unwrap().content_str();
     assert!(trailing.contains("WHISPER_MARKER"), "{trailing}");
     assert!(!trailing.contains("You are speaking aloud"), "{trailing}");
+}
+
+// ---------------------------------------------------------------------------
+// Model threading (#183)
+// ---------------------------------------------------------------------------
+
+/// Voice assembles with the model too — same seam as text.
+#[tokio::test]
+async fn assembly_context_carries_the_llm_model() {
+    let s = store();
+    let spy = Arc::new(ModelSpyLayer::default());
+    let router = Arc::new(TurnRouter::new());
+    let r = VoiceResponder::new(
+        spy_assembler(Arc::clone(&s), &spy),
+        Arc::new(ScriptedLlm::new(&["hi"]).with_model("vendor/model-x")),
+        Arc::new(MockTTSPlayer::new(5, 5)),
+        s,
+        router,
+        "fam",
+    )
+    .with_mode_instructions(default_modes())
+    .with_voice_tool_ack(default_config().voice_tool_ack);
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hello", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert_eq!(spy.seen(), vec!["vendor/model-x".to_owned()]);
 }
