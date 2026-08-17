@@ -11,8 +11,6 @@ by the admin, never exposed through Discord.
 - `DISCORD_BOT` — Discord bot token
 - `OPENROUTER_API_KEY` — shared across every LLM call site
 - `CARTESIA_API_KEY` — Cartesia TTS (required when `[tts].provider="cartesia"`, the default)
-- `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech (placeholders; the Azure backend is not wired)
-- `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS (placeholder; the Gemini backend is not wired)
 - `DEEPGRAM_API_KEY` — Deepgram STT credential. Every other Deepgram knob lives in `[providers.stt.deepgram]`. Full list: [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
 - `FAMILIAR_ID` — picks the character folder (under the familiars root) this process runs.
 - `FAMILIARS_ROOT` — overrides the per-user familiars root (default: platform data dir). `FAMILIAR_DEFAULTS_ROOT` overrides where the tracked `_default` skeleton resolves (default: `data/familiars`). See [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
@@ -106,12 +104,22 @@ Surface today:
   [Image viewing](overview.md#image-viewing). Both flags are cross-checked
   against the model at startup — see
   [Startup model diagnostics](#startup-model-diagnostics).
-- `[tts]` — provider (`cartesia` (default) / `azure` / `gemini`) + provider-specific voice / model fields. Only `cartesia` has a wired backend; the other two are accepted by config validation and refused at startup.
+- `[tts]` — provider (`cartesia`, the default and only implemented backend) + its voice / model fields.
 - `[focus]` — attentional unread-nudge controls (`unread_nudge_enabled`,
   `nudge_debounce_seconds`). See
   [Tuning — Attentional focus](tuning.md#attentional-focus).
 - `[tools]` — agentic loop bounds (`loop_max_iterations`, default
   `5`), shared by voice and text responders.
+- `[tools].trusted_image_hosts` — hosts `view_image` may fetch.
+  Default-deny: exact hostnames, or a `*.suffix` pattern matching any
+  subdomain of `suffix`. Ships with Discord's CDNs plus a short list of
+  image-only CDNs. Entries must be bare hostnames — a scheme, path, or
+  port is rejected at load.
+- `[tools].allow_untrusted_image_urls` — default `false`. `true` drops
+  the host list. Private, loopback, link-local, and other reserved
+  addresses stay refused either way, as do non-http(s) schemes; that
+  rule has no config escape. See
+  [Security — outbound image fetches](security.md#outbound-image-fetches-view_image).
 - `[prompt].post_history_instructions` — free-text block appended to
   the *trailing* reminder, the system message that sits after recent
   history (right before the model's next turn). The deepest,
@@ -171,13 +179,11 @@ meaningful selection.
 | Provider | Status | Env vars | Character fields |
 |---|---|---|---|
 | `cartesia` (default) | wired | `CARTESIA_API_KEY` | `cartesia_voice_id`, `cartesia_model` |
-| `azure` | **not wired** | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | `azure_voice` |
-| `gemini` | **not wired** | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | `gemini_voice`, `gemini_model` (+ optional style / scene / pace / accent / context / audio-profile) |
 
-`azure` and `gemini` remain valid config values — they are placeholders for
-backends that have not landed. Selecting one is refused at startup with an
-`ERROR` naming the fix, and the process continues without TTS rather than
-failing on the first synthesis mid-conversation.
+`cartesia` is the only accepted value. The `azure` and `gemini` stubs were
+removed; a profile still naming one fails config validation with a message
+saying the provider is no longer supported. The `TtsClient` /
+`StreamingTtsClient` seam remains the extension point for further backends.
 
 ### Startup model diagnostics
 

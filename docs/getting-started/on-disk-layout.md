@@ -72,7 +72,7 @@ reasoning    = "medium"
 tool_calling = true
 
 [tts]
-provider          = "cartesia"   # only wired backend
+provider          = "cartesia"   # the only implemented backend
 cartesia_voice_id = "..."
 cartesia_model    = "sonic-3"
 ```

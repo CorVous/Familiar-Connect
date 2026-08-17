@@ -1,14 +1,16 @@
 //! Logs-first timing/diagnostics: spans, collectors, voice budget, cold-cache
-//! signals, summary table (subsystem 01).
+//! signals, summary tables (subsystem 01).
 //!
 //! Layer 0: imports only [`crate::log_style`]. The public surface is
 //! [`spans::timed_sync`]/[`spans::timed_async`], the
 //! [`collector::SpanCollector`] ring +
 //! singleton, the [`voice_budget::VoiceBudgetRecorder`] funnel, the
-//! [`cold_cache`] signal detectors, and [`report::render_summary_table`].
+//! [`cold_cache`] signal detectors, the [`llm_calls`] prompt-cache log
+//! aggregation, and [`report`]'s renderers.
 
 pub mod cold_cache;
 pub mod collector;
+pub mod llm_calls;
 pub mod report;
 pub mod spans;
 pub mod voice_budget;

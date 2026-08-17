@@ -10,7 +10,7 @@ This is a Cargo workspace (edition 2024). Install a Rust toolchain via
 only toolchain needed to build, test, and run the workspace.
 
 Integration surfaces are feature-gated (`discord`, `discord-voice`,
-`stt-deepgram`, `local-turn`, `local-embed`, `twitch`, `azure-tts`,
+`stt-deepgram`, `local-turn`, `local-embed`, `twitch`,
 `audio-resample`); the defaults (`store`, `net`, `images`) cover everything
 unit tests need. Build a combo with `--features`:
 

@@ -32,7 +32,7 @@ upstream; this file is the whole record.
 | 181 | Tool call context requirements | architectural | not attempted |
 | 155 | Adhere to design guidelines from eval trials | architectural | not attempted |
 | 204 | Decide on image processing strategy | design decision | not attempted — needs a product call |
-| 206 | Research staged passes and cache optimization | research | not attempted |
+| 206 | Research staged passes and cache optimization | research | measurement capability landed; design change deliberately deferred pending data |
 | 207 | Simplify vectorization strategy (Turso) | research | not attempted |
 | 96 | Parallel database accesses | blocked upstream | not attempted |
 | 130 | Memory-hardening follow-ups | deferred by author | not attempted, per the issue itself |
@@ -69,7 +69,10 @@ so a deliberate `<silent>` decision was indistinguishable from a user barge-in.
 `note_abandon_status`, and the two bare (no-tools) responder paths mark
 `silent` / `suppressed`. Genuine barge-in still reports `cancelled`; the
 tool-enabled paths were never affected because they drain the stream to
-completion. `diagnose` does not scrape this line (no `span=` key), confirmed.
+completion. `diagnose`'s span regex does not scrape this line (no `span=` key);
+the #206 `[LLM call]` pass added later does, and counts the status vocabulary
+open-endedly, so `silent` / `suppressed` appear in its status column without
+further change.
 
 ### 221 — tool calling is no longer optional
 `shift_focus` was the only post-startup mutator of focus, so a slot with
@@ -229,6 +232,17 @@ the symptom. The issue also suspects "bad data being fed in by the app", and
 that is what this was. **This needs live confirmation before closing**; the fix
 is in the voice path, which cannot be exercised without a real Discord call.
 
+### 206 — prompt-cache measurement, not a redesign
+The issue asks for profiling before any staged-pass or breakpoint change, so
+only the profiling landed. `diagnose` gained a second aggregation over
+`[LLM call]` lines (`diagnostics::llm_calls`), printed as extra tables after
+the span table and only when such lines are present — a span-only log renders
+byte-identically to before, which is pinned by a test. The hypothesis it is
+built to test, and the reading guide, are under
+[Not attempted, and why](#not-attempted-and-why) below and in
+`docs/architecture/tuning.md` § Measuring prompt-cache behaviour. No prompt
+assembly, layer order, cache breakpoint or worker cadence changed.
+
 ## Not attempted, and why
 
 These are recorded rather than half-done. Each is either genuinely large, or
@@ -257,7 +271,28 @@ turns on a decision that is the author's to make.
   OpenRouter metadata that would drive the automatic selection it proposes, so
   the blocker is the decision, not the plumbing.
 - **#206 (staged passes and cache optimization)** — the issue demands "detailed
-  and comprehensive profiling to justify design decisions" before any change.
+  and comprehensive profiling to justify design decisions" before any change,
+  so the profiling landed and the design change did not. `diagnose` now
+  aggregates `[LLM call]` lines alongside the span table: per `(slot, model)`
+  cache-hit rate both by call and token-weighted, `ttfb_ms`/`ttft_ms`
+  percentiles split by hit versus miss, mean prompt size, and observed
+  token-estimator accuracy. Prompt assembly, layer order, cache breakpoints and
+  worker cadences are untouched.
+
+  The hypothesis it exists to test: the seven system-prompt layers (character
+  card, operating mode, lorebook, conversation summary, reflections, people
+  dossier, RAG context) join into one string and become a single system
+  message, and for `anthropic/*` models `mark_system_cache_breakpoint` stamps
+  `cache_control` on that message's last content block — the whole prompt.
+  Anthropic gives no partial credit inside a marked block, and the tail of that
+  block changes every turn: `rag_context` is the last layer and its cue is the
+  literal current utterance, plus the voice head reminder carries a clock line.
+  If so, `slot=fast` pays full price every turn. The text path (`slot=prose`,
+  GLM) sets no `cache_control` at all and leans on the provider's automatic
+  prefix caching, which does award partial credit — so the two slots side by
+  side separate "the breakpoint mechanism is wrong" from "the layer order is
+  wrong". Reading guide: `docs/architecture/tuning.md` § Measuring prompt-cache
+  behaviour.
 - **#207 (Turso vector search)** — a storage-backend migration.
 - **#96 (parallel database access)** — the author is explicitly waiting on a
   Turso release.
@@ -271,29 +306,34 @@ Defects and papercuts found incidentally during the sweep. Not filed on
 GitHub. `[fixed]` items landed on this branch; `[open]` items are recorded
 here only.
 
-### N1 — shipped default selects an unimplemented TTS backend `[fixed]`
+### N1 — shipped default selected an unimplemented TTS backend `[fixed]`
 
-`data/familiars/_default/character.toml:331` and the Rust default
-(`src/config.rs:351`) both set `[tts].provider = "azure"`. Both the Azure and
-Gemini backends are stubs that return an error at synthesis time
-(`src/tts.rs:1112`, `src/tts.rs:1329` — "backend not wired (deferred to
-wiring layer 10)"). Cartesia is the only functional provider. `.env.example`
-and `docs/getting-started/on-disk-layout.md` describe Azure as the default and
-tell the user to set `AZURE_SPEECH_KEY`.
+`data/familiars/_default/character.toml` and the Rust default both set
+`[tts].provider = "azure"`. Both the Azure and Gemini backends were stubs that
+returned "backend not wired (deferred to wiring layer 10)" at synthesis time.
+Cartesia is the only functional provider. `.env.example` and the docs described
+Azure as the default and told the user to set `AZURE_SPEECH_KEY`.
 
-Net effect: a fresh install that follows the docs has no working TTS, and the
-failure surfaces mid-conversation on the first synthesis rather than at
-startup. Enabling the `azure-tts` feature does not help — the backend is
+Net effect: a fresh install that followed the docs had no working TTS, and the
+failure surfaced mid-conversation on the first synthesis rather than at
+startup. Enabling the `azure-tts` feature did not help — the backend was
 unwired regardless of the flag.
 
-Fixed on this branch: the shipped default is now `cartesia` in both places
-(`TTSConfig::default()` and the `parse_tts_config` fallback), matching the
-`cartesia_voice_id` / `cartesia_model` the profile already carried. `azure` and
-`gemini` stay valid config values — they are placeholders for real work — but
-`tts::unwired_provider_reason` names them, and the composition root refuses to
-build a client for either, logging at `ERROR` and running without TTS instead
-of failing on the first synthesis. `.env.example`, the `_default` profile, and
-the five docs that called Azure the default were updated in the same change.
+Fixed in two steps. First the shipped default moved to `cartesia` in both
+places (`TTSConfig::default()` and the `parse_tts_config` fallback), matching
+the `cartesia_voice_id` / `cartesia_model` the profile already carried, and a
+startup refusal guarded the unwired providers.
+
+Then the stubs were **removed outright** rather than left guarded: the
+`AzureTTSClient` / `GeminiTTSClient` types, their backend seam traits, their
+`TtsClientKind` variants, the `azure-tts` feature, the never-referenced
+`azure-speech` dependency, and the `azure_voice` / `gemini_*` config keys are
+all gone, and with them the startup refusal that only existed to guard them —
+`[tts].provider` now accepts `cartesia` alone. A profile still naming a removed
+provider fails config validation with `[tts].provider '<name>' is no longer
+supported`, so the breakage is loud and names the fix. The `TtsClient` /
+`StreamingTtsClient` seam is untouched: adding a real backend is still one new
+type (roadmap V4).
 
 ### N2 — Deepgram connect URL with member names is logged at INFO `[fixed]`
 
@@ -307,12 +347,40 @@ Fixed on this branch: `DeepgramTranscriber::redacted_ws_url` renders the same
 URL with the keyterm values replaced by a count, keeping the tunables that make
 the line worth logging. The connect log uses it.
 
-### N3 — `view_image` fetches arbitrary URLs
+### N3 — `view_image` fetches attacker-chosen hosts `[fixed]`
 
-`src/tools/image.rs:59-86,113-117` issues an unrestricted GET to any URL the
-model passes, including URLs a user pastes into chat (`src/bot.rs:632-641`).
-No scheme/host/private-range restriction, so a pasted link discloses the
-operator's IP to an arbitrary host, and internal addresses are reachable.
+The original write-up here said the model passes a URL. It does not, and the
+correction matters: `view_image_handler` takes an `image_id` (`img_0`, `img_1`,
+…) and looks the URL up in `ctx.images`, a map the *bot* built. So the reachable
+set is not "whatever the model invents" — it is whatever landed in that map.
+`collect_images` (`src/bot.rs`) fills it from three sources: message
+attachments (Discord-hosted), embeds preferring Discord's re-hosted `proxy_url`
+(Discord-hosted), and `IMAGE_URL_RE.find_iter(content)` — a regex scrape of
+inline image URLs out of the message text. **The third source is the hole**: any
+user in the channel can paste `https://attacker.example/x.png`, it becomes
+`img_N`, and if the model views it the bot GETs it. That discloses the
+operator's IP and reaches whatever the host is, including addresses only the
+operator's machine can route to. The content-type check was applied *after* the
+response arrived, so loopback / link-local / RFC1918 could be probed by timing
+even when the fetch was then rejected.
+
+Measured against the 11,615-turn history DB before fixing: only 13 turns
+contain an inline image URL at all, across exactly three hosts —
+`cdn.discordapp.com` (16 URLs), `media.discordapp.net` (2), and
+`64.media.tumblr.com` (2). Default-deny therefore costs essentially nothing in
+practice.
+
+Fixed on this branch. `tools::image_policy::UrlGuard` gates every fetch at the
+fetch boundary — not at `collect_images` — so all three sources, and any fourth
+added later, face one check. Two rules, applied before a socket opens:
+non-http(s) schemes and non-public resolved addresses are refused with no
+config escape (the check runs on resolved IPs, so a name pointing at
+`127.0.0.1` is refused too); and `[tools].trusted_image_hosts` is a
+default-deny allowlist, bypassable with `[tools].allow_untrusted_image_urls =
+true` — which still cannot reach a private address. Redirects are followed by
+hand so each hop re-enters the guard, and the connection is pinned to the
+validated addresses against rebinding. See
+[Security](docs/architecture/security.md#outbound-image-fetches-view_image).
 
 ### N4 — `cosine` silently returns 0.0 on dimension mismatch
 

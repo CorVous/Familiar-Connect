@@ -78,17 +78,13 @@ Copy `.env.example` to `.env` and fill:
 | `DISCORD_BOT` | always | Bot token. **Not** `DISCORD_BOT_TOKEN`. Missing → exit 1. |
 | `OPENROUTER_API_KEY` | always | LLM. Missing → exit 1. |
 | `DEEPGRAM_API_KEY` | voice STT | Required when `[providers.stt].backend="deepgram"` (default). |
-| `CARTESIA_API_KEY` | TTS (default provider) | The only wired backend; byte-streaming playback. |
-| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | nothing yet | `[tts].provider="azure"` has no backend and is refused at startup. |
-| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | nothing yet | `[tts].provider="gemini"` has no backend and is refused at startup. `GOOGLE_` wins if both set. |
+| `CARTESIA_API_KEY` | TTS | The only implemented backend; byte-streaming playback. |
 | `FAMILIAR_ID` | selects familiar | Or pass `--familiar <id>` (flag wins). |
 | `FAMILIARS_ROOT` | per-user familiars root | Overrides the platform data-dir default (#201). |
 | `FAMILIAR_DEFAULTS_ROOT` | `_default` skeleton root | Overrides the CWD-relative `data/familiars`. |
 
 TTS/STT/turn-detector construction **degrades, never fails**: an unavailable key
-logs a warning and the text path keeps working. Selecting an unwired TTS
-provider (`azure` / `gemini`) is louder — an `ERROR` at startup naming the fix —
-but still degrades rather than exiting.
+logs a warning and the text path keeps working.
 
 ### Discord Developer Portal
 
@@ -370,6 +366,12 @@ cargo run --release -- diagnose voice.log      # p50/p95/last_ms per span; '-' r
 `/diagnostics` in Discord shows the same table live (plus focus + unread lines).
 Voice budget spans to watch: `voice.total` (stt_final→playback_start),
 `voice.vad_to_stt`, `voice.stt_to_ttft`, `voice.tts_to_playback`.
+
+A log that also carries `[LLM call]` lines gets three extra tables: per-slot
+prompt-cache hit rates, `ttfb_ms`/`ttft_ms` split by cache hit versus miss, and
+token-estimator accuracy per model. How to read them — and what they say about
+issue #206 — is in
+[Tuning § Measuring prompt-cache behaviour](../architecture/tuning.md#measuring-prompt-cache-behaviour-diagnose).
 
 **Fallback seams if a dependency misbehaves:**
 - **SQLite:** `rusqlite` (bundled) is already the default `store` engine — no
