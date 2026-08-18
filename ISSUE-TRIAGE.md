@@ -16,7 +16,7 @@ upstream; this file is the whole record.
 | 219 | `dim` contradicting `fastembed_model` fails silently | bounded bug | fixed |
 | 220 | silent reported as cancelled | bounded bug | fixed |
 | 221 | Tool calling is no longer optional | bounded bug | fixed |
-| 222 | Familiars don't report focused channel correctly | bounded bug | fixed |
+| 222 | Familiars don't report focused channel correctly | bounded bug | fixed — first pass missed the root cause, see below |
 | 199 | High volume of decryption failures | investigation | fixed — and a worse defect found beside it |
 | 214 | Add Privacy Policy and Terms of Use | bounded docs | fixed |
 | 218 | Detect issues with model configuration via diagnostics | bounded feature | fixed |
@@ -92,14 +92,42 @@ confined to the tool-less configuration:
    post the literal call syntax to Discord. It now runs the same guard.
 
 ### 222 — channel reported as a raw snowflake
-`/subscribe-text` and `/subscribe-voice` never recorded channel or guild names,
-so any channel absent from the `on_ready` snapshot stayed nameless forever and
-presence rendered a bare snowflake. Both handlers now record names from the
-interaction (no REST added), a historyless DM falls back to its peer id, and
-the remaining misses render `unnamed channel (id N)`. A gateway backfill at the
-point of the miss was considered and rejected: `FocusManager` is
-feature-agnostic core with no cache access, and resolving an uncached channel
-is a REST round-trip on the presence path.
+**The first pass missed the root cause.** It fixed real gaps — `/subscribe-text`
+and `/subscribe-voice` never recorded channel or guild names, a historyless DM
+had no peer name, and a miss rendered a bare snowflake instead of
+`unnamed channel (id N)` — but it left the reporter's actual symptom in place:
+presence still read `unnamed channel (id …)` for an ordinary, long-subscribed
+guild channel.
+
+The real cause is that **the `on_ready` snapshot was always empty**. The
+serenity `ready` handler built `channel_names` / `guild_names` from
+`ctx.cache.guild(...)` for each entry in `ready.guilds`, but Discord's READY
+payload lists guilds only as unavailable stubs (`{id, unavailable: true}`) —
+full guild data follows as a burst of `GUILD_CREATE` events. Worse, serenity's
+own cache update for READY runs *before* the handler is dispatched and
+explicitly removes every guild in `ready.guilds` from `cache.guilds`
+(`CacheUpdate for ReadyEvent`), so the lookup returned `None` for every guild,
+on a cold start *and* on a reconnect. With no `guild_create`, `channel_update`,
+or `guild_update` handler anywhere, nothing ever filled the caches, and every
+guild channel rendered via the fallback for the whole session.
+
+Fixed by adding `guild_create` (plus `channel_update` / `guild_update`, see
+N14) feeding a new serenity-free seam, `BotEvents::on_guild_available(GuildInfo)`,
+which reuses `record_channel_naming`. Because focus is seeded at boot — before
+any name is known — and `sync_presence` runs then, a naming batch also re-syncs
+presence, but only when the focused channel's rendered label actually changed
+(one presence update per batch; Discord rate-limits presence). Without that
+re-sync the status would stay wrong until the next focus shift and the bug
+would look unfixed. The re-sync keeps the B-PR24 ordering: an in-flight
+activity re-asserts its away presence afterwards, so a naming batch cannot
+clobber an idle/dnd status with the online focus line.
+
+The `ready` snapshot is kept, now sourced from `ctx.cache.guilds()` rather than
+the READY stub list, so it covers a warm reconnect instead of being dead code.
+
+A gateway backfill at the point of the miss was considered and rejected:
+`FocusManager` is feature-agnostic core with no cache access, and resolving an
+uncached channel is a REST round-trip on the presence path.
 
 ### 199 — decryption failures, and the real bug beside them
 The reported `RTCP decryption failed: Crypto(Error)` spam is **benign upstream
@@ -563,16 +591,19 @@ channel replied at all), but whether an alarm should also pierce focus is a
 product decision, not a bug fix. Related to #221, where focus switching is
 reachable only via a tool call.
 
-### N14 — a channel rename is invisible until the next restart
+### N14 — a channel rename is invisible until the next restart `[fixed]`
 
 Found while fixing #222. The focus name caches (`channel_names` / `guild_names`)
-are write-only pushes from four discovery points — the `on_ready` snapshot, both
-`/subscribe-*` handlers (added with the #222 fix), `register_dm_channel`, and
-boot-time `rehydrate_dm_naming`. There is no `ChannelUpdate` / `GuildUpdate`
-handler, so renaming a channel or server mid-session leaves presence, logs, and
-the model's focus line showing the *old* name until the process restarts. Cheap
-to close (`EventHandler::channel_update` → `fm.set_channel_name`), but it is a
-separate gateway event from the one #222 reported.
+were write-only pushes from discovery points that all fire once — the (empty)
+`on_ready` snapshot, both `/subscribe-*` handlers, `register_dm_channel`, and
+boot-time `rehydrate_dm_naming`. With no `ChannelUpdate` / `GuildUpdate`
+handler, renaming a channel or server mid-session left presence, logs, and the
+model's focus line showing the *old* name until the process restarted.
+
+Closed with the second #222 pass: `EventHandler::channel_update` and
+`guild_update` now feed the same `on_guild_available` seam as `guild_create`,
+so a rename updates the caches and re-syncs presence when it touches the
+focused channel.
 
 ### N15 — a vision-capable slot paid twice for every image `[fixed]`
 
