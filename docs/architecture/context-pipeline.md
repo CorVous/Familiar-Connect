@@ -1075,28 +1075,45 @@ first voice subscription as defaults (`set_focus_immediately`).
 
 The `channel_names` map (channel_id → display name) and its
 `guild_names` sibling drive readable logs, the unread digest, and the
-Discord presence line (`✨ <server> -> #<channel>`). Four sites
+Discord presence line (`✨ <server> -> #<channel>`). These sites
 populate them:
 
-- `on_ready` — bulk snapshot of every cached guild channel.
+- `guild_create` — the gateway's full guild payload (channel list plus
+  server name). This is where naming actually arrives: the READY payload
+  lists guilds as *unavailable stubs*, with the real data following as a
+  burst of `GUILD_CREATE` events, so a ready-time snapshot sees nothing
+  on a cold start. The same handler covers joining a guild mid-session.
+- `channel_update` and `guild_update` — mid-session renames of a
+  channel or a server.
 - `/subscribe-text` and `/subscribe-voice` — the interaction's own
   channel object plus the gateway-cached server name, so a channel
-  created *after* boot (absent from the ready snapshot) is still named.
+  created *after* boot is named the moment it is subscribed.
 - `register_dm_channel` — the DM peer's display name, refreshed on
   every DM, under the `Private Message` sentinel server name.
 - `rehydrate_dm_naming` at boot — the peer name recovered from history,
   falling back to `user <peer_id>` when a freshly-allowlisted peer has
   no history yet.
 
-There is no `ChannelUpdate` handler, so a rename mid-session is only
-picked up on the next restart. A channel that still misses the cache
-never renders as a bare snowflake: labels read `unnamed channel
-(id <cid>)` (presence, focus line) or `#unnamed(<cid>)` (logs, tool
-labels), which says *name unknown* instead of implying the channel is
-named after its id.
+`on_ready` still snapshots whatever guilds the gateway cache already
+holds. That covers a warm reconnect only and is empty on a cold start,
+which is why it was never the fix for #222.
+
+Every naming batch re-syncs the presence line, but only when the focused
+channel's rendered label actually changed — one presence update per
+batch, because Discord rate-limits presence updates. Without that
+re-sync, focus seeded at boot (before any name is known) would keep the
+`unnamed channel` fallback in the status until the next focus shift. As
+on ready, an in-flight activity re-asserts its away presence afterwards,
+so the online focus line never clobbers an idle/dnd status.
+
+A channel that still misses the cache never renders as a bare snowflake:
+labels read `unnamed channel (id <cid>)` (presence, focus line) or
+`#unnamed(<cid>)` (logs, tool labels), which says *name unknown* instead
+of implying the channel is named after its id.
 
 Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N
-missed=N` on a text shift, `[👁️ Focus]` once names are known on ready.
+missed=N` on a text shift, `[Focus] guild=… named=N` (debug) per naming
+batch.
 
 #### Unread nudge
 

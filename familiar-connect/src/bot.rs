@@ -220,6 +220,18 @@ pub struct ReadyInfo {
     pub guild_names: Vec<(i64, String)>,
 }
 
+/// A guild's naming batch — `GUILD_CREATE`, or a channel / guild rename.
+///
+/// READY carries only unavailable guild stubs, so this is where channel and
+/// server names actually arrive (#222).
+#[derive(Clone, Debug, Default)]
+pub struct GuildInfo {
+    /// Server name; `None` when the gateway cache hasn't got it yet.
+    pub guild_name: Option<String>,
+    /// `(channel_id, channel_name)` for every channel in the batch.
+    pub channels: Vec<(i64, String)>,
+}
+
 // ---------------------------------------------------------------------------
 // Seam traits
 // ---------------------------------------------------------------------------
@@ -1035,10 +1047,9 @@ impl BotEvents {
         }
     }
 
-    /// Record display names for a channel the `on_ready` snapshot missed —
-    /// created (or first subscribed) after boot. Without this the focus caches
-    /// stay empty for that channel and every label degrades to its raw id
-    /// (#222). Empty / absent names leave the cache untouched.
+    /// Record display names for one channel. Without this the focus caches stay
+    /// empty for that channel and every label degrades to its raw id (#222).
+    /// Empty / absent names leave the cache untouched.
     fn record_channel_naming(
         &self,
         channel_id: i64,
@@ -1312,6 +1323,12 @@ impl BotEvents {
             }));
             sync_presence(fm, self.handle.presence.as_ref()).await;
         }
+        self.resync_activity_presence().await;
+    }
+
+    /// Let an in-flight activity re-assert its away presence over the online
+    /// focus presence (B-PR24 ordering); idle ⇒ no-op.
+    async fn resync_activity_presence(&self) {
         let engine = self
             .handle
             .activity_engine
@@ -1320,6 +1337,37 @@ impl BotEvents {
             .clone();
         if let Some(engine) = engine {
             engine.resync_presence().await;
+        }
+    }
+
+    /// Naming batch from `GUILD_CREATE`, `CHANNEL_UPDATE`, or `GUILD_UPDATE`.
+    ///
+    /// The real population path for the focus name caches: READY lists guilds
+    /// as unavailable stubs, so full channel data arrives here (#222). Also
+    /// covers joining a guild and mid-session renames (N14).
+    ///
+    /// Presence is captured before and after the batch and re-synced only when
+    /// the focused channel's rendered label moved — one update per batch, since
+    /// Discord rate-limits presence. An in-flight activity re-asserts its away
+    /// presence afterwards, same ordering as `on_ready`.
+    pub async fn on_guild_available(&self, info: GuildInfo) {
+        let Some(fm) = &self.handle.focus_manager else {
+            return;
+        };
+        let before = (fm.presence_guild(), fm.presence_text());
+        for (cid, name) in &info.channels {
+            self.record_channel_naming(*cid, Some(name), info.guild_name.as_deref());
+        }
+        tracing::debug!(
+            target: "familiar_connect.bot",
+            "{} {} {}",
+            ls::tag("Focus", ls::LC),
+            ls::kv("guild", info.guild_name.as_deref().unwrap_or("unknown")),
+            ls::kv("named", &info.channels.len().to_string()),
+        );
+        if (fm.presence_guild(), fm.presence_text()) != before {
+            sync_presence(fm, self.handle.presence.as_ref()).await;
+            self.resync_activity_presence().await;
         }
     }
 
@@ -1436,15 +1484,17 @@ mod serenity_glue {
     use serenity::all::{
         ActivityData, Attachment, ChannelId, Client, Command, Context, CreateAllowedMentions,
         CreateCommand, CreateInteractionResponseFollowup, CreateMessage, Embed, EventHandler,
-        GatewayIntents, Interaction, Message, MessageId, MessageUpdateEvent, OnlineStatus,
-        Reaction, ReactionType, Ready, TypingStartEvent, User, VoiceState,
+        GatewayIntents, Guild, GuildChannel, Interaction, Message, MessageId, MessageUpdateEvent,
+        OnlineStatus, PartialGuild, Reaction, ReactionType, Ready, TypingStartEvent, User,
+        VoiceState,
     };
 
     use super::{
-        AttachmentView, BotEvents, BotHandle, BotStore, ChannelSender, EmojiView, InteractionAck,
-        InteractionGone, MentionView, MessageEditView, MessageView, Presence, PresenceSink,
-        PresenceStatus, ReactionClearPayloadView, ReactionPayloadView, ReadyInfo, ResolveMember,
-        SentMessage, TypingEventView, VoiceStateUpdateView, defer_interaction, reply,
+        AttachmentView, BotEvents, BotHandle, BotStore, ChannelSender, EmojiView, GuildInfo,
+        InteractionAck, InteractionGone, MentionView, MessageEditView, MessageView, Presence,
+        PresenceSink, PresenceStatus, ReactionClearPayloadView, ReactionPayloadView, ReadyInfo,
+        ResolveMember, SentMessage, TypingEventView, VoiceStateUpdateView, defer_interaction,
+        reply,
     };
     use crate::diagnostics::collector::get_span_collector;
     use crate::diagnostics::report::render_summary_table;
@@ -2040,16 +2090,24 @@ mod serenity_glue {
     impl EventHandler for Handler {
         async fn ready(&self, ctx: Context, ready: Ready) {
             *self.presence.ctx.lock().expect("presence ctx mutex") = Some(ctx.clone());
+            // Warm-cache snapshot only. READY carries guilds as unavailable
+            // stubs and serenity's cache update drops them before dispatch, so
+            // on a cold start this yields nothing; `guild_create` is the real
+            // population path (#222). Sourced from the cache rather than
+            // `ready.guilds` so a retained guild is still picked up here.
             let mut channel_names = Vec::new();
             let mut guild_names = Vec::new();
-            for guild in &ready.guilds {
-                if let Some(channels) = ctx.cache.guild(guild.id).map(|g| g.channels.clone()) {
-                    for (cid, ch) in channels {
-                        channel_names.push((cid.get() as i64, ch.name.clone()));
-                        if let Some(name) = ctx.cache.guild(guild.id).map(|g| g.name.clone()) {
-                            guild_names.push((cid.get() as i64, name));
-                        }
-                    }
+            for gid in ctx.cache.guilds() {
+                let Some((guild_name, channels)) = ctx
+                    .cache
+                    .guild(gid)
+                    .map(|g| (g.name.clone(), g.channels.clone()))
+                else {
+                    continue;
+                };
+                for (cid, ch) in channels {
+                    channel_names.push((cid.get() as i64, ch.name));
+                    guild_names.push((cid.get() as i64, guild_name.clone()));
                 }
             }
             // Register the slash commands (best-effort).
@@ -2085,6 +2143,61 @@ mod serenity_glue {
                     user_id: ready.user.id.get() as i64,
                     channel_names,
                     guild_names,
+                })
+                .await;
+        }
+
+        /// Full guild data (channel list + server name) — the burst that
+        /// follows READY, and a mid-session guild join. The only place the
+        /// gateway hands over channel names on a cold start (#222).
+        async fn guild_create(&self, _ctx: Context, guild: Guild, _is_new: Option<bool>) {
+            let channels = guild
+                .channels
+                .into_iter()
+                .map(|(cid, ch)| (cid.get() as i64, ch.name))
+                .collect();
+            self.events
+                .on_guild_available(GuildInfo {
+                    guild_name: Some(guild.name),
+                    channels,
+                })
+                .await;
+        }
+
+        /// Channel rename (N14) — server name comes from the cache.
+        async fn channel_update(
+            &self,
+            ctx: Context,
+            _old: Option<GuildChannel>,
+            new: GuildChannel,
+        ) {
+            let guild_name = ctx.cache.guild(new.guild_id).map(|g| g.name.clone());
+            self.events
+                .on_guild_available(GuildInfo {
+                    guild_name,
+                    channels: vec![(new.id.get() as i64, new.name)],
+                })
+                .await;
+        }
+
+        /// Server rename (N14). `PartialGuild` has no channel list, so the
+        /// guild's channels come from the cache to re-key the guild names.
+        async fn guild_update(
+            &self,
+            ctx: Context,
+            _old_data_if_available: Option<Guild>,
+            new_data: PartialGuild,
+        ) {
+            let channels = ctx.cache.guild(new_data.id).map_or_else(Vec::new, |g| {
+                g.channels
+                    .iter()
+                    .map(|(cid, ch)| (cid.get() as i64, ch.name.clone()))
+                    .collect()
+            });
+            self.events
+                .on_guild_available(GuildInfo {
+                    guild_name: Some(new_data.name),
+                    channels,
                 })
                 .await;
         }
@@ -3215,10 +3328,10 @@ pub mod voice_intake {
 mod tests {
     use super::{
         Author, BotEvents, BotHandle, DM_BOT_DISCLAIMER, DM_BOT_DISCLAIMER_DELETE_EMOJI,
-        DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, InteractionAck, InteractionGone,
-        MentionView, MessageView, Presence, PresenceSink, PresenceStatus, ReactionPayloadView,
-        ReadyInfo, SentMessage, TypingEventView, apply_message_edit, apply_reaction_clear,
-        apply_reaction_delta, build_activity_presence_cb, collect_images,
+        DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, GuildInfo, InteractionAck,
+        InteractionGone, MentionView, MessageView, Presence, PresenceSink, PresenceStatus,
+        ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView, apply_message_edit,
+        apply_reaction_clear, apply_reaction_delta, build_activity_presence_cb, collect_images,
         compose_content_with_embeds, defer_interaction, emoji_repr, message_pings_bot, reply,
     };
     use crate::bot::{ActivityResync, ChannelSender};
@@ -3922,6 +4035,160 @@ mod tests {
         let calls = presence.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].status, PresenceStatus::Online);
+    }
+
+    // --- guild_create naming + presence resync (#222, N14) -----------------
+
+    /// Events + focus manager + presence recorder, no engine, presence ready.
+    fn naming_fixture() -> (Arc<BotEvents>, Arc<FocusManager>, Arc<RecordingPresence>) {
+        let presence = Arc::new(RecordingPresence::default());
+        presence.ready.store(true, Ordering::SeqCst);
+        let fm = focus_manager();
+        let handle = Arc::new(
+            BotHandle::new(
+                Arc::new(NoopSendText),
+                presence.clone() as Arc<dyn PresenceSink>,
+            )
+            .with_focus_manager(Arc::clone(&fm)),
+        );
+        let events = Arc::new(BotEvents::new(
+            "fam",
+            Arc::new(Mutex::new(Some(99))),
+            empty_subs_mut(),
+            vec![],
+            Arc::new(RecordingStore::default()),
+            Arc::new(RecordingPublisher::default()),
+            handle,
+        ));
+        (events, fm, presence)
+    }
+
+    fn guild_info(guild: &str, channels: &[(i64, &str)]) -> GuildInfo {
+        GuildInfo {
+            guild_name: Some(guild.to_owned()),
+            channels: channels
+                .iter()
+                .map(|(cid, name)| (*cid, (*name).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn guild_create_names_channels_focused_before_names_arrive() {
+        // Real ordering: focus is seeded at boot from subscriptions, GUILD_CREATE
+        // lands after. Presence must stop reading `unnamed channel (id N)`.
+        let (events, fm, _presence) = naming_fixture();
+        fm.set_focus_immediately(1_221_605_022_102_458_421, "text");
+        assert_eq!(
+            fm.presence_text().as_deref(),
+            Some("unnamed channel (id 1221605022102458421)")
+        );
+        events
+            .on_guild_available(guild_info(
+                "Aetheria",
+                &[(1_221_605_022_102_458_421, "the-annex"), (7, "general")],
+            ))
+            .await;
+        assert_eq!(fm.presence_text().as_deref(), Some("#the-annex"));
+        assert_eq!(fm.presence_guild().as_deref(), Some("Aetheria"));
+        assert_eq!(fm.channel_label(Some(7)), "#general(7)");
+    }
+
+    #[tokio::test]
+    async fn guild_create_resyncs_presence_for_the_focused_channel() {
+        let (events, fm, presence) = naming_fixture();
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        let calls = presence.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].activity_state.as_deref(),
+            Some("\u{2728} Aetheria -> #general")
+        );
+    }
+
+    #[tokio::test]
+    async fn naming_batch_missing_the_focused_channel_skips_presence() {
+        // Presence updates are rate-limited: one resync per batch, and only
+        // when the focused channel's rendered label actually moved.
+        let (events, fm, presence) = naming_fixture();
+        fm.set_channel_name(5, "general");
+        fm.set_guild_name(5, "Aetheria");
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Other", &[(9, "elsewhere")]))
+            .await;
+        assert!(presence.calls.lock().unwrap().is_empty());
+        // Re-announcing identical names is not a change either.
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        assert!(presence.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_updates_cache_and_presence() {
+        let (events, fm, presence) = naming_fixture();
+        fm.set_channel_name(5, "general");
+        fm.set_guild_name(5, "Aetheria");
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "the-annex")]))
+            .await;
+        assert_eq!(fm.channel_label(Some(5)), "#the-annex(5)");
+        let calls = presence.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].activity_state.as_deref(),
+            Some("\u{2728} Aetheria -> #the-annex")
+        );
+    }
+
+    #[tokio::test]
+    async fn guild_rename_updates_presence_server_name() {
+        let (events, fm, presence) = naming_fixture();
+        fm.set_channel_name(5, "general");
+        fm.set_guild_name(5, "Old Name");
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        assert_eq!(fm.guild_name_for(Some(5)).as_deref(), Some("Aetheria"));
+        assert_eq!(presence.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn naming_batch_mid_activity_ends_with_away_presence() {
+        // Same B-PR24 ordering as on_ready: the online focus presence must not
+        // clobber an in-flight activity's away presence.
+        let (events, fm, presence) = naming_fixture();
+        events.handle.set_activity_engine(Arc::new(AwayResync {
+            presence: presence.clone() as Arc<dyn PresenceSink>,
+        }));
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        let calls = presence.calls.lock().unwrap();
+        assert_eq!(calls.first().unwrap().status, PresenceStatus::Online);
+        assert_eq!(calls.last().unwrap().status, PresenceStatus::Dnd);
+    }
+
+    #[tokio::test]
+    async fn naming_batch_without_a_guild_name_keeps_the_cached_one() {
+        // channel_update with a cold guild cache carries no server name.
+        let (events, fm, _presence) = naming_fixture();
+        fm.set_guild_name(5, "Aetheria");
+        events
+            .on_guild_available(GuildInfo {
+                guild_name: None,
+                channels: vec![(5, "the-annex".to_owned())],
+            })
+            .await;
+        assert_eq!(fm.guild_name_for(Some(5)).as_deref(), Some("Aetheria"));
+        assert_eq!(fm.channel_label(Some(5)), "#the-annex(5)");
     }
 
     // --- on_message DM allowlist + disclaimer + reactions (B-OM/B-RX) ------
