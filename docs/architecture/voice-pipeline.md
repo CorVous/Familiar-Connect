@@ -101,10 +101,17 @@ the audio path. It has three lifecycle points:
   of the gateway cache (`Guild::voice_states`, filtered to the joined channel)
   and replaces the roster with them. Without this the bot only ever learned
   about people who *changed* voice state after it arrived — everyone already
-  seated stayed anonymous for the whole session. Resolution is cache-only
-  (`VoiceState::member`, then `Guild::members`, then the user cache); with no
-  `GUILD_MEMBERS` intent an occupant missing from all three is skipped, never
-  fetched over REST.
+  seated stayed anonymous for the whole session. Resolution tries the cache
+  first (`VoiceState::member`, then `Guild::members`, then the user cache) and
+  gives whoever is left **one REST member lookup**
+  (`GuildId::member` → `GET /guilds/{guild}/members/{user}`).
+  That REST leg exists because voice state is presence, not speech: a
+  participant who joins and stays quiet *is* in `voice_states` but misses all
+  three cache lookups — `VoiceState::member` is not always populated,
+  `Guild::members` is sparse with no `GUILD_MEMBERS` intent, and the user cache
+  is fed by people who do things. Cache-only resolution dropped exactly those
+  people, and now that the roster feeds the prompt, dropping them means the
+  model cannot see them at all.
 - **Maintained on voice-state updates.** A join or move *into* the subscribed
   channel inserts; a leave or a move *out* removes. Bots and the familiar's
   own user id are excluded at both the snapshot and the update. Removal is
@@ -112,6 +119,20 @@ the audio path. It has three lifecycle points:
   before-channel.
 - **Cleared at leave.** `/unsubscribe-voice` empties the roster, so the next
   call does not inherit the last one's members.
+
+The REST leg is bounded and does **not** violate the audio path's no-REST rule
+(`resolve_member`, B-VM29): it runs once per join, before intake starts, over at
+most the channel's headcount — at most `ROSTER_FETCH_CONCURRENCY` (4) requests
+in flight, all sharing one `ROSTER_FETCH_BUDGET` (2 s) wall-clock deadline, so a
+slow Discord cannot hold up the join. Nothing is dropped meanwhile: `join_voice`
+has already registered the songbird receivers and their tick channel is
+unbounded, so audio buffers while the roster resolves. The per-frame resolver on the audio path
+stays cache-only. A failed, errored, or over-budget lookup degrades to an
+id-only `Author` (platform + numeric id, no names) — never a drop, because
+losing a known user id to a failed *name* lookup is the original N16 bug. The
+policy half (`resolve_voice_roster`, the `MemberFetcher` seam) is ungated and
+unit-tested with a scripted fetcher; only the serenity HTTP implementation is
+behind `discord-voice`.
 
 Each insert and remove also appends a timestamped join/leave event, decaying
 after `[voice].roster_event_window_seconds` (default `120.0`) and hard-capped
