@@ -287,10 +287,13 @@ and open an upstream issue; there were no open DAVE issues at 0.6.0 release.
   join in `join_voice`; see
   [Voice pipeline](../architecture/voice-pipeline.md#songbird-join-order-and-ssrc-attribution).
 - **Cache-only member resolution (`resolve_member` = `|| voice_member_cached`).**
-  No `GUILD_MEMBERS` intent + no REST fetch on the audio path, so a voice-only
-  joiner who hasn't typed or triggered a voice-state update resolves to `None` →
-  **anonymous voice turns** until they type or their state updates. Expected; not
-  data loss.
+  No `GUILD_MEMBERS` intent + no REST fetch on the audio path. `/subscribe-voice`
+  snapshots the channel's occupants from the gateway cache at join and
+  voice-state updates maintain it from there, so the remaining gap is an
+  occupant the cache cannot resolve at all — they transcribe under their bare
+  numeric id (still a distinct speaker) until they type or their state updates.
+  Expected; not data loss. See
+  [Voice pipeline](../architecture/voice-pipeline.md#voice-member-roster).
 - **Local turn detection silently degrades.** With `strategy="ten+smart_turn"`,
   `create_local_turn_detector` downloads Smart Turn weights and builds the
   detector, but the per-user `make_endpointer` call fails (`TenVad::new` →

@@ -623,7 +623,9 @@ mod client {
             // Estimated prompt tokens through the shared estimator
             // (`input_chars` is already a Unicode-scalar count). Emitted next to
             // the true `in_tokens` so the estimated-vs-actual ratio is
-            // observable (issues #183/#184).
+            // observable (issues #183/#184). Deliberately the RAW estimate, never
+            // the calibrated one: calibration is derived from this ratio, so
+            // feeding it back would make `obs` self-referential and always ~1.0.
             let est_in_tokens = estimate_tokens_from_chars(self.input_chars);
             parts.push(ls::kv_styled(
                 "est_in_tokens",
@@ -643,7 +645,9 @@ mod client {
             // Feed the calibration store, then surface the model's running
             // true/estimated ratio (this call included) as `cal_ratio` so the
             // learned rate is collectable from logs (#183). Absent until the
-            // model has a usage-bearing call.
+            // model has a usage-bearing call — or, since the store now loads
+            // persisted totals, until the first call of a process whose cache
+            // was cold. `record` may write that cache, on a debounce.
             let calibration = get_token_calibration();
             if let Some(actual) = self.in_tokens {
                 calibration.record(&self.model, est_in_tokens, actual);

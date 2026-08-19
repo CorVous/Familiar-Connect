@@ -723,14 +723,28 @@ reporting only — nothing trims against it. Token estimates use a fast
 `len(text) / 4` heuristic — no real tokenizer on the hot path;
 sub-microsecond per message.
 
+Four characters per token is a rough English default, **not** a safety
+margin. Measured against a real 54-call voice session, the heuristic
+under-counted badly on both models in play: observed `in_tokens /
+est_in_tokens` was **1.453** for `z-ai/glm-5.2` (26 calls) and **1.197**
+for `z-ai/glm-5v-turbo` (15 calls). Other tokenizers sit at or below
+`1.0`. So a raw estimate can be 20-45% low, which means the per-section
+caps were effectively that much larger than configured — a tuning-contract
+violation rather than a safety failure, but it invalidates the numbers any
+budget tuning would rest on.
+
+The divisor stays at `4` on purpose. Lowering it to bias safe would
+over-trim every model the default already fits, silently discarding
+context the operator configured. The targeted fix is per-model
+calibration, persisted across restarts.
+
 ### Token-count calibration
 
 OpenRouter reports the *true* prompt-token count on every call, so the
 process keeps a running `Σ true / Σ estimated` ratio per model
-(`budget::TokenCalibration`, fed from the `[LLM call]` emit path). It is
-an in-memory, process-lifetime store — no I/O, nothing persisted, and it
-starts empty on every boot. A ratio of totals rather than an EWMA: it
-needs no decay constant and is exact from the very first sample.
+(`budget::TokenCalibration`, fed from the `[LLM call]` emit path). A ratio
+of totals rather than an EWMA: it needs no decay constant and is exact
+from the very first sample.
 
 The learned ratio is surfaced on the `[LLM call]` line as `cal_ratio`
 (see below) and applied by `budget::estimate_tokens_calibrated(text,
@@ -763,6 +777,43 @@ and leaves the raw estimate — so a client that names no model, and every
 test double, behaves exactly as before. Only the OpenRouter client, which
 is also the only source of true counts, names one; a decorator wrapping it
 must forward `model()` or calibration goes silently dark.
+
+#### Persistence across restarts
+
+The store used to be in-memory only, so every boot started blind and the
+first calls of each session budgeted against the raw heuristic — up to 45%
+low on the models measured above. The accumulators are now cached on disk:
+
+- **File** — `token-calibration.json` in the same per-user cache directory
+  as the OpenRouter catalog (`openrouter-models.json`): the platform cache
+  dir via `ProjectDirs` (honours `XDG_CACHE_HOME`; `data/cache/` when no
+  home directory resolves). It is the **cache** tree, not the familiars
+  state tree — the file is entirely regenerable and safe to delete.
+- **Shape** — a write timestamp plus per-model `Σ estimated` / `Σ actual`,
+  keyed by model id exactly as the in-memory store is.
+- **Cold start** — `budget::get_token_calibration()` loads the file lazily,
+  on first access, from wherever the store is first touched; no boot hook.
+  A model with persisted totals is calibrated on its *first* call of the
+  new process, not after a warm-up.
+- **Missing, corrupt, truncated, or stale reads as absent.** A cache the
+  process cannot parse is never fatal — it degrades to exactly the old
+  cold-start behaviour and the next write replaces it. Totals older than
+  30 days are dropped rather than trusted: nothing decays them, so a
+  month-old accumulator would otherwise pin a rate a tokenizer change had
+  already invalidated.
+- **Write debounce** — persisting on every LLM call would put a file write
+  on the hot path. Instead a write happens when the first sample of the
+  process lands (so a one-call session still learns something), then only
+  after 8 further updates or 60 seconds, whichever comes first. On the
+  54-call session above that is roughly seven writes of a few hundred
+  bytes.
+- **What a hard kill loses** — whatever has not been flushed: at most the
+  last 7 samples, or 60 seconds of calls. Nothing calls `flush()` at
+  shutdown today, so that bound is the guarantee; losing those samples
+  shifts a ratio of totals by a fraction of a percent and the next session
+  relearns them.
+
+### Per-tier caps
 
 Every cap is a hard number. No "auto-fill from a total" — the source
 of truth is `data/familiars/_default/character.toml`, which spells
@@ -902,11 +953,13 @@ z-ai/glm-5.2                19   187500  190100  1.014  1.014
 ```
 
 `obs` is the observed Σ`in_tokens` / Σ`est_in_tokens` across the whole
-log; `cal` is the last `cal_ratio` the process itself logged (see
-§ Token-count calibration). They should agree. A gap means the process
-restarted mid-log — the calibration store is in-memory and starts empty
-every boot — or that early calls skewed the running ratio. This is
-item 3 on issue #184's list.
+log; `est_in_tokens` is deliberately the **raw** heuristic, never the
+calibrated one, or the ratio would be self-referential and always ~1.0.
+`cal` is the last `cal_ratio` the process itself logged (see
+§ Token-count calibration). They should agree. A gap means early calls
+skewed the running ratio, or that the process started from persisted
+totals whose history predates the log. This is item 3 on issue #184's
+list.
 
 ### Reading it for #206
 

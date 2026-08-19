@@ -91,6 +91,36 @@ equal to the raw SSRC (always < 2^32, so it can never collide with a
 Discord snowflake) rather than being dropped; the turn transcribes
 anonymously.
 
+### Voice member roster
+
+Speaker names come from `BotHandle.voice_members` (`user_id -> Author`), the
+cache the `resolve_member` seam reads on the audio path. It has three
+lifecycle points:
+
+- **Snapshot at join.** `/subscribe-voice` reads the channel's occupants out
+  of the gateway cache (`Guild::voice_states`, filtered to the joined channel)
+  and replaces the roster with them. Without this the bot only ever learned
+  about people who *changed* voice state after it arrived — everyone already
+  seated stayed anonymous for the whole session. Resolution is cache-only
+  (`VoiceState::member`, then `Guild::members`, then the user cache); with no
+  `GUILD_MEMBERS` intent an occupant missing from all three is skipped, never
+  fetched over REST.
+- **Maintained on voice-state updates.** A join or move *into* the subscribed
+  channel inserts; a leave or a move *out* removes. Bots and the familiar's
+  own user id are excluded at both the snapshot and the update.
+- **Cleared at leave.** `/unsubscribe-voice` empties the roster, so the next
+  call does not inherit the last one's members.
+
+The roster also feeds STT keyterm biasing (`voice_member_keyterms`, #198).
+Keyterms are baked into the Deepgram connect URL when a speaker's stream
+opens, so a member who leaves mid-call stays in the keyterms of streams that
+are already open; those streams close after `idle_close_s` and the next one
+picks up the current roster.
+
+A resolver miss no longer erases the speaker: the persisted turn keeps the
+numeric user id (`Author` with platform + id, no names), so unnamed speakers
+stay distinct from each other rather than fusing into one anonymous voice.
+
 ## Turn detection
 
 **Today:** Deepgram's hosted endpointer. One WebSocket per speaker,
