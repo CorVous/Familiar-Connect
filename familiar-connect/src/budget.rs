@@ -6,12 +6,26 @@
 //! [`TierBudget::total_tokens`] is a *derived* sum of the per-section token caps,
 //! for reporting only — nothing trims against it.
 //!
-//! Token accounting uses the fast `len(text)/4` heuristic (chars-per-token
-//! 4) — no real tokenizer on the hot path; it slightly
-//! over-counts (safer for budgets). `len` counts **Unicode scalars**, not bytes.
+//! Token accounting uses the fast `len(text)/4` heuristic (chars-per-token 4) —
+//! no real tokenizer on the hot path. `len` counts **Unicode scalars**, not
+//! bytes.
 //!
-//! [`TokenCalibration`] refines that with the *true* prompt-token counts
-//! OpenRouter reports per call (#183). Calibration is **upward-only**: the
+//! **Four chars per token is a rough default, not a safety margin.** It
+//! over-counts for some tokenizers and under-counts materially for others.
+//! Measured over a real 54-call session, `in_tokens / est_in_tokens` was
+//! **1.453** for `z-ai/glm-5.2` (26 calls) and **1.197** for `z-ai/glm-5v-turbo`
+//! (15 calls) — the heuristic 20-45% low, so every `TierBudget` cap was
+//! effectively that much larger than configured. Per-model calibration exists
+//! for exactly this.
+//!
+//! `CHARS_PER_TOKEN` deliberately stays at 4. Lowering it to bias safe would
+//! over-trim every model the default already fits, silently discarding context
+//! the operator configured; the targeted fix is calibration, not a smaller
+//! global divisor. Settled — don't re-litigate.
+//!
+//! [`TokenCalibration`] does the correcting, from the *true* prompt-token counts
+//! OpenRouter reports per call (#183), persisted across restarts by
+//! [`cache`] so a cold start is not blind. Calibration is **upward-only**: the
 //! estimate drives client-side trimming, so over-counting merely drops a little
 //! extra context while under-counting risks an oversized request the API
 //! rejects. See [`estimate_tokens_calibrated`]; the assembly layers trim
@@ -20,20 +34,33 @@
 //! This is a leaf module: it names [`crate::llm::Message`] but pulls in nothing
 //! from `config`/`context`, so `config` can depend on it without a cycle.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
+use chrono::Utc;
+
+use crate::budget::cache::CachedTotals;
 use crate::llm::Message;
 use crate::support::round::half_even;
 
-/// OpenAI's well-known English heuristic; slightly over-counts.
+pub mod cache;
+
+/// OpenAI's well-known English heuristic — a rough default, *not* a safe upper
+/// bound: it over-counts for some tokenizers and under-counts by 20-45% for
+/// others (module docs carry the measured ratios). Stays at 4 by design;
+/// [`TokenCalibration`] corrects per model instead.
 const CHARS_PER_TOKEN: i64 = 4;
 
 /// Per-message chat-format framing (role + delimiters).
 const MESSAGE_OVERHEAD_TOKENS: i64 = 4;
 
 /// Fast char-based token estimate: `ceil(len / 4)` over Unicode scalars, `0` for
-/// the empty string. Over-counts mildly so budgets stay safe.
+/// the empty string.
+///
+/// Raw, and per-tokenizer accuracy varies either way (see module docs) — budget
+/// call sites want [`estimate_tokens_calibrated`].
 #[must_use]
 pub fn estimate_tokens(text: &str) -> i64 {
     // Count Unicode scalars, not bytes.
@@ -81,6 +108,18 @@ pub fn estimate_messages_tokens(messages: &[Message]) -> i64 {
 /// against the heuristic's 0.25).
 const MAX_CALIBRATION_RATIO: f64 = 4.0;
 
+/// Updates tolerated between cache writes.
+///
+/// A write per LLM call would put file I/O on the hot path for a file that
+/// changes by a fraction of a percent each time. Eight bounds what a hard kill
+/// loses (seven samples) while keeping a busy voice session to a handful of
+/// few-hundred-byte writes. Paired with [`FLUSH_MAX_AGE`] so a slow trickle of
+/// calls still persists.
+const FLUSH_EVERY_UPDATES: u32 = 8;
+
+/// Wall-clock ceiling on unpersisted learning, checked when a sample lands.
+const FLUSH_MAX_AGE: Duration = Duration::from_secs(60);
+
 /// Running true-vs-estimated input-token ratio, keyed by model.
 ///
 /// Keyed by **model, not `model.slot`**: chars-per-token is a property of the
@@ -91,11 +130,28 @@ const MAX_CALIBRATION_RATIO: f64 = 4.0;
 /// than an EWMA: it needs no decay constant, it is exact from the very first
 /// sample (an EWMA seeded at `1.0` would spend its early calls biased toward
 /// the seed), and weighting by prompt size is what budget accuracy wants. The
-/// trade-off is no adaptation to a mid-life tokenizer change — acceptable for a
-/// process-lifetime, in-memory store.
+/// trade-off is no adaptation to a mid-life tokenizer change; [`cache`]'s TTL
+/// bounds how long persisted totals can outlive one.
+///
+/// Totals survive restarts through [`cache`], loaded lazily by
+/// [`get_token_calibration`] and written back on a debounce
+/// (`FLUSH_EVERY_UPDATES`). [`TokenCalibration::new`] keeps the old
+/// memory-only behaviour.
 #[derive(Debug, Default)]
 pub struct TokenCalibration {
-    totals: Mutex<HashMap<String, Totals>>,
+    state: Mutex<State>,
+    /// Cache file backing the store; `None` keeps it purely in memory.
+    path: Option<PathBuf>,
+}
+
+/// Accumulators plus the write-debounce bookkeeping, under one lock.
+#[derive(Debug, Default)]
+struct State {
+    totals: HashMap<String, Totals>,
+    /// Updates folded in since the last write attempt.
+    pending: u32,
+    /// When the last write was attempted; `None` until the first.
+    last_flush: Option<Instant>,
 }
 
 /// Per-model accumulators; the ratio is `actual / estimated`.
@@ -105,27 +161,93 @@ struct Totals {
     actual: i64,
 }
 
+impl State {
+    /// Snapshot to write, when the debounce says it is time; `None` otherwise.
+    ///
+    /// Marks the flush as taken, so a failed write costs one interval rather
+    /// than retrying on every call.
+    fn take_due_snapshot(&mut self, force: bool) -> Option<BTreeMap<String, CachedTotals>> {
+        if self.pending == 0 {
+            return None;
+        }
+        // `last_flush == None` fires on the very first sample of the process:
+        // a one-call session must not learn nothing.
+        let due = force
+            || self.pending >= FLUSH_EVERY_UPDATES
+            || self
+                .last_flush
+                .is_none_or(|then| then.elapsed() >= FLUSH_MAX_AGE);
+        if !due {
+            return None;
+        }
+        self.pending = 0;
+        self.last_flush = Some(Instant::now());
+        Some(
+            self.totals
+                .iter()
+                .map(|(model, t)| {
+                    (
+                        model.clone(),
+                        CachedTotals {
+                            estimated: t.estimated,
+                            actual: t.actual,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
 impl TokenCalibration {
-    /// Empty store — no model has a ratio yet.
+    /// Empty store — no model has a ratio yet. Never touches disk.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Store seeded from `path`'s persisted totals, and persisting back to it.
+    ///
+    /// A missing, corrupt, or stale cache seeds nothing: the store behaves
+    /// exactly as [`Self::new`] and the next write replaces the file.
+    #[must_use]
+    pub fn with_cache_path(path: Option<PathBuf>) -> Self {
+        let totals = path.as_deref().map(load_totals).unwrap_or_default();
+        Self {
+            state: Mutex::new(State {
+                totals,
+                ..State::default()
+            }),
+            path,
+        }
+    }
+
+    /// Persist the accumulators now, bypassing the debounce.
+    ///
+    /// For a shutdown hook or a test; no-op when nothing is pending or the store
+    /// has no path.
+    pub fn flush(&self) {
+        self.write_if_due(true);
+    }
+
     /// Fold one observation (heuristic estimate vs provider-reported truth).
     ///
     /// Non-positive pairs carry no ratio and are dropped. Saturating adds keep a
-    /// long-lived process from overflowing the accumulators.
-    // The guard's scope is the whole update (lookup + both adds).
-    #[allow(clippy::significant_drop_tightening)]
+    /// long-lived process from overflowing the accumulators. May persist — see
+    /// `FLUSH_EVERY_UPDATES`.
     pub fn record(&self, model: &str, estimated: i64, actual: i64) {
         if estimated <= 0 || actual <= 0 {
             return;
         }
-        let mut guard = self.totals.lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = guard.entry(model.to_owned()).or_default();
-        entry.estimated = entry.estimated.saturating_add(estimated);
-        entry.actual = entry.actual.saturating_add(actual);
+        {
+            // The guard covers the whole update (lookup + both adds).
+            let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let entry = guard.totals.entry(model.to_owned()).or_default();
+            entry.estimated = entry.estimated.saturating_add(estimated);
+            entry.actual = entry.actual.saturating_add(actual);
+            guard.pending = guard.pending.saturating_add(1);
+        }
+        self.write_if_due(false);
     }
 
     /// Learned ratio for `model`; `None` until the model has a sample.
@@ -137,31 +259,121 @@ impl TokenCalibration {
     pub fn ratio(&self, model: &str) -> Option<f64> {
         // Copy out under the lock; release before doing arithmetic.
         let t = {
-            let guard = self.totals.lock().unwrap_or_else(PoisonError::into_inner);
-            guard.get(model).copied()
+            let guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.totals.get(model).copied()
         }?;
         (t.estimated > 0).then(|| t.actual as f64 / t.estimated as f64)
     }
+
+    /// Write the snapshot the debounce releases, if any. Never holds the lock
+    /// across the I/O.
+    fn write_if_due(&self, force: bool) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let snapshot = {
+            let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.take_due_snapshot(force)
+        };
+        let Some(models) = snapshot else {
+            return;
+        };
+        if let Err(err) = cache::write_cache(path, &models, Utc::now()) {
+            tracing::debug!(
+                target: "familiar_connect.budget",
+                "token calibration cache write failed: {err}"
+            );
+        }
+    }
+}
+
+/// Persisted totals for a fresh store: empty when the cache is absent, corrupt,
+/// or past [`cache::CACHE_TTL_DAYS`].
+fn load_totals(path: &Path) -> HashMap<String, Totals> {
+    let Some(cached) = cache::read_cache(path) else {
+        return HashMap::new();
+    };
+    if cache::is_stale(&cached.updated_at, Utc::now(), cache::CACHE_TTL_DAYS) {
+        return HashMap::new();
+    }
+    cached
+        .models
+        .into_iter()
+        .map(|(model, t)| {
+            (
+                model,
+                Totals {
+                    estimated: t.estimated,
+                    actual: t.actual,
+                },
+            )
+        })
+        .collect()
 }
 
 static CALIBRATION: Mutex<Option<Arc<TokenCalibration>>> = Mutex::new(None);
 
+/// Cache file the singleton loads from and persists to.
+///
+/// Production: the per-user cache file. Test builds: only what
+/// `set_token_calibration_path` injected — `None` by default, so no unit test
+/// can read or write the real operator's cache. `test-util` is a test-only
+/// feature; a shipped build never enables it, so persistence is never off in
+/// production. An integration test that drives the real client (the one path
+/// that writes) must enable `test-util` and inject a tempdir.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the None arm is the test build's; production always resolves a path"
+)]
+fn singleton_cache_path() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "test-util"))]
+    {
+        TEST_CACHE_PATH
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+    #[cfg(not(any(test, feature = "test-util")))]
+    {
+        Some(cache::default_cache_path())
+    }
+}
+
 /// Return the process-wide [`TokenCalibration`], creating it on first use.
 ///
-/// Fetched at call time (not import time) so `reset_token_calibration` takes
-/// effect immediately.
+/// First use also loads the persisted totals (#183) — lazily, here, rather than
+/// from a boot hook, so the store self-initialises wherever it is first touched
+/// and `reset_token_calibration` keeps working. Fetched at call time (not import
+/// time) so that reset takes effect immediately.
 #[must_use]
 pub fn get_token_calibration() -> Arc<TokenCalibration> {
     let mut guard = CALIBRATION.lock().unwrap_or_else(PoisonError::into_inner);
     guard
-        .get_or_insert_with(|| Arc::new(TokenCalibration::new()))
+        .get_or_insert_with(|| Arc::new(TokenCalibration::with_cache_path(singleton_cache_path())))
         .clone()
 }
 
+/// Cache path the next singleton loads — tests only, always a tempdir.
+#[cfg(any(test, feature = "test-util"))]
+static TEST_CACHE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Point the next singleton at `path` — tests only. Call *after*
+/// [`reset_token_calibration`], which clears it.
+#[cfg(any(test, feature = "test-util"))]
+pub fn set_token_calibration_path(path: Option<PathBuf>) {
+    *TEST_CACHE_PATH
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = path;
+}
+
 /// Reset the singleton so the next `get` creates a fresh instance — tests only.
+///
+/// Also clears the injected cache path, so no test inherits another's tempdir
+/// and the default is a disk-free store.
 #[cfg(any(test, feature = "test-util"))]
 pub fn reset_token_calibration() {
     *CALIBRATION.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    set_token_calibration_path(None);
 }
 
 /// Calibration multiplier actually applied for `model`.
@@ -631,6 +843,210 @@ mod tests {
         get_token_calibration().record("dense", 100, 150);
         reset_token_calibration();
         assert!(get_token_calibration().ratio("dense").is_none());
+    }
+
+    // --- persistence across restarts (#183) --------------------------------
+
+    mod persistence {
+        use super::super::cache::{CACHE_FILE_NAME, CachedTotals, read_cache, write_cache};
+        use super::super::{
+            TokenCalibration, estimate_tokens_calibrated, get_token_calibration,
+            reset_token_calibration, set_token_calibration_path,
+        };
+        use crate::diagnostics::testutil::singleton_guard;
+        use chrono::{Duration, TimeZone as _, Utc};
+        use std::collections::BTreeMap;
+        use std::path::{Path, PathBuf};
+        use std::sync::MutexGuard;
+        use tempfile::TempDir;
+
+        fn now() -> chrono::DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap()
+        }
+
+        // Serialize on the shared singleton lock, clear the store, then point it
+        // at a tempdir. Order matters: the reset clears any injected path.
+        fn isolated(path: &Path) -> MutexGuard<'static, ()> {
+            let g = singleton_guard();
+            reset_token_calibration();
+            set_token_calibration_path(Some(path.to_path_buf()));
+            g
+        }
+
+        fn seed(path: &Path, model: &str, estimated: i64, actual: i64) {
+            write_cache(
+                path,
+                &BTreeMap::from([(model.to_owned(), CachedTotals { estimated, actual })]),
+                Utc::now(),
+            )
+            .expect("seed the cache");
+        }
+
+        fn cache_path(dir: &TempDir) -> PathBuf {
+            dir.path().join(CACHE_FILE_NAME)
+        }
+
+        #[test]
+        fn a_persisted_ratio_calibrates_the_very_first_estimate_after_restart() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            // The measured glm-5.2 rate: 1.453 true tokens per estimated token.
+            seed(&path, "z-ai/glm-5.2", 189_895, 275_924);
+            let _g = isolated(&path);
+            // No call recorded yet this "process" — the ratio comes off disk.
+            let text = "a".repeat(400);
+            assert_eq!(estimate_tokens_calibrated(&text, "z-ai/glm-5.2"), 146);
+        }
+
+        #[test]
+        fn an_absent_cache_behaves_exactly_as_an_uncalibrated_store() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            let _g = isolated(&path);
+            assert!(get_token_calibration().ratio("z-ai/glm-5.2").is_none());
+            let text = "a".repeat(400);
+            assert_eq!(estimate_tokens_calibrated(&text, "z-ai/glm-5.2"), 100);
+        }
+
+        #[test]
+        fn a_corrupt_or_truncated_cache_loads_as_no_data() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            for junk in ["", "{", "garbage", r#"{"updated_at":"x","models":"#] {
+                std::fs::write(&path, junk).unwrap();
+                let _g = isolated(&path);
+                assert!(
+                    get_token_calibration().ratio("z-ai/glm-5.2").is_none(),
+                    "junk {junk:?} must load as no data"
+                );
+            }
+        }
+
+        #[test]
+        fn a_stale_cache_is_ignored() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            write_cache(
+                &path,
+                &BTreeMap::from([(
+                    "old".to_owned(),
+                    CachedTotals {
+                        estimated: 100,
+                        actual: 200,
+                    },
+                )]),
+                now() - Duration::days(super::super::cache::CACHE_TTL_DAYS + 1),
+            )
+            .expect("write");
+            let _g = isolated(&path);
+            assert!(get_token_calibration().ratio("old").is_none());
+        }
+
+        #[test]
+        fn the_debounce_skips_most_writes_but_eventually_persists() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            let _g = isolated(&path);
+            let cal = get_token_calibration();
+
+            // First sample of the process always lands: a one-call session must
+            // not learn nothing.
+            cal.record("m", 100, 150);
+            let after_first = read_cache(&path).expect("first sample persisted");
+            assert_eq!(
+                after_first.models["m"],
+                CachedTotals {
+                    estimated: 100,
+                    actual: 150,
+                }
+            );
+
+            // The next FLUSH_EVERY_UPDATES - 1 stay in memory.
+            for _ in 1..super::super::FLUSH_EVERY_UPDATES {
+                cal.record("m", 100, 150);
+            }
+            assert_eq!(
+                read_cache(&path).expect("still the first write").models,
+                after_first.models,
+                "debounce must not write on every update"
+            );
+
+            // Crossing the threshold persists everything accumulated.
+            cal.record("m", 100, 150);
+            let flushed = read_cache(&path).expect("threshold write");
+            let n = i64::from(super::super::FLUSH_EVERY_UPDATES) + 1;
+            assert_eq!(
+                flushed.models["m"],
+                CachedTotals {
+                    estimated: 100 * n,
+                    actual: 150 * n,
+                }
+            );
+        }
+
+        #[test]
+        fn flush_persists_pending_updates() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            let _g = isolated(&path);
+            let cal = get_token_calibration();
+            cal.record("m", 100, 150); // immediate first write
+            cal.record("m", 100, 150); // debounced
+            cal.flush();
+            assert_eq!(
+                read_cache(&path).expect("flushed").models["m"],
+                CachedTotals {
+                    estimated: 200,
+                    actual: 300,
+                }
+            );
+        }
+
+        #[test]
+        fn a_round_trip_through_the_singleton_preserves_per_model_keys() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            {
+                let _g = isolated(&path);
+                let cal = get_token_calibration();
+                cal.record("z-ai/glm-5.2", 189_895, 275_924);
+                cal.record("z-ai/glm-5v-turbo", 53_159, 63_616);
+                cal.flush();
+            }
+            // Fresh singleton — the "restart".
+            let _g = isolated(&path);
+            let cal = get_token_calibration();
+            assert!((cal.ratio("z-ai/glm-5.2").expect("glm-5.2") - 1.453).abs() < 1e-3);
+            assert!((cal.ratio("z-ai/glm-5v-turbo").expect("turbo") - 1.197).abs() < 1e-3);
+        }
+
+        #[test]
+        fn persisted_totals_accumulate_across_restarts() {
+            let dir = TempDir::new().unwrap();
+            let path = cache_path(&dir);
+            {
+                let _g = isolated(&path);
+                get_token_calibration().record("m", 100, 200);
+            }
+            let _g = isolated(&path);
+            let cal = get_token_calibration();
+            cal.record("m", 100, 100);
+            // (200 + 100) / (100 + 100)
+            assert!((cal.ratio("m").expect("a ratio") - 1.5).abs() < 1e-9);
+        }
+
+        #[test]
+        fn a_pathless_store_never_touches_disk() {
+            let dir = TempDir::new().unwrap();
+            let cal = TokenCalibration::new();
+            cal.record("m", 100, 150);
+            cal.flush();
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "TokenCalibration::new must stay in memory"
+            );
+        }
     }
 
     // --- TierBudget fields -------------------------------------------------

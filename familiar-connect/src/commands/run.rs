@@ -1361,7 +1361,10 @@ async fn async_main(
     familiar.router.shutdown();
     // 7. bus.
     familiar.bus.shutdown().await;
-    // 8. (the LLM client `close()` step has no Rust analog — reqwest connection
+    // 8. persist token calibration — the writer debounces, so a clean exit
+    //    would otherwise drop the tail of the session's learning (#183).
+    crate::budget::get_token_calibration().flush();
+    // 9. (the LLM client `close()` step has no Rust analog — reqwest connection
     //     pools close on drop.)
 
     match bot_ended {
