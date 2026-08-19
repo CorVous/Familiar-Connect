@@ -40,6 +40,7 @@ use crate::sources::discord_embed_text::{EmbedView, format_embeds};
 use crate::sources::discord_text::{PublishText, TextPublisher};
 use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry};
 use crate::typing_interrupt::TypingInterruptHandler;
+use crate::voice_roster::VoiceRoster;
 
 // ---------------------------------------------------------------------------
 // Constants (byte-exact, test-pinned)
@@ -861,8 +862,11 @@ pub struct BotHandle {
     pub focus_manager: Option<Arc<FocusManager>>,
     /// The bot presence surface.
     pub presence: Arc<dyn PresenceSink>,
-    /// Voice-only member side cache (`user_id -> Author`).
-    pub voice_members: Mutex<HashMap<i64, Author>>,
+    /// Live voice-call roster: membership + the decaying join/leave log the
+    /// prompt layer renders. Shared `Arc` — the ungated
+    /// [`VoiceRosterLayer`](crate::context::VoiceRosterLayer) reads the same
+    /// state this module writes, so the two can never drift.
+    pub voice_members: Arc<VoiceRoster>,
     /// Voice-turn member resolver consumed by the voice responder (06).
     pub resolve_member: Mutex<Option<ResolveMember>>,
     /// Absence controller (11); `on_ready` resyncs away presence via it.
@@ -889,7 +893,7 @@ impl BotHandle {
             typing_interrupt: None,
             focus_manager: None,
             presence,
-            voice_members: Mutex::new(HashMap::new()),
+            voice_members: Arc::new(VoiceRoster::new()),
             resolve_member: Mutex::new(None),
             activity_engine: Mutex::new(None),
             #[cfg(feature = "discord-voice")]
@@ -930,11 +934,7 @@ impl BotHandle {
     /// Resolve a voice member from the side cache alone (no I/O).
     #[must_use]
     pub fn voice_member_cached(&self, user_id: i64) -> Option<Author> {
-        self.voice_members
-            .lock()
-            .expect("voice members mutex poisoned")
-            .get(&user_id)
-            .cloned()
+        self.voice_members.member(user_id)
     }
 
     /// Every cached voice member's proper nouns — `all_known_names()` (display /
@@ -945,17 +945,7 @@ impl BotHandle {
     /// speaker's independent stream.
     #[must_use]
     pub fn voice_member_keyterms(&self) -> Vec<String> {
-        self.voice_members
-            .lock()
-            .expect("voice members mutex poisoned")
-            .values()
-            .flat_map(|author| {
-                author
-                    .all_known_names()
-                    .into_iter()
-                    .chain(author.guild_nick.clone())
-            })
-            .collect()
+        self.voice_members.keyterms()
     }
 }
 
@@ -1175,12 +1165,9 @@ impl BotEvents {
             .expect("voice channels mutex poisoned")
             .remove(&channel_id);
         // Leaving drops the roster: a stale one would bias the next call's STT
-        // keyterms toward people who aren't there (N17).
-        self.handle
-            .voice_members
-            .lock()
-            .expect("voice members mutex poisoned")
-            .clear();
+        // keyterms toward people who aren't there (N17), and the prompt would
+        // still describe a call that ended.
+        self.handle.voice_members.clear();
         Some(channel_id)
     }
 
@@ -1297,26 +1284,23 @@ impl BotEvents {
     /// rather than merges: a re-join must not inherit the last call's roster.
     pub fn on_voice_roster(&self, members: Vec<VoiceMemberView>) {
         let own = self.bot_user_id();
-        let mut cache = self
-            .handle
-            .voice_members
-            .lock()
-            .expect("voice members mutex poisoned");
-        cache.clear();
-        for m in members {
-            if m.is_bot || own == Some(m.member_id) {
-                continue;
-            }
-            cache.insert(m.member_id, m.author);
-        }
+        // Seeding narrates nothing: nobody "just joined" — the familiar did.
+        self.handle.voice_members.snapshot(
+            members
+                .into_iter()
+                .filter(|m| !m.is_bot && own != Some(m.member_id))
+                .map(|m| (m.member_id, m.author)),
+        );
     }
 
     /// `on_voice_state_update` (B-EV23): track voice-only members of the
     /// subscribed voice channel.
     ///
-    /// Adds on a join, drops on a leave or a move out (N17). Removal is keyed
-    /// by member id alone, so an update from elsewhere in the guild needs no
-    /// before-channel: the member simply isn't in the roster.
+    /// Adds on a join, drops on a leave or a move out (N17), narrating both.
+    /// Removal is keyed by member id alone, so an update from elsewhere in the
+    /// guild needs no before-channel: the member simply isn't in the roster. A
+    /// repeat update for a seated member (mute / deafen / camera) is not
+    /// re-narrated.
     pub fn on_voice_state_update(&self, ev: VoiceStateUpdateView) {
         if self.bot_user_id() == Some(ev.member_id) {
             return;
@@ -1332,17 +1316,14 @@ impl BotEvents {
         let joined_ours = ev
             .after_channel_id
             .is_some_and(|c| u64::try_from(c).is_ok_and(|c| sub.channel_id == c));
-        let mut cache = self
-            .handle
-            .voice_members
-            .lock()
-            .expect("voice members mutex poisoned");
         if joined_ours {
             if !ev.is_bot {
-                cache.insert(ev.member_id, ev.author);
+                self.handle
+                    .voice_members
+                    .member_joined(ev.member_id, ev.author);
             }
         } else {
-            cache.remove(&ev.member_id);
+            self.handle.voice_members.member_left(ev.member_id);
         }
     }
 
@@ -1553,6 +1534,7 @@ mod serenity_glue {
     use crate::sources::discord_embed_text::{EmbedFieldView, EmbedImageView, EmbedView};
     use crate::sources::discord_text::DiscordTextSource;
     use crate::subscriptions::SubscriptionKind;
+    use crate::voice_roster::VoiceRoster;
 
     // -- view builders ---------------------------------------------------
 
@@ -2478,6 +2460,9 @@ mod serenity_glue {
         pub bus: Arc<dyn crate::bus::protocols::EventBus>,
         /// The attentional focus controller.
         pub focus_manager: Option<Arc<FocusManager>>,
+        /// The live-call roster the prompt layer reads (carries the configured
+        /// event-decay window).
+        pub voice_roster: Arc<VoiceRoster>,
         /// The turn router the typing-interrupt policy cancels active turns on.
         pub router: Arc<crate::bus::router::TurnRouter>,
         /// `[discord.text]` config driving the typing-interrupt policy (the
@@ -2508,6 +2493,7 @@ mod serenity_glue {
         let mut handle = BotHandle::new(send_text, presence.clone());
         handle.trigger_typing = Some(trigger_typing);
         handle.focus_manager = deps.focus_manager.clone();
+        handle.voice_members = deps.voice_roster.clone();
         // Typing-interrupt policy: cancel the active turn when a real user types,
         // back off when another bot types (constructed here and
         // stores it on the handle; the text responder + `on_typing` consume it).
@@ -3458,6 +3444,7 @@ mod tests {
     use crate::sources::discord_embed_text::{EmbedFieldView, EmbedImageView};
     use crate::sources::discord_text::{PublishText, TextPublisher};
     use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry};
+    use crate::voice_roster::RosterEventKind;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4489,11 +4476,8 @@ mod tests {
             Some("blue".into()),
             Some("BlueSheep".into()),
         );
-        {
-            let mut members = handle.voice_members.lock().expect("voice members");
-            members.insert(1, ada);
-            members.insert(2, blue);
-        }
+        handle.voice_members.member_joined(1, ada);
+        handle.voice_members.member_joined(2, blue);
         let mut got = handle.voice_member_keyterms();
         got.sort();
         // all_known_names() (display / username / aliases) ∪ guild_nick for both
@@ -5190,16 +5174,19 @@ mod tests {
         )
     }
 
-    fn roster_ids(handle: &BotHandle) -> Vec<i64> {
-        let mut ids: Vec<i64> = handle
+    /// Roster membership, join order (the labels the prompt layer renders).
+    fn roster_labels(handle: &BotHandle) -> Vec<String> {
+        handle.voice_members.view().members
+    }
+
+    fn roster_event_kinds(handle: &BotHandle) -> Vec<RosterEventKind> {
+        handle
             .voice_members
-            .lock()
-            .unwrap()
-            .keys()
-            .copied()
-            .collect();
-        ids.sort_unstable();
-        ids
+            .view()
+            .events
+            .iter()
+            .map(|e| e.kind)
+            .collect()
     }
 
     fn voice_state(member_id: i64, after: Option<i64>, is_bot: bool) -> VoiceStateUpdateView {
@@ -5208,7 +5195,7 @@ mod tests {
             guild_id: 7,
             after_channel_id: after,
             is_bot,
-            author: voice_author(member_id, "Ada"),
+            author: voice_author(member_id, &format!("User{member_id}")),
         }
     }
 
@@ -5238,8 +5225,10 @@ mod tests {
             },
         ]);
 
-        assert_eq!(roster_ids(&handle), vec![1]);
+        assert_eq!(roster_labels(&handle), vec!["Ada".to_owned()]);
         assert!(handle.voice_member_keyterms().contains(&"Ada".to_owned()));
+        // The familiar joined a call in progress — nobody "just joined".
+        assert!(handle.voice_members.view().events.is_empty());
     }
 
     // A re-join replaces the roster rather than merging into a stale one.
@@ -5249,9 +5238,7 @@ mod tests {
         let events = wiring_events(empty_subs_mut(), handle.clone());
         handle
             .voice_members
-            .lock()
-            .unwrap()
-            .insert(5, voice_author(5, "Gone"));
+            .member_joined(5, voice_author(5, "Gone"));
 
         events.on_voice_roster(vec![VoiceMemberView {
             member_id: 1,
@@ -5259,7 +5246,7 @@ mod tests {
             author: voice_author(1, "Ada"),
         }]);
 
-        assert_eq!(roster_ids(&handle), vec![1]);
+        assert_eq!(roster_labels(&handle), vec!["Ada".to_owned()]);
     }
 
     // Insert on join, remove on leave / move away — the map used to only grow
@@ -5273,24 +5260,36 @@ mod tests {
 
         // Joins the subscribed channel.
         events.on_voice_state_update(voice_state(1, Some(555), false));
-        assert_eq!(roster_ids(&handle), vec![1]);
+        assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
 
         // A bot joining stays out.
         events.on_voice_state_update(voice_state(2, Some(555), true));
         // The familiar itself stays out.
         events.on_voice_state_update(voice_state(999, Some(555), false));
-        assert_eq!(roster_ids(&handle), vec![1]);
+        assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
 
         // Moves to another channel in the guild.
         events.on_voice_state_update(voice_state(1, Some(556), false));
-        assert!(roster_ids(&handle).is_empty());
+        assert!(roster_labels(&handle).is_empty());
         assert!(handle.voice_member_keyterms().is_empty());
 
         // Moves back in, then disconnects entirely.
         events.on_voice_state_update(voice_state(1, Some(555), false));
-        assert_eq!(roster_ids(&handle), vec![1]);
+        assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
         events.on_voice_state_update(voice_state(1, None, false));
-        assert!(roster_ids(&handle).is_empty());
+        assert!(roster_labels(&handle).is_empty());
+
+        // Every transition the prompt layer narrates — the excluded bot and
+        // the familiar's own update contribute nothing.
+        assert_eq!(
+            roster_event_kinds(&handle),
+            vec![
+                RosterEventKind::Joined,
+                RosterEventKind::Left,
+                RosterEventKind::Joined,
+                RosterEventKind::Left,
+            ]
+        );
     }
 
     // Leaving voice drops the whole roster; a stale one would keep feeding
@@ -5304,7 +5303,8 @@ mod tests {
         events.on_voice_state_update(voice_state(1, Some(555), false));
 
         assert_eq!(events.on_unsubscribe_voice(7), Some(555));
-        assert!(roster_ids(&handle).is_empty());
+        assert!(roster_labels(&handle).is_empty());
+        assert!(handle.voice_members.view().events.is_empty());
     }
 
     // `/unsubscribe-voice` finds the guild's voice sub, removes it,

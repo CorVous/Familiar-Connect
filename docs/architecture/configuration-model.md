@@ -163,6 +163,12 @@ to `false`.
   addresses stay refused either way, as do non-http(s) schemes; that
   rule has no config escape. See
   [Security — outbound image fetches](security.md#outbound-image-fetches-view_image).
+- `[voice].roster_event_window_seconds` — how long a voice-call
+  join/leave stays narrated in the prompt (`"Tam just joined."`),
+  default `120.0`. Must be positive; a non-positive or non-numeric
+  value fails fast at load. The `In the call: …` roster line itself
+  never decays, and neither line is rendered on text turns. See
+  [Context pipeline — Voice call roster](context-pipeline.md#voice-call-roster).
 - `[prompt].post_history_instructions` — free-text block appended to
   the *trailing* reminder, the system message that sits after recent
   history (right before the model's next turn). The deepest,

@@ -29,6 +29,7 @@ pub mod sleep;
 pub mod budget;
 pub mod context;
 pub mod focus;
+pub mod voice_roster;
 
 // --- subsystems 06 + 07: responders + background workers (both under processors/) ---
 pub mod processors;
