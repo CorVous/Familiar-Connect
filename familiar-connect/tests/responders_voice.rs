@@ -916,8 +916,11 @@ async fn member_resolver_threads_author_into_history() {
     assert_eq!(author.user_id, "101");
 }
 
+// A resolver miss (speaker absent from the voice-member cache) must still
+// persist the numeric user id — an unidentified but *distinct* speaker beats a
+// fully anonymous turn (N16).
 #[tokio::test]
-async fn resolver_miss_falls_back_to_anon() {
+async fn resolver_miss_keeps_numeric_user_id() {
     let s = store();
     let resolver: MemberResolver = Arc::new(|_c, _u| None);
     let (r, _) = voice_responder(
@@ -936,13 +939,48 @@ async fn resolver_miss_falls_back_to_anon() {
     .await
     .unwrap();
     r.wait_until_idle().await;
-    assert!(
-        s.sync()
-            .recent("fam", 1, 10, None, None)
-            .unwrap()
-            .iter()
-            .any(|t| t.content.contains("hello there"))
+    let user = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .rfind(|t| t.role == "user")
+        .unwrap();
+    assert!(user.content.contains("hello there"));
+    let author = user.author.expect("author");
+    assert_eq!(author.platform, "discord");
+    assert_eq!(author.user_id, "101");
+    assert!(author.display_name.is_none());
+    assert!(author.username.is_none());
+}
+
+// With no resolver wired at all there is still an id to keep.
+#[tokio::test]
+async fn missing_resolver_keeps_numeric_user_id() {
+    let s = store();
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&["ack"])),
+        Arc::new(MockTTSPlayer::new(5, 5)),
     );
+    r.handle(&activity_start("voice:1", "t-1", Some(202)), &bus())
+        .await
+        .unwrap();
+    r.handle(
+        &voice_final("hi again", "voice:1", "t-1", Some(202)),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    r.wait_until_idle().await;
+    let user = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .rfind(|t| t.role == "user")
+        .unwrap();
+    assert_eq!(user.author.expect("author").user_id, "202");
 }
 
 // ---------------------------------------------------------------------------

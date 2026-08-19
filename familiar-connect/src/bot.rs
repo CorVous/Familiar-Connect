@@ -205,7 +205,20 @@ pub struct VoiceStateUpdateView {
     pub guild_id: i64,
     /// The joined channel id (`None` when leaving).
     pub after_channel_id: Option<i64>,
+    /// Whether the member is a bot.
+    pub is_bot: bool,
     /// The resolved author for the member.
+    pub author: Author,
+}
+
+/// One occupant of a join-time voice-roster snapshot.
+#[derive(Clone, Debug)]
+pub struct VoiceMemberView {
+    /// The occupant's user id.
+    pub member_id: i64,
+    /// Whether the occupant is a bot.
+    pub is_bot: bool,
+    /// The resolved author for the occupant.
     pub author: Author,
 }
 
@@ -1161,6 +1174,13 @@ impl BotEvents {
             .lock()
             .expect("voice channels mutex poisoned")
             .remove(&channel_id);
+        // Leaving drops the roster: a stale one would bias the next call's STT
+        // keyterms toward people who aren't there (N17).
+        self.handle
+            .voice_members
+            .lock()
+            .expect("voice members mutex poisoned")
+            .clear();
         Some(channel_id)
     }
 
@@ -1271,31 +1291,62 @@ impl BotEvents {
         }
     }
 
-    /// `on_voice_state_update` (B-EV23): cache voice-only members joining the
+    /// Join-time roster snapshot (B-EV23b): replace the voice-member cache with
+    /// the channel's current occupants.
+    ///
+    /// `on_voice_state_update` only ever sees *changes*, so without this
+    /// everyone already seated when the familiar joined stays unresolvable for
+    /// the whole session — anonymous turns, no STT keyterms (N16). Replaces
+    /// rather than merges: a re-join must not inherit the last call's roster.
+    pub fn on_voice_roster(&self, members: Vec<VoiceMemberView>) {
+        let own = self.bot_user_id();
+        let mut cache = self
+            .handle
+            .voice_members
+            .lock()
+            .expect("voice members mutex poisoned");
+        cache.clear();
+        for m in members {
+            if m.is_bot || own == Some(m.member_id) {
+                continue;
+            }
+            cache.insert(m.member_id, m.author);
+        }
+    }
+
+    /// `on_voice_state_update` (B-EV23): track voice-only members of the
     /// subscribed voice channel.
+    ///
+    /// Adds on a join, drops on a leave or a move out (N17). Removal is keyed
+    /// by member id alone, so an update from elsewhere in the guild needs no
+    /// before-channel: the member simply isn't in the roster.
     pub fn on_voice_state_update(&self, ev: VoiceStateUpdateView) {
         if self.bot_user_id() == Some(ev.member_id) {
             return;
         }
-        let Some(after_channel) = ev.after_channel_id else {
-            return;
-        };
-        let matches = u64::try_from(ev.guild_id).ok().and_then(|g| {
+        let Some(sub) = u64::try_from(ev.guild_id).ok().and_then(|g| {
             self.subscriptions
                 .lock()
                 .expect("subscriptions mutex poisoned")
                 .voice_in_guild(g)
-        });
-        let matches = matches
-            .is_some_and(|sub| u64::try_from(after_channel).is_ok_and(|c| sub.channel_id == c));
-        if !matches {
+        }) else {
             return;
-        }
-        self.handle
+        };
+        let joined_ours = ev
+            .after_channel_id
+            .is_some_and(|c| u64::try_from(c).is_ok_and(|c| sub.channel_id == c));
+        let mut cache = self
+            .handle
             .voice_members
             .lock()
-            .expect("voice members mutex poisoned")
-            .insert(ev.member_id, ev.author);
+            .expect("voice members mutex poisoned");
+        if joined_ours {
+            if !ev.is_bot {
+                cache.insert(ev.member_id, ev.author);
+            }
+        } else {
+            cache.remove(&ev.member_id);
+        }
     }
 
     /// `on_ready` (B-PR24): set the bot user id, bulk-populate focus name caches,
@@ -1484,17 +1535,17 @@ mod serenity_glue {
     use serenity::all::{
         ActivityData, Attachment, ChannelId, Client, Command, Context, CreateAllowedMentions,
         CreateCommand, CreateInteractionResponseFollowup, CreateMessage, Embed, EventHandler,
-        GatewayIntents, Guild, GuildChannel, Interaction, Message, MessageId, MessageUpdateEvent,
-        OnlineStatus, PartialGuild, Reaction, ReactionType, Ready, TypingStartEvent, User,
-        VoiceState,
+        GatewayIntents, Guild, GuildChannel, Interaction, Member, Message, MessageId,
+        MessageUpdateEvent, OnlineStatus, PartialGuild, Reaction, ReactionType, Ready,
+        TypingStartEvent, User, VoiceState,
     };
 
     use super::{
         AttachmentView, BotEvents, BotHandle, BotStore, ChannelSender, EmojiView, GuildInfo,
         InteractionAck, InteractionGone, MentionView, MessageEditView, MessageView, Presence,
         PresenceSink, PresenceStatus, ReactionClearPayloadView, ReactionPayloadView, ReadyInfo,
-        ResolveMember, SentMessage, TypingEventView, VoiceStateUpdateView, defer_interaction,
-        reply,
+        ResolveMember, SentMessage, TypingEventView, VoiceMemberView, VoiceStateUpdateView,
+        defer_interaction, reply,
     };
     use crate::diagnostics::collector::get_span_collector;
     use crate::diagnostics::report::render_summary_table;
@@ -1519,6 +1570,13 @@ mod serenity_glue {
             Some(user.name.clone()),
             Some(display),
         )
+    }
+
+    /// [`author_from_user`] plus the per-guild nickname (an STT keyterm, #198).
+    fn author_from_member(member: &Member) -> Author {
+        let mut author = author_from_user(&member.user);
+        author.guild_nick.clone_from(&member.nick);
+        author
     }
 
     fn attachment_view(att: &Attachment) -> AttachmentView {
@@ -1922,6 +1980,68 @@ mod serenity_glue {
             })
         }
 
+        /// Live voice-member proper nouns for per-user STT keyterm biasing
+        /// (#198). A weak ref avoids keeping the handle alive past shutdown; a
+        /// dead handle yields no names.
+        #[cfg(feature = "discord-voice")]
+        fn keyterm_provider(&self) -> crate::bot::voice_intake::NameProvider {
+            let weak = Arc::downgrade(&self.slash.handle);
+            Arc::new(move || {
+                weak.upgrade()
+                    .map_or_else(Vec::new, |h| h.voice_member_keyterms())
+            })
+        }
+
+        /// Seed the voice-member roster with the channel's current occupants,
+        /// read from the gateway cache (GUILD_VOICE_STATES).
+        ///
+        /// Voice-state updates only report *changes*, so without this snapshot
+        /// every member present before the join stays unresolvable (N16).
+        /// Cache-only: `GUILD_MEMBERS` is not requested and the audio path
+        /// tolerates no REST, so an occupant missing from both the voice state
+        /// and the user cache is skipped rather than fetched. The dashmap ref
+        /// is dropped before the user-cache lookups.
+        #[cfg(feature = "discord-voice")]
+        fn snapshot_voice_roster(
+            &self,
+            ctx: &Context,
+            gid: serenity::all::GuildId,
+            channel_id: ChannelId,
+        ) {
+            let seated: Vec<(u64, Option<Member>)> =
+                ctx.cache.guild(gid).map_or_else(Vec::new, |guild| {
+                    guild
+                        .voice_states
+                        .iter()
+                        .filter(|(_, vs)| vs.channel_id == Some(channel_id))
+                        .map(|(uid, vs)| {
+                            let member = vs
+                                .member
+                                .clone()
+                                .or_else(|| guild.members.get(uid).cloned());
+                            (uid.get(), member)
+                        })
+                        .collect()
+                });
+            let members = seated
+                .into_iter()
+                .filter_map(|(uid, member)| {
+                    let (is_bot, author) = if let Some(m) = member {
+                        (m.user.bot, author_from_member(&m))
+                    } else {
+                        let user = ctx.cache.user(uid)?;
+                        (user.bot, author_from_user(&user))
+                    };
+                    Some(VoiceMemberView {
+                        member_id: uid as i64,
+                        is_bot,
+                        author,
+                    })
+                })
+                .collect();
+            self.events.on_voice_roster(members);
+        }
+
         /// `/subscribe-voice`: join the caller's voice channel via songbird
         /// (songbird owns the DAVE/MLS handshake), wire the [`RecordingSink`] +
         /// per-speaker intake pipeline, populate the `voice_runtime` map, and
@@ -1989,18 +2109,11 @@ mod serenity_glue {
                     }
                 };
 
+            self.snapshot_voice_roster(ctx, gid, ChannelId::new(channel_id_u64));
+
             let template = self.slash.transcriber_template.clone();
             let has_transcriber = template.is_some();
-            // Feed live voice-member proper nouns to each per-user transcriber
-            // clone as STT keyterm biases (#198). A weak ref avoids keeping the
-            // handle alive past shutdown; a dead handle yields no names.
-            let handle_weak = Arc::downgrade(&self.slash.handle);
-            let name_provider: Option<crate::bot::voice_intake::NameProvider> =
-                Some(Arc::new(move || {
-                    handle_weak
-                        .upgrade()
-                        .map_or_else(Vec::new, |h| h.voice_member_keyterms())
-                }));
+            let name_provider = Some(self.keyterm_provider());
             let runtime = start_voice_intake(
                 voice_client,
                 template,
@@ -2315,7 +2428,7 @@ mod serenity_glue {
 
         async fn voice_state_update(
             &self,
-            _ctx: Context,
+            ctx: Context,
             _old: Option<VoiceState>,
             new: VoiceState,
         ) {
@@ -2324,12 +2437,17 @@ mod serenity_glue {
             };
             let author = new.member.as_ref().map_or_else(
                 || Author::new("discord", new.user_id.get().to_string(), None, None),
-                |m| author_from_user(&m.user),
+                author_from_member,
+            );
+            let is_bot = new.member.as_ref().map_or_else(
+                || ctx.cache.user(new.user_id).is_some_and(|u| u.bot),
+                |m| m.user.bot,
             );
             self.events.on_voice_state_update(VoiceStateUpdateView {
                 member_id: new.user_id.get() as i64,
                 guild_id: guild_id.get() as i64,
                 after_channel_id: new.channel_id.map(|c| c.get() as i64),
+                is_bot,
                 author,
             });
         }
@@ -3330,9 +3448,10 @@ mod tests {
         Author, BotEvents, BotHandle, DM_BOT_DISCLAIMER, DM_BOT_DISCLAIMER_DELETE_EMOJI,
         DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, GuildInfo, InteractionAck,
         InteractionGone, MentionView, MessageView, Presence, PresenceSink, PresenceStatus,
-        ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView, apply_message_edit,
-        apply_reaction_clear, apply_reaction_delta, build_activity_presence_cb, collect_images,
-        compose_content_with_embeds, defer_interaction, emoji_repr, message_pings_bot, reply,
+        ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView, VoiceMemberView,
+        VoiceStateUpdateView, apply_message_edit, apply_reaction_clear, apply_reaction_delta,
+        build_activity_presence_cb, collect_images, compose_content_with_embeds, defer_interaction,
+        emoji_repr, message_pings_bot, reply,
     };
     use crate::bot::{ActivityResync, ChannelSender};
     use crate::focus::{FocusManager, FocusStore};
@@ -4902,6 +5021,134 @@ mod tests {
         events.on_subscribe_voice(555, Some(7), Some("Lounge"), Some("Aetheria"));
         assert_eq!(fm.channel_label(Some(555)), "#Lounge(555)");
         assert_eq!(fm.guild_name_for(Some(555)).as_deref(), Some("Aetheria"));
+    }
+
+    // ---- voice-member roster (N16 / N17) ----
+
+    fn voice_author(id: i64, name: &str) -> Author {
+        Author::new(
+            "discord",
+            id.to_string(),
+            Some(name.to_lowercase()),
+            Some(name.to_owned()),
+        )
+    }
+
+    fn roster_ids(handle: &BotHandle) -> Vec<i64> {
+        let mut ids: Vec<i64> = handle
+            .voice_members
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn voice_state(member_id: i64, after: Option<i64>, is_bot: bool) -> VoiceStateUpdateView {
+        VoiceStateUpdateView {
+            member_id,
+            guild_id: 7,
+            after_channel_id: after,
+            is_bot,
+            author: voice_author(member_id, "Ada"),
+        }
+    }
+
+    // The bot only ever saw voice-state *changes*, so anyone already seated
+    // when it joined stayed invisible all session (N16).
+    #[test]
+    fn voice_roster_snapshot_seeds_cache_and_skips_bots_and_self() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+
+        events.on_voice_roster(vec![
+            VoiceMemberView {
+                member_id: 1,
+                is_bot: false,
+                author: voice_author(1, "Ada"),
+            },
+            VoiceMemberView {
+                member_id: 2,
+                is_bot: true,
+                author: voice_author(2, "OtherBot"),
+            },
+            // `wiring_events` runs as user 999.
+            VoiceMemberView {
+                member_id: 999,
+                is_bot: true,
+                author: voice_author(999, "Self"),
+            },
+        ]);
+
+        assert_eq!(roster_ids(&handle), vec![1]);
+        assert!(handle.voice_member_keyterms().contains(&"Ada".to_owned()));
+    }
+
+    // A re-join replaces the roster rather than merging into a stale one.
+    #[test]
+    fn voice_roster_snapshot_replaces_previous_roster() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        handle
+            .voice_members
+            .lock()
+            .unwrap()
+            .insert(5, voice_author(5, "Gone"));
+
+        events.on_voice_roster(vec![VoiceMemberView {
+            member_id: 1,
+            is_bot: false,
+            author: voice_author(1, "Ada"),
+        }]);
+
+        assert_eq!(roster_ids(&handle), vec![1]);
+    }
+
+    // Insert on join, remove on leave / move away — the map used to only grow
+    // (N17). Keyterms follow the roster.
+    #[test]
+    fn voice_state_updates_add_and_remove_roster_members() {
+        let subs = empty_subs_mut();
+        let handle = wiring_handle();
+        let events = wiring_events(subs, handle.clone());
+        events.on_subscribe_voice(555, Some(7), None, None);
+
+        // Joins the subscribed channel.
+        events.on_voice_state_update(voice_state(1, Some(555), false));
+        assert_eq!(roster_ids(&handle), vec![1]);
+
+        // A bot joining stays out.
+        events.on_voice_state_update(voice_state(2, Some(555), true));
+        // The familiar itself stays out.
+        events.on_voice_state_update(voice_state(999, Some(555), false));
+        assert_eq!(roster_ids(&handle), vec![1]);
+
+        // Moves to another channel in the guild.
+        events.on_voice_state_update(voice_state(1, Some(556), false));
+        assert!(roster_ids(&handle).is_empty());
+        assert!(handle.voice_member_keyterms().is_empty());
+
+        // Moves back in, then disconnects entirely.
+        events.on_voice_state_update(voice_state(1, Some(555), false));
+        assert_eq!(roster_ids(&handle), vec![1]);
+        events.on_voice_state_update(voice_state(1, None, false));
+        assert!(roster_ids(&handle).is_empty());
+    }
+
+    // Leaving voice drops the whole roster; a stale one would keep feeding
+    // STT keyterms for the next call.
+    #[test]
+    fn unsubscribe_voice_clears_roster() {
+        let subs = empty_subs_mut();
+        let handle = wiring_handle();
+        let events = wiring_events(subs, handle.clone());
+        events.on_subscribe_voice(555, Some(7), None, None);
+        events.on_voice_state_update(voice_state(1, Some(555), false));
+
+        assert_eq!(events.on_unsubscribe_voice(7), Some(555));
+        assert!(roster_ids(&handle).is_empty());
     }
 
     // `/unsubscribe-voice` finds the guild's voice sub, removes it,

@@ -39,6 +39,13 @@ Common startup errors and what they mean:
   line: `unmapped_frames` equal to `speaking_frames` means no op-5
   `Speaking` event was ever seen. See
   [Voice pipeline](../architecture/voice-pipeline.md#songbird-join-order-and-ssrc-attribution).
+- **Voice turns are attributed to a bare user id, not a name** — the speaker
+  is missing from the voice-member roster, so only the id survives. The roster
+  is snapshotted from the gateway cache at join and maintained from
+  voice-state updates; an occupant the cache cannot resolve (no
+  `GUILD_MEMBERS` intent) stays nameless until they type or their voice state
+  changes. See
+  [Voice pipeline](../architecture/voice-pipeline.md#voice-member-roster).
 - **`RTCP decryption failed: Crypto(Error)` in the log** — songbird's UDP
   receive task, benign and non-fatal by design. It is filtered out by
   default (`songbird::driver::tasks::udp_rx=error`); `-vv` restores it.
