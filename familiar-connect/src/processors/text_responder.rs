@@ -343,7 +343,9 @@ impl TextResponder {
         }
         if let Some(handler) = &self.typing_handler {
             handler.wait_for_backoff(channel_id).await;
-            handler.notify_user_message(channel_id);
+            if !payload.author_is_bot {
+                handler.notify_user_message(channel_id);
+            }
         }
         let scope = self.router.begin_turn(&event.session_id, &event.turn_id);
 

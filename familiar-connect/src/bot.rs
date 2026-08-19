@@ -90,7 +90,7 @@ pub struct MentionView {
     pub id: i64,
     /// Whether the mentioned user is a bot.
     pub is_bot: bool,
-    /// The pre-resolved author (used for non-bot mentions).
+    /// The pre-resolved author.
     pub author: Author,
 }
 
@@ -1184,14 +1184,11 @@ impl BotEvents {
         Some(channel_id)
     }
 
-    /// `on_message` ingest (B-OM). Guard order is load-bearing: own echo, then any
-    /// bot author, then the DM-allowlist / subscription gates.
+    /// `on_message` ingest (B-OM). Guard order is load-bearing: own echo, then
+    /// the DM-allowlist / subscription gates.
     pub async fn on_message(&self, message: MessageView) {
         let bot_user_id = self.bot_user_id();
         if bot_user_id == Some(message.author_id) {
-            return;
-        }
-        if message.author_is_bot {
             return;
         }
         if message.guild_id.is_none() {
@@ -1199,12 +1196,14 @@ impl BotEvents {
             if !self.dm_allowlist.contains(&message.author_id) {
                 return;
             }
-            // First admitted DM from this user: warn DMs aren't private.
-            let first = self
-                .disclaimed_dm_users
-                .lock()
-                .expect("disclaimed users mutex poisoned")
-                .insert(message.author_id);
+            // First admitted DM from this human: warn DMs aren't private. The
+            // warning is addressed to a person, so bots never receive it.
+            let first = !message.author_is_bot
+                && self
+                    .disclaimed_dm_users
+                    .lock()
+                    .expect("disclaimed users mutex poisoned")
+                    .insert(message.author_id);
             if first {
                 let body = format!("{DM_BOT_DISCLAIMER}{DM_BOT_DISCLAIMER_DISMISS_HINT}");
                 match message.channel.send(&body).await {
@@ -1235,7 +1234,7 @@ impl BotEvents {
         let mention_authors: Vec<Author> = message
             .mentions
             .iter()
-            .filter(|m| !m.is_bot)
+            .filter(|m| Some(m.id) != bot_user_id)
             .map(|m| m.author.clone())
             .collect();
         let pings_bot = message_pings_bot(&message.mentions, bot_user_id);
@@ -1254,6 +1253,7 @@ impl BotEvents {
                 mentions: mention_authors,
                 images,
                 pings_bot,
+                author_is_bot: message.author_is_bot,
             },
         )
         .await;
@@ -1262,9 +1262,6 @@ impl BotEvents {
     /// `on_message_edit` (B-RX16/17): act only when the edit *added* embed content.
     pub fn on_message_edit(&self, edit: &MessageEditView) {
         if self.bot_user_id() == Some(edit.author_id) {
-            return;
-        }
-        if edit.author_is_bot {
             return;
         }
         if edit.after_embeds.is_empty() || edit.before_embeds == edit.after_embeds {
@@ -3447,11 +3444,11 @@ mod tests {
     use super::{
         Author, BotEvents, BotHandle, DM_BOT_DISCLAIMER, DM_BOT_DISCLAIMER_DELETE_EMOJI,
         DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, GuildInfo, InteractionAck,
-        InteractionGone, MentionView, MessageView, Presence, PresenceSink, PresenceStatus,
-        ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView, VoiceMemberView,
-        VoiceStateUpdateView, apply_message_edit, apply_reaction_clear, apply_reaction_delta,
-        build_activity_presence_cb, collect_images, compose_content_with_embeds, defer_interaction,
-        emoji_repr, message_pings_bot, reply,
+        InteractionGone, MentionView, MessageEditView, MessageView, Presence, PresenceSink,
+        PresenceStatus, ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView,
+        VoiceMemberView, VoiceStateUpdateView, apply_message_edit, apply_reaction_clear,
+        apply_reaction_delta, build_activity_presence_cb, collect_images,
+        compose_content_with_embeds, defer_interaction, emoji_repr, message_pings_bot, reply,
     };
     use crate::bot::{ActivityResync, ChannelSender};
     use crate::focus::{FocusManager, FocusStore};
@@ -4315,14 +4312,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingStore {
         bumps: Mutex<Vec<(String, i64)>>,
+        edits: Mutex<Vec<(String, String)>>,
     }
     impl super::BotStore for RecordingStore {
         fn update_turn_content_by_message_id(
             &self,
             _familiar_id: &str,
-            _platform_message_id: &str,
-            _content: &str,
+            platform_message_id: &str,
+            content: &str,
         ) -> Result<(), StoreError> {
+            self.edits
+                .lock()
+                .unwrap()
+                .push((platform_message_id.to_owned(), content.to_owned()));
             Ok(())
         }
         fn bump_reaction(
@@ -4657,19 +4659,173 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bot_authored_dm_ignored_even_if_allowlisted() {
+    async fn bot_authored_dm_ingests_when_allowlisted() {
+        let fx = dm_fixture(vec![123]);
+        let (msg, _ch) = dm_message(123, 555, None, true);
+        fx.events.on_message(msg).await;
+        assert_eq!(fx.publisher.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bot_authored_dm_skips_the_human_disclaimer() {
         let fx = dm_fixture(vec![123]);
         let (msg, ch) = dm_message(123, 555, None, true);
         fx.events.on_message(msg).await;
-        assert!(fx.publisher.calls.lock().unwrap().is_empty());
+        assert!(ch.sent.lock().unwrap().is_empty());
         assert!(
             fx.subs
                 .lock()
                 .unwrap()
                 .get(555, SubscriptionKind::Text)
-                .is_none()
+                .is_some()
         );
-        assert!(ch.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bot_authored_message_ingests_in_subscribed_channel() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        let (msg, _ch) = dm_message(321, 888, Some(7), true);
+        fx.events.on_message(msg).await;
+        assert_eq!(fx.publisher.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingested_event_carries_author_is_bot() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        let (bot_msg, _ch) = dm_message(321, 888, Some(7), true);
+        fx.events.on_message(bot_msg).await;
+        let (human_msg, _ch2) = dm_message(123, 888, Some(7), false);
+        fx.events.on_message(human_msg).await;
+        let calls = fx.publisher.calls.lock().unwrap();
+        assert!(calls[0].author_is_bot);
+        assert!(!calls[1].author_is_bot);
+    }
+
+    #[tokio::test]
+    async fn own_bot_authored_message_still_dropped() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        let (msg, _ch) = dm_message(99, 888, Some(7), true);
+        fx.events.on_message(msg).await;
+        assert!(fx.publisher.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bot_mention_is_carried_without_counting_as_a_ping() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        let (mut msg, _ch) = dm_message(123, 888, Some(7), false);
+        msg.mentions = vec![MentionView {
+            id: 321,
+            is_bot: true,
+            author: author("321", "Tam"),
+        }];
+        fx.events.on_message(msg).await;
+        let calls = fx.publisher.calls.lock().unwrap();
+        assert!(!calls[0].pings_bot);
+        assert_eq!(
+            calls[0]
+                .mentions
+                .iter()
+                .map(|m| m.user_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["321".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn own_mention_stays_out_of_mention_authors() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        let (mut msg, _ch) = dm_message(123, 888, Some(7), false);
+        msg.mentions = vec![
+            MentionView {
+                id: 99,
+                is_bot: true,
+                author: author("99", "Her"),
+            },
+            MentionView {
+                id: 321,
+                is_bot: true,
+                author: author("321", "Tam"),
+            },
+        ];
+        fx.events.on_message(msg).await;
+        let calls = fx.publisher.calls.lock().unwrap();
+        assert!(calls[0].pings_bot);
+        assert_eq!(
+            calls[0]
+                .mentions
+                .iter()
+                .map(|m| m.user_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["321".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn bot_authored_edit_merges_new_embed() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        fx.events.on_message_edit(&MessageEditView {
+            author_id: 321,
+            author_is_bot: true,
+            channel_id: 888,
+            message_id: 4242,
+            content: "look".to_owned(),
+            before_embeds: Vec::new(),
+            after_embeds: vec![embed_desc("an unfurled link")],
+        });
+        let edits = fx.store.edits.lock().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].0, "4242");
+        assert!(edits[0].1.contains("an unfurled link"));
+    }
+
+    #[tokio::test]
+    async fn own_edit_still_dropped() {
+        let fx = dm_fixture(vec![]);
+        fx.subs
+            .lock()
+            .unwrap()
+            .add(888, SubscriptionKind::Text, Some(7), None)
+            .unwrap();
+        fx.events.on_message_edit(&MessageEditView {
+            author_id: 99,
+            author_is_bot: true,
+            channel_id: 888,
+            message_id: 4242,
+            content: "look".to_owned(),
+            before_embeds: Vec::new(),
+            after_embeds: vec![embed_desc("an unfurled link")],
+        });
+        assert!(fx.store.edits.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

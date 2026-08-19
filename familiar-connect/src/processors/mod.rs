@@ -41,6 +41,11 @@ use crate::tools::registry::ToolContext;
 /// non-`DiscordTextPayload` payload fails to downcast (the "not a dict" drop
 /// rule) and `channel_id` is statically an `i64`.
 #[derive(Clone, Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about one message, not a state enum; `wake` and \
+              `alarm` could fold into a Synthetic enum if a third kind appears"
+)]
 pub struct DiscordTextPayload {
     /// The responder filters on `familiar_id == self.familiar_id`.
     pub familiar_id: String,
@@ -62,6 +67,8 @@ pub struct DiscordTextPayload {
     pub images: HashMap<String, String>,
     /// Whether the incoming message pinged the bot.
     pub pings_bot: bool,
+    /// Whether the platform reports the author as a bot.
+    pub author_is_bot: bool,
     /// Synthetic unread-nudge wake (no real user content).
     pub wake: bool,
     /// Her own scheduled alarm firing — pierces activity absence gating.
