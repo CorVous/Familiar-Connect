@@ -578,6 +578,47 @@ async fn user_message_clears_backoff() {
     assert!((handler.current_backoff_s(42) - 1.0).abs() < 1e-9);
 }
 
+#[tokio::test]
+async fn bot_message_does_not_clear_backoff() {
+    // #223: a sibling familiar's message ingests, but must not reset the
+    // exponential ladder — otherwise two bots hold each other at the floor.
+    let cfg = DiscordTextConfig {
+        typing_backoff_initial_s: 0.05,
+        typing_backoff_max_s: 0.4,
+        ..Default::default()
+    };
+    let router = Arc::new(TurnRouter::new());
+    let handler = Arc::new(TypingInterruptHandler::new(
+        cfg,
+        Arc::clone(&router),
+        Arc::new(|_ch| true),
+        Arc::new(|| Some(999)),
+    ));
+    handler.notify_typing(42, 123, true);
+    handler.notify_typing(42, 123, true);
+    assert!((handler.current_backoff_s(42) - 0.1).abs() < 1e-9);
+
+    let s = store();
+    let assembler = make_assembler(Arc::clone(&s));
+    let r = TextResponder::new(
+        assembler,
+        Arc::new(ScriptedLlm::new(&["ok"])),
+        Arc::new(CapturingSend::new()),
+        s,
+        Arc::clone(&router),
+        "fam",
+    )
+    .with_typing_handler(Arc::clone(&handler));
+    let mut payload = text_payload(42, "beep boop");
+    payload.author_is_bot = true;
+    r.handle(&discord_text_event(payload, "e-1"), &bus())
+        .await
+        .unwrap();
+
+    handler.notify_typing(42, 123, true);
+    assert!((handler.current_backoff_s(42) - 0.2).abs() < 1e-9);
+}
+
 // ---------------------------------------------------------------------------
 // Identity write path + threading + pings
 // ---------------------------------------------------------------------------
