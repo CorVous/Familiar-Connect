@@ -223,6 +223,139 @@ pub struct VoiceMemberView {
     pub author: Author,
 }
 
+/// A join-time occupant, before the REST leg.
+#[derive(Clone, Debug)]
+pub struct SeatedMember {
+    /// The occupant's user id — known even when nothing else is.
+    pub member_id: i64,
+    /// `(is_bot, author)` from the gateway cache; `None` owes a REST lookup.
+    pub cached: Option<(bool, Author)>,
+}
+
+impl SeatedMember {
+    /// Cache hit — no REST lookup owed.
+    #[must_use]
+    pub const fn cached(member_id: i64, is_bot: bool, author: Author) -> Self {
+        Self {
+            member_id,
+            cached: Some((is_bot, author)),
+        }
+    }
+
+    /// Cache miss — REST owed.
+    #[must_use]
+    pub const fn unresolved(member_id: i64) -> Self {
+        Self {
+            member_id,
+            cached: None,
+        }
+    }
+}
+
+/// One member read back over REST.
+#[derive(Clone, Debug)]
+pub struct FetchedMember {
+    /// Whether the member is a bot.
+    pub is_bot: bool,
+    /// The resolved author.
+    pub author: Author,
+}
+
+/// Join-time member lookup seam (`GET /guilds/{guild}/members/{user}`).
+///
+/// Injected so tests never open a socket; production wires the serenity HTTP
+/// client. Off the audio path — the per-frame resolver stays cache-only
+/// ([`ResolveMember`]).
+#[async_trait]
+pub trait MemberFetcher: Send + Sync {
+    /// Fetch one guild member, or fail.
+    async fn fetch(&self, guild_id: i64, user_id: i64) -> anyhow::Result<FetchedMember>;
+}
+
+/// Max REST member lookups in flight at once — bounds the burst a busy channel
+/// aims at Discord (serenity's client handles the 429s, but a fan-out of one
+/// request per occupant is still rude).
+pub const ROSTER_FETCH_CONCURRENCY: usize = 4;
+
+/// Wall-clock cap on the whole join-time REST leg. Bounds how long
+/// `/subscribe-voice` waits before starting audio intake; occupants still
+/// unresolved when it expires degrade to id-only.
+pub const ROSTER_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Complete a join-time roster: cache hits pass straight through, cache misses
+/// get one REST lookup each.
+///
+/// Never drops an occupant. A failed, errored, or over-budget lookup degrades
+/// to an id-only [`Author`] — same fallback the voice responder uses — because
+/// losing a known user id to a failed *name* lookup is what made quiet
+/// participants invisible in the first place (N16). Input order is preserved.
+pub async fn resolve_voice_roster(
+    guild_id: i64,
+    seated: Vec<SeatedMember>,
+    fetcher: &dyn MemberFetcher,
+    budget: std::time::Duration,
+) -> Vec<VoiceMemberView> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut slots: Vec<Option<VoiceMemberView>> = Vec::with_capacity(seated.len());
+    let mut pending: Vec<(usize, i64)> = Vec::new();
+    for occupant in seated {
+        if let Some((is_bot, author)) = occupant.cached {
+            slots.push(Some(VoiceMemberView {
+                member_id: occupant.member_id,
+                is_bot,
+                author,
+            }));
+        } else {
+            pending.push((slots.len(), occupant.member_id));
+            slots.push(None);
+        }
+    }
+    // Chunked, not fanned out; every request shares the one deadline, so the
+    // whole leg costs at most `budget` however many chunks remain.
+    for chunk in pending.chunks(ROSTER_FETCH_CONCURRENCY) {
+        let round = futures::future::join_all(chunk.iter().map(|&(idx, user_id)| async move {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let outcome = tokio::time::timeout(left, fetcher.fetch(guild_id, user_id)).await;
+            (idx, user_id, outcome)
+        }))
+        .await;
+        for (idx, user_id, outcome) in round {
+            let (view, failure) = match outcome {
+                Ok(Ok(member)) => (
+                    VoiceMemberView {
+                        member_id: user_id,
+                        is_bot: member.is_bot,
+                        author: member.author,
+                    },
+                    None,
+                ),
+                Ok(Err(err)) => (id_only_member(user_id), Some(err.to_string())),
+                Err(_) => (id_only_member(user_id), Some("over budget".to_owned())),
+            };
+            if let Some(failure) = failure {
+                tracing::warn!(
+                    target: "familiar_connect.bot",
+                    "{} {} {}",
+                    ls::tag("Voice", ls::Y),
+                    ls::kv("member_fetch", &user_id.to_string()),
+                    ls::kv("failed", &failure),
+                );
+            }
+            slots[idx] = Some(view);
+        }
+    }
+    slots.into_iter().flatten().collect()
+}
+
+/// Identity without a name — the degrade path, never a drop.
+fn id_only_member(user_id: i64) -> VoiceMemberView {
+    VoiceMemberView {
+        member_id: user_id,
+        is_bot: false,
+        author: Author::new("discord", user_id.to_string(), None, None),
+    }
+}
+
 /// The `on_ready` snapshot (channel + guild name maps from every guild).
 #[derive(Clone, Debug, Default)]
 pub struct ReadyInfo {
@@ -1522,8 +1655,8 @@ mod serenity_glue {
         AttachmentView, BotEvents, BotHandle, BotStore, ChannelSender, EmojiView, GuildInfo,
         InteractionAck, InteractionGone, MentionView, MessageEditView, MessageView, Presence,
         PresenceSink, PresenceStatus, ReactionClearPayloadView, ReactionPayloadView, ReadyInfo,
-        ResolveMember, SentMessage, TypingEventView, VoiceMemberView, VoiceStateUpdateView,
-        defer_interaction, reply,
+        ResolveMember, SentMessage, TypingEventView, VoiceStateUpdateView, defer_interaction,
+        reply,
     };
     use crate::diagnostics::collector::get_span_collector;
     use crate::diagnostics::report::render_summary_table;
@@ -1556,6 +1689,30 @@ mod serenity_glue {
         let mut author = author_from_user(&member.user);
         author.guild_nick.clone_from(&member.nick);
         author
+    }
+
+    /// Production [`MemberFetcher`](super::MemberFetcher): one REST
+    /// `GET /guilds/{guild}/members/{user}`. Passing the bare `Http` (not the
+    /// `Context`) as the `CacheHttp` makes `GuildId::member` skip its cache
+    /// branch — the caller already missed — and go straight to the wire;
+    /// serenity's client owns the rate-limit bookkeeping.
+    #[cfg(feature = "discord-voice")]
+    struct HttpMemberFetcher {
+        http: Arc<serenity::http::Http>,
+    }
+
+    #[cfg(feature = "discord-voice")]
+    #[async_trait]
+    impl super::MemberFetcher for HttpMemberFetcher {
+        async fn fetch(&self, guild_id: i64, user_id: i64) -> anyhow::Result<super::FetchedMember> {
+            let gid = serenity::all::GuildId::new(u64::try_from(guild_id)?);
+            let uid = serenity::all::UserId::new(u64::try_from(user_id)?);
+            let member = gid.member(&self.http, uid).await?;
+            Ok(super::FetchedMember {
+                is_bot: member.user.bot,
+                author: author_from_member(&member),
+            })
+        }
     }
 
     fn attachment_view(att: &Attachment) -> AttachmentView {
@@ -1971,22 +2128,55 @@ mod serenity_glue {
             })
         }
 
-        /// Seed the voice-member roster with the channel's current occupants,
-        /// read from the gateway cache (GUILD_VOICE_STATES).
+        /// Seed the voice-member roster with the channel's current occupants:
+        /// gateway cache first (GUILD_VOICE_STATES), one REST member lookup for
+        /// whoever the cache cannot name.
         ///
         /// Voice-state updates only report *changes*, so without this snapshot
-        /// every member present before the join stays unresolvable (N16).
-        /// Cache-only: `GUILD_MEMBERS` is not requested and the audio path
-        /// tolerates no REST, so an occupant missing from both the voice state
-        /// and the user cache is skipped rather than fetched. The dashmap ref
-        /// is dropped before the user-cache lookups.
+        /// every member present before the join stays unresolvable (N16). A
+        /// participant who just sits quietly misses all three cache lookups —
+        /// `VoiceState::member` is not always populated, `Guild::members` is
+        /// sparse without `GUILD_MEMBERS`, and the user cache only knows people
+        /// who *did* something — so cache-only resolution dropped exactly the
+        /// people the prompt most needs to see. REST fills that gap; the intent
+        /// gates gateway delivery, not `GET /guilds/{guild}/members/{user}`.
+        /// This is a join-time path, not the audio path, so the no-REST rule
+        /// (B-VM29) does not apply — the lookups are bounded by
+        /// [`ROSTER_FETCH_CONCURRENCY`](super::ROSTER_FETCH_CONCURRENCY) and
+        /// [`ROSTER_FETCH_BUDGET`](super::ROSTER_FETCH_BUDGET). No audio is at
+        /// risk while it resolves: `join_voice` registered the receivers and
+        /// its tick channel is unbounded, so packets buffer until intake starts.
         #[cfg(feature = "discord-voice")]
-        fn snapshot_voice_roster(
+        async fn snapshot_voice_roster(
             &self,
             ctx: &Context,
             gid: serenity::all::GuildId,
             channel_id: ChannelId,
         ) {
+            let seated = Self::seated_from_cache(ctx, gid, channel_id);
+            let fetcher = HttpMemberFetcher {
+                http: ctx.http.clone(),
+            };
+            let members = super::resolve_voice_roster(
+                gid.get() as i64,
+                seated,
+                &fetcher,
+                super::ROSTER_FETCH_BUDGET,
+            )
+            .await;
+            self.events.on_voice_roster(members);
+        }
+
+        /// Cache leg of the join-time roster read. Fully owned output: both the
+        /// dashmap `GuildRef` and the user-cache guard are dropped before the
+        /// caller awaits anything — a cache guard held across an await is worse
+        /// than the miss it would paper over.
+        #[cfg(feature = "discord-voice")]
+        fn seated_from_cache(
+            ctx: &Context,
+            gid: serenity::all::GuildId,
+            channel_id: ChannelId,
+        ) -> Vec<super::SeatedMember> {
             let seated: Vec<(u64, Option<Member>)> =
                 ctx.cache.guild(gid).map_or_else(Vec::new, |guild| {
                     guild
@@ -2002,23 +2192,22 @@ mod serenity_glue {
                         })
                         .collect()
                 });
-            let members = seated
+            seated
                 .into_iter()
-                .filter_map(|(uid, member)| {
-                    let (is_bot, author) = if let Some(m) = member {
-                        (m.user.bot, author_from_member(&m))
+                .map(|(uid, member)| {
+                    let cached = if let Some(m) = member {
+                        Some((m.user.bot, author_from_member(&m)))
                     } else {
-                        let user = ctx.cache.user(uid)?;
-                        (user.bot, author_from_user(&user))
+                        ctx.cache
+                            .user(uid)
+                            .map(|user| (user.bot, author_from_user(&user)))
                     };
-                    Some(VoiceMemberView {
+                    super::SeatedMember {
                         member_id: uid as i64,
-                        is_bot,
-                        author,
-                    })
+                        cached,
+                    }
                 })
-                .collect();
-            self.events.on_voice_roster(members);
+                .collect()
         }
 
         /// `/subscribe-voice`: join the caller's voice channel via songbird
@@ -2088,7 +2277,8 @@ mod serenity_glue {
                     }
                 };
 
-            self.snapshot_voice_roster(ctx, gid, ChannelId::new(channel_id_u64));
+            self.snapshot_voice_roster(ctx, gid, ChannelId::new(channel_id_u64))
+                .await;
 
             let template = self.slash.transcriber_template.clone();
             let has_transcriber = template.is_some();
@@ -3429,12 +3619,13 @@ pub mod voice_intake {
 mod tests {
     use super::{
         Author, BotEvents, BotHandle, DM_BOT_DISCLAIMER, DM_BOT_DISCLAIMER_DELETE_EMOJI,
-        DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, GuildInfo, InteractionAck,
-        InteractionGone, MentionView, MessageEditView, MessageView, Presence, PresenceSink,
-        PresenceStatus, ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView,
-        VoiceMemberView, VoiceStateUpdateView, apply_message_edit, apply_reaction_clear,
-        apply_reaction_delta, build_activity_presence_cb, collect_images,
-        compose_content_with_embeds, defer_interaction, emoji_repr, message_pings_bot, reply,
+        DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, FetchedMember, GuildInfo,
+        InteractionAck, InteractionGone, MemberFetcher, MentionView, MessageEditView, MessageView,
+        Presence, PresenceSink, PresenceStatus, ROSTER_FETCH_CONCURRENCY, ReactionPayloadView,
+        ReadyInfo, SeatedMember, SentMessage, TypingEventView, VoiceMemberView,
+        VoiceStateUpdateView, apply_message_edit, apply_reaction_clear, apply_reaction_delta,
+        build_activity_presence_cb, collect_images, compose_content_with_embeds, defer_interaction,
+        emoji_repr, message_pings_bot, reply, resolve_voice_roster,
     };
     use crate::bot::{ActivityResync, ChannelSender};
     use crate::focus::{FocusManager, FocusStore};
@@ -5247,6 +5438,189 @@ mod tests {
         }]);
 
         assert_eq!(roster_labels(&handle), vec!["Ada".to_owned()]);
+    }
+
+    // ---- join-time REST member resolution (quiet-participant gap) ----
+
+    /// Scripted [`MemberFetcher`]: known ids resolve, unknown ids error, and
+    /// every call is recorded (so a cache hit that fetches anyway is a failure).
+    struct FakeMemberFetcher {
+        known: HashMap<i64, (bool, String)>,
+        calls: Mutex<Vec<i64>>,
+        stall_ms: u64,
+        in_flight: AtomicUsize,
+        peak_in_flight: AtomicUsize,
+    }
+
+    impl FakeMemberFetcher {
+        fn new(known: &[(i64, bool, &str)]) -> Self {
+            Self {
+                known: known
+                    .iter()
+                    .map(|(id, bot, name)| (*id, (*bot, (*name).to_owned())))
+                    .collect(),
+                calls: Mutex::new(Vec::new()),
+                stall_ms: 0,
+                in_flight: AtomicUsize::new(0),
+                peak_in_flight: AtomicUsize::new(0),
+            }
+        }
+
+        const fn stalling(mut self, ms: u64) -> Self {
+            self.stall_ms = ms;
+            self
+        }
+
+        fn calls(&self) -> Vec<i64> {
+            self.calls.lock().expect("calls mutex").clone()
+        }
+    }
+
+    #[async_trait]
+    impl MemberFetcher for FakeMemberFetcher {
+        async fn fetch(&self, _guild_id: i64, user_id: i64) -> anyhow::Result<FetchedMember> {
+            self.calls.lock().expect("calls mutex").push(user_id);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+            if self.stall_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.stall_ms)).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let (is_bot, name) = self
+                .known
+                .get(&user_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown member"))?;
+            Ok(FetchedMember {
+                is_bot,
+                author: voice_author(user_id, &name),
+            })
+        }
+    }
+
+    const fn budget() -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
+
+    // A participant who never speaks or types misses `VoiceState::member`,
+    // the sparse `Guild::members` map, and the user cache alike — one REST
+    // lookup is the only way to learn their name.
+    #[tokio::test]
+    async fn voice_roster_rest_resolves_cache_missed_member() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[(1, false, "Quiet")]);
+
+        let members =
+            resolve_voice_roster(7, vec![SeatedMember::unresolved(1)], &fetcher, budget()).await;
+        events.on_voice_roster(members);
+
+        assert_eq!(roster_labels(&handle), vec!["Quiet".to_owned()]);
+        assert_eq!(fetcher.calls(), vec![1]);
+    }
+
+    // A failed name lookup must not cost the identity — that regression made
+    // every unresolved speaker fuse into one anonymous voice (N16).
+    #[tokio::test]
+    async fn voice_roster_rest_failure_degrades_to_id_only() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[]);
+
+        let members =
+            resolve_voice_roster(7, vec![SeatedMember::unresolved(42)], &fetcher, budget()).await;
+        events.on_voice_roster(members);
+
+        assert_eq!(roster_labels(&handle), vec!["42".to_owned()]);
+    }
+
+    // Same for a lookup that outruns the budget: id-only, never dropped.
+    #[tokio::test]
+    async fn voice_roster_rest_over_budget_degrades_to_id_only() {
+        let fetcher = FakeMemberFetcher::new(&[(42, false, "Slow")]).stalling(10_000);
+
+        let members = resolve_voice_roster(
+            7,
+            vec![SeatedMember::unresolved(42)],
+            &fetcher,
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].author.label(), "42");
+        assert!(!members[0].is_bot);
+    }
+
+    // Bot-ness comes back with the REST member, so a bot the cache never saw
+    // still stays out of the roster.
+    #[tokio::test]
+    async fn voice_roster_rest_resolved_bot_is_excluded() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[(2, true, "MusicBot")]);
+
+        let members = resolve_voice_roster(
+            7,
+            vec![SeatedMember::unresolved(1), SeatedMember::unresolved(2)],
+            &fetcher,
+            budget(),
+        )
+        .await;
+        assert!(members.iter().any(|m| m.member_id == 2 && m.is_bot));
+        events.on_voice_roster(members);
+
+        assert_eq!(roster_labels(&handle), vec!["1".to_owned()]);
+    }
+
+    // Cache hits owe no request — the REST leg is the exception, not the path.
+    #[tokio::test]
+    async fn voice_roster_cache_hits_make_no_rest_call() {
+        let fetcher = FakeMemberFetcher::new(&[(1, false, "Wrong")]);
+        let seated = vec![SeatedMember::cached(1, false, voice_author(1, "Ada"))];
+
+        let members = resolve_voice_roster(7, seated, &fetcher, budget()).await;
+
+        assert!(fetcher.calls().is_empty());
+        assert_eq!(members[0].author.label(), "Ada");
+    }
+
+    // Nobody in the channel may be missing from the roster, whatever mix of
+    // cache hit / REST hit / REST failure produced it. Order is the input order.
+    #[tokio::test]
+    async fn voice_roster_mixed_resolution_keeps_everyone() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[(2, false, "Quiet")]);
+        let seated = vec![
+            SeatedMember::cached(1, false, voice_author(1, "Ada")),
+            SeatedMember::unresolved(2),
+            SeatedMember::unresolved(3),
+        ];
+
+        let members = resolve_voice_roster(7, seated, &fetcher, budget()).await;
+        assert_eq!(
+            members.iter().map(|m| m.member_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        events.on_voice_roster(members);
+
+        assert_eq!(
+            roster_labels(&handle),
+            vec!["Ada".to_owned(), "Quiet".to_owned(), "3".to_owned()]
+        );
+    }
+
+    // A crowded channel must not fan out one request per occupant at once.
+    #[tokio::test]
+    async fn voice_roster_rest_fan_out_is_bounded() {
+        let seated: Vec<SeatedMember> = (1..=9).map(SeatedMember::unresolved).collect();
+        let fetcher = FakeMemberFetcher::new(&[]).stalling(5);
+
+        let members = resolve_voice_roster(7, seated, &fetcher, budget()).await;
+
+        assert_eq!(members.len(), 9);
+        assert!(fetcher.peak_in_flight.load(Ordering::SeqCst) <= ROSTER_FETCH_CONCURRENCY);
     }
 
     // Insert on join, remove on leave / move away — the map used to only grow
