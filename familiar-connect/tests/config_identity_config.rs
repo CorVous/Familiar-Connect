@@ -1722,3 +1722,43 @@ fn history_window_fallbacks_match_dataclass_defaults() {
         CharacterConfig::default().text_window_size
     );
 }
+
+// ---------------------------------------------------------------------------
+// Voice roster
+// ---------------------------------------------------------------------------
+
+#[test]
+fn voice_roster_event_window_default_ships_in_the_profile() {
+    approx(load_ok("").voice.roster_event_window_seconds, 120.0);
+}
+
+#[test]
+fn voice_roster_event_window_loads_from_toml() {
+    approx(
+        load_ok("[voice]\nroster_event_window_seconds = 45\n")
+            .voice
+            .roster_event_window_seconds,
+        45.0,
+    );
+}
+
+#[test]
+fn voice_roster_event_window_must_be_positive() {
+    assert_err_eq(
+        load("[voice]\nroster_event_window_seconds = -5\n"),
+        "[voice].roster_event_window_seconds must be positive, got -5",
+    );
+}
+
+#[test]
+fn voice_roster_event_window_rejects_non_number() {
+    assert_err_eq(
+        load("[voice]\nroster_event_window_seconds = 'soon'\n"),
+        "[voice].roster_event_window_seconds must be a number, got str",
+    );
+}
+
+#[test]
+fn voice_unknown_key_rejected() {
+    assert_err(load("[voice]\nbogus = 1\n"), "unknown");
+}

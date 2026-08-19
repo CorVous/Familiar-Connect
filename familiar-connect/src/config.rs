@@ -581,6 +581,21 @@ impl Default for FocusConfig {
     }
 }
 
+/// `[voice]` knobs — live-call roster rendering.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceConfig {
+    /// Join/leave events older than this stop being narrated.
+    pub roster_event_window_seconds: f64,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            roster_event_window_seconds: crate::voice_roster::DEFAULT_EVENT_WINDOW_SECONDS,
+        }
+    }
+}
+
 /// `[tools]` knobs — agentic tool-loop behavior.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolsConfig {
@@ -743,6 +758,8 @@ pub struct CharacterConfig {
     pub focus: FocusConfig,
     /// Agentic tool-loop knobs.
     pub tools: ToolsConfig,
+    /// Live-call roster knobs.
+    pub voice: VoiceConfig,
 }
 
 impl Default for CharacterConfig {
@@ -787,6 +804,7 @@ impl Default for CharacterConfig {
             llm_max_concurrent_requests: 4,
             focus: FocusConfig::default(),
             tools: ToolsConfig::default(),
+            voice: VoiceConfig::default(),
         }
     }
 }
@@ -1070,6 +1088,7 @@ fn parse_character_config(
 
     let focus = parse_focus_config(expect_table(data.get("focus"), "[focus]")?)?;
     let tools = parse_tools_config(expect_table(data.get("tools"), "[tools]")?)?;
+    let voice = parse_voice_config(expect_table(data.get("voice"), "[voice]")?)?;
 
     Ok(CharacterConfig {
         voice_window_size,
@@ -1111,6 +1130,7 @@ fn parse_character_config(
         llm_max_concurrent_requests,
         focus,
         tools,
+        voice,
     })
 }
 
@@ -2538,6 +2558,19 @@ fn parse_focus_config(raw: &Table) -> Result<FocusConfig, ConfigError> {
             d.nudge_debounce_seconds,
         )?,
         catch_up_limit: positive_int("[focus]", raw, "catch_up_limit", d.catch_up_limit, false)?,
+    })
+}
+
+fn parse_voice_config(raw: &Table) -> Result<VoiceConfig, ConfigError> {
+    check_unknown_keys(raw, &["roster_event_window_seconds"], "[voice]")?;
+    let d = VoiceConfig::default();
+    Ok(VoiceConfig {
+        roster_event_window_seconds: positive_float(
+            "[voice]",
+            raw,
+            "roster_event_window_seconds",
+            d.roster_event_window_seconds,
+        )?,
     })
 }
 

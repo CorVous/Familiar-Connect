@@ -93,9 +93,9 @@ anonymously.
 
 ### Voice member roster
 
-Speaker names come from `BotHandle.voice_members` (`user_id -> Author`), the
-cache the `resolve_member` seam reads on the audio path. It has three
-lifecycle points:
+Speaker names come from `BotHandle.voice_members`, one shared `VoiceRoster`
+(`familiar-connect/src/voice_roster.rs`) the `resolve_member` seam reads on
+the audio path. It has three lifecycle points:
 
 - **Snapshot at join.** `/subscribe-voice` reads the channel's occupants out
   of the gateway cache (`Guild::voice_states`, filtered to the joined channel)
@@ -107,11 +107,26 @@ lifecycle points:
   fetched over REST.
 - **Maintained on voice-state updates.** A join or move *into* the subscribed
   channel inserts; a leave or a move *out* removes. Bots and the familiar's
-  own user id are excluded at both the snapshot and the update.
+  own user id are excluded at both the snapshot and the update. Removal is
+  keyed by member id alone, so an update from elsewhere in the guild needs no
+  before-channel.
 - **Cleared at leave.** `/unsubscribe-voice` empties the roster, so the next
   call does not inherit the last one's members.
 
-The roster also feeds STT keyterm biasing (`voice_member_keyterms`, #198).
+Each insert and remove also appends a timestamped join/leave event, decaying
+after `[voice].roster_event_window_seconds` (default `120.0`) and hard-capped
+at 16 entries. A snapshot narrates nothing — nobody "just joined" when the
+familiar walked into a call already in progress.
+
+The roster has three readers. Beyond speaker resolution
+(`voice_member_cached`) it feeds STT keyterm biasing (`voice_member_keyterms`,
+#198) and the prompt: `VoiceRosterLayer` renders `In the call: …` plus the
+narration into the voice system prompt. The type is never feature-gated, so
+the ungated layer reads the very `Arc` this gated glue writes — no second copy
+to drift. See
+[Context pipeline — Voice call roster](context-pipeline.md#voice-call-roster)
+for the layer, its position, and the decay rule.
+
 Keyterms are baked into the Deepgram connect URL when a speaker's stream
 opens, so a member who leaves mid-call stays in the keyterms of streams that
 are already open; those streams close after `idle_close_s` and the next one
@@ -433,13 +448,18 @@ in **stability descending** order:
 | 2 | `OperatingModeLayer` | `viewer_mode` flip (constant per mode) |
 | 3 | `ConversationSummaryLayer` | `SummaryWorker` writes (every N turns) |
 | 4 | `PeopleDossierLayer` | `PeopleDossierWorker` watermark advances |
-| 5 | `RagContextLayer` | per-turn cue (always changes) |
+| 5 | `VoiceRosterLayer` | someone joins / leaves the call, or an event decays out |
+| 6 | `RagContextLayer` | per-turn cue (always changes) |
 | — | `RecentHistoryLayer` | per-turn (contributes user/assistant messages, not system text) |
 
 `RagContextLayer` therefore sits at the tail of the system message,
 so its inevitable per-turn churn invalidates *only* itself — the
 prefix from `CharacterCardLayer` through `PeopleDossierLayer` stays
-cached when its constituent layers haven't moved.
+cached when its constituent layers haven't moved. `VoiceRosterLayer`
+sits just ahead of it for the same reason: a join invalidates two small
+tail blocks instead of the whole prompt, and its cache key is a state
+counter rather than a clock, so a quiet call re-uses the cached render
+turn after turn.
 
 The `default_assembler` layer-order test in
 `familiar-connect/src/commands/run.rs` pins this ordering so a refactor

@@ -38,6 +38,7 @@ tune per host without a rebuild.
 | RAG / fact retrieval ranking | `[memory.retrieval]` (M2 + M6) | unchanged |
 | Attentional unread-nudge controls | `[focus]` | unchanged |
 | Agentic tool-loop cap | `[tools]` | unchanged |
+| Voice-call roster narration window | `[voice]` | unchanged |
 | LLM request concurrency | `[llm].max_concurrent_requests` | unchanged |
 | Activities catalog + cadence | `data/familiars/<id>/activities.toml` | unchanged |
 
@@ -177,6 +178,9 @@ nudge_debounce_seconds = 30.0     # rapid arrivals share one nudge
 loop_max_iterations = 5           # hard cap on agentic-loop rounds per turn
 allow_untrusted_image_urls = false # view_image: allowlist off (private IPs still refused)
 trusted_image_hosts = ["cdn.discordapp.com", "*.media.tumblr.com"]  # abridged
+
+[voice]
+roster_event_window_seconds = 120.0  # how long join/leave stays narrated
 ```
 
 ## Tuning by goal
@@ -293,6 +297,27 @@ channel on activity return), so a long backlog she was away for is
 genuinely **missed** rather than folded into her summary as if read.
 Raise it so she catches up on more; lower it so she misses more of what
 piled up while away.
+
+### Voice call roster
+
+The voice prompt carries a roster line (`In the call: Cor, Cassidy,
+Tam.`) plus brief narration of recent arrivals and departures (`Tam just
+joined.`). One knob:
+
+```toml
+[voice]
+roster_event_window_seconds = 120.0
+```
+
+| Field | Default | Purpose |
+|---|---|---|
+| `roster_event_window_seconds` | `120.0` | How long a join/leave stays narrated. Older events decay out; the roster line itself never decays. Must be positive. |
+
+Lower it (say `45.0`) if she keeps mentioning arrivals long after
+they stopped being news; raise it for slow-moving calls where a join two
+minutes ago is still worth reacting to. Text prompts never carry the
+roster. See
+[Context pipeline — Voice call roster](context-pipeline.md#voice-call-roster).
 
 ## Discord text channel knobs
 
