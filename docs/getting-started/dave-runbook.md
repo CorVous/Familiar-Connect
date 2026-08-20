@@ -144,7 +144,7 @@ target (`--familiar _default`) since it carries `character.toml` + `character.md
 cargo run --release --features discord-voice,stt-deepgram -- run --familiar aria -v
 ```
 
-CLI is `familiar-connect <run|diagnose|version>` (no `sleep` verb). `-v` = INFO
+CLI is `familiar-connect <run|diagnose|prompts|version>` (no `sleep` verb). `-v` = INFO
 (needed to see the voice/decision log lines below), `-vv` = DEBUG for **all**
 targets incl. `songbird` and `serenity`.
 
@@ -372,6 +372,7 @@ responder); `local_turn_detection=enabled|disabled` (turn factory); `close_code=
 status=<ok|error>`; aggregate them:
 ```bash
 cargo run --release -- diagnose voice.log      # p50/p95/last_ms per span; '-' reads stdin
+cargo run --release -- prompts --slot fast     # the last voice prompt, verbatim, from history.db
 ```
 `/diagnostics` in Discord shows the same table live (plus focus + unread lines).
 Voice budget spans to watch: `voice.total` (stt_final→playback_start),

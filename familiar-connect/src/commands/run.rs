@@ -57,7 +57,7 @@ pub struct RunArgs {
 /// in a repo checkout can no longer wipe live familiars — the reported foot-gun
 /// (issue #201). The legacy CWD-relative `data/familiars` survives only as the
 /// last-resort fallback when no home directory resolves.
-fn default_familiars_root() -> PathBuf {
+pub(crate) fn default_familiars_root() -> PathBuf {
     resolve_familiars_root(std::env::var("FAMILIARS_ROOT").ok(), home_familiars_root())
 }
 
@@ -560,6 +560,21 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             return 1;
         }
     };
+    // Point the process-wide LLM call mirror at this familiar's store. The
+    // composition root, not `load_from_disk`: a DI-bundle constructor should not
+    // reach out and mutate a process global (and the unit tests that build a
+    // bundle would fight each other over it). `llm_mirror_calls = 0` leaves no
+    // sink installed, and the transport then skips capturing prompts entirely.
+    if familiar.config.llm_mirror_calls > 0 {
+        crate::diagnostics::llm_mirror::set_llm_call_sink(Arc::new(
+            crate::history::llm_mirror::HistoryLlmMirror::new(
+                Arc::clone(&familiar.history_store),
+                familiar.id.clone(),
+                familiar.config.llm_mirror_calls,
+            ),
+        ));
+    }
+
     // `load_from_disk` re-parses the same TOML, so its copy needs the same
     // resolution (silently — the lines were already logged above).
     crate::model_diagnostics::cache::resolve_from_cache_quietly(

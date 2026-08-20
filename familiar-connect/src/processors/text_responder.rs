@@ -23,6 +23,7 @@ use crate::bus::router::TurnRouter;
 use crate::bus::topics::TOPIC_DISCORD_TEXT;
 use crate::context::assembler::{Assembler, AssemblyContext};
 use crate::context::final_reminder::FinalReminder;
+use crate::diagnostics::llm_mirror::{CallContext, with_call_context};
 use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::AppendTurn;
 use crate::identity::Author;
@@ -377,6 +378,9 @@ impl TextResponder {
             .as_ref()
             .is_none_or(|fm| fm.is_focused(channel_id));
 
+        // The turn every LLM call this handler makes is answering; `None` on a
+        // wake nudge, which appends no user turn.
+        let mut anchor_turn_id: Option<i64> = None;
         if !is_wake {
             let mut append = AppendTurn::new(&self.familiar_id, channel_id, "user", &content)
                 .consumed(focused && !suppressed)
@@ -394,6 +398,7 @@ impl TextResponder {
                 append = append.reply_to_message_id(rid);
             }
             let user_turn = self.history.append_turn(append).await?;
+            anchor_turn_id = Some(user_turn.id);
             if !mentions.is_empty() {
                 let keys: Vec<String> = mentions.iter().map(Author::canonical_key).collect();
                 self.history.record_mentions(user_turn.id, keys).await?;
@@ -460,16 +465,18 @@ impl TextResponder {
         // records the channel it moved to here, so the send target follows THIS
         // turn's own shift rather than the mutable global focus (#170).
         let shift_target: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
-        let reply = self
-            .stream_reply(
+        let reply = with_call_context(
+            CallContext::new(anchor_turn_id, &scope.turn_id, channel_id),
+            self.stream_reply(
                 &scope,
                 channel_id,
                 guild_id,
                 images,
                 activity_state_line,
                 &shift_target,
-            )
-            .await;
+            ),
+        )
+        .await;
 
         let Some(reply) = reply else {
             if let Some(engine) = &self.activity_engine {
