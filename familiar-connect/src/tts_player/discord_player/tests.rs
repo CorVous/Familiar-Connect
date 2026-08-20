@@ -301,6 +301,42 @@ async fn empty_text_skips_synthesize() {
     assert_eq!(vc.plays.lock().unwrap().len(), 0);
 }
 
+/// A trailing emoji is what the sentence streamer leaves as its flush tail when
+/// a reply ends in one; Cartesia 400s on it, so it never goes out.
+#[tokio::test]
+async fn emoji_only_text_skips_synthesize() {
+    let (tts, calls) = stub_tts(mono_pcm(4));
+    let vc = vc_play_durations(true, 1);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak(" \u{1f605} ", &scope("t")).await;
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(vc.plays.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn punctuation_only_text_skips_synthesize() {
+    let (tts, calls) = stub_tts(mono_pcm(4));
+    let vc = vc_play_durations(true, 1);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak("...", &scope("t")).await;
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(vc.plays.lock().unwrap().len(), 0);
+}
+
+/// The skip is narrow: an emoji riding along with words still synthesizes.
+#[tokio::test]
+async fn text_with_words_and_emoji_still_synthesizes() {
+    let (tts, calls) = stub_tts(mono_pcm(4));
+    let vc = vc_play_durations(true, 2);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak("Nice work. \u{1f49b}", &scope("t")).await;
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["Nice work. \u{1f49b}".to_owned()]
+    );
+    assert_eq!(vc.plays.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn already_cancelled_scope_short_circuits() {
     let (tts, _calls) = stub_tts(mono_pcm(4));
