@@ -117,6 +117,7 @@ Usage: familiar-connect [OPTIONS] [COMMAND]
 Commands:
   run       Start the Discord bot
   diagnose  Aggregate span timings from log files
+  prompts   Print mirrored LLM prompts/responses from `history.db`
   version   Display package version
   help      Print this message or the help of the given subcommand(s)
 

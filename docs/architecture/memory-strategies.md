@@ -75,6 +75,113 @@ Reads are multi-signal: BM25, recent-window exclusion, a 1-10
 importance hint per fact (M2), and cosine similarity to the cue
 embedding (M6, opt-in).
 
+## The one table that is not a projection: `llm_calls`
+
+`llm_calls` sits in the same `history.db` but breaks the page's rule
+deliberately. It is **not** derived from `turns` and cannot be rebuilt
+from anything — it records what was actually sent to the model and what
+came back, which nothing else on disk preserves. Assembled prompts are
+otherwise ephemeral, so questions like "did the roster line render into
+the voice prompt, and with what content" had no answer at all.
+
+One row per LLM call, written by the transport
+(`llm::CallMetrics::mirror`) through the subsystem-01 `LlmCallSink`
+seam and stored by `HistoryStore::append_llm_call`:
+
+| Column | Holds |
+|---|---|
+| `id` | Row id (autoincrement). |
+| `familiar_id`, `created_at` | Owner and UTC stamp via `support::time::iso_utc` — fixed width, so string order is chronological order. |
+| `turn_id` | `turns.id` of the turn the call served. The join key; `NULL` off the turn path (background workers). |
+| `turn_scope` | The bus turn-scope id — the `turn=` value in log lines, so a log line and a row can be matched by eye. |
+| `channel_id` | Channel the turn belonged to. |
+| `slot`, `model`, `provider` | `fast` / `prose` / `background`; the model string; the provider OpenRouter routed to. |
+| `status` | Open vocabulary — `ok`, `error`, `cancelled`, `silent`, `suppressed`, or whatever a future consumer notes. Never a closed set. |
+| `system_prompt` | Every system-role message, joined. The greppable projection of the assembled prompt. |
+| `messages_json` | The full message array exactly as it went on the wire, after the Anthropic cache-breakpoint rewrite. |
+| `response_text` | Assistant text concatenated across deltas. |
+| `tool_calls_json`, `tool_results_json` | What the model asked for and what the handlers returned, both attached to the call that requested them. |
+| `ttfb_ms`, `ttft_ms`, `total_ms` | The same timings the `[LLM call]` log line reports, from the same computation. |
+| `est_in_tokens`, `in_tokens`, `out_tokens`, `cached` | Estimated and provider-reported token counts. |
+
+Two indexes: `(familiar_id, id)` and `(familiar_id, turn_id, id)`.
+
+Joining back to the conversation is a plain inner join, which
+`HistoryStore::llm_calls_for_turn` performs:
+
+```sql
+SELECT c.*, t.content
+  FROM llm_calls AS c
+  JOIN turns AS t ON t.id = c.turn_id AND t.familiar_id = c.familiar_id
+ WHERE c.familiar_id = ? AND c.turn_id = ?
+ ORDER BY c.id;
+```
+
+### Why the transport, and not the responder
+
+Both halves of a call are in scope in exactly one place. The responder
+holds the prompt but not the timings, tokens, provider or terminal
+status; `CallMetrics` holds those but never saw the text. Capturing in
+two places and correlating the halves afterwards is the design that
+rots, so the record is assembled where `CallMetrics` already lives: the
+messages are captured at request build, the response accumulates across
+the SSE deltas, and the row is handed to the sink when the stream drops.
+
+Both transport legs are covered. The streaming leg
+(`stream_completion`, every responder reply) mirrors at stream drop. The
+blocking leg (`chat`, used by the summary / dossier / sleep workers,
+image description and structured requests) mirrors too, but silently: it
+has never emitted an `[LLM call]` line or a span, and instrumenting it
+would change a wire format, so it writes the row and nothing else. Its
+rows carry no `ttfb_ms` / `ttft_ms` — a blocking POST has no first-byte
+event to time.
+
+Tool *results* are the one thing the streaming transport genuinely
+cannot see — they are produced by the caller after the stream ends.
+Rather than write
+a second row, `agentic_loop` folds them back into the call that
+requested them through `LlmStream::note_tool_trace`, while it still
+holds the stream. One call, one row, no correlation.
+
+### Retention
+
+Unbounded is not on offer. `append_llm_call` prunes to the newest
+`[providers.history].llm_mirror_calls` rows for the familiar inside the
+insert's own transaction, so the cap holds under concurrent writes. `0`
+switches mirroring off entirely — no sink is installed, and the
+transport then skips capturing prompts at all, so the feature costs
+nothing when unwanted. See
+[Configuration model](configuration-model.md#2-character-config) for the
+knob and [On-disk layout](../getting-started/on-disk-layout.md#disk-growth)
+for the arithmetic.
+
+### Never on the turn's path
+
+Two rules the sink holds to, both because a conversation outranks its
+telemetry:
+
+- **It cannot fail a turn.** A missing sink, a poisoned lock, a
+  panicking sink, or a closed database all resolve to "nothing was
+  mirrored" and a WARN line — the same suppression
+  `SpanCollector` uses.
+- **It cannot slow a turn.** `HistoryLlmMirror::mirror` hands the row to
+  a detached `tokio` task and returns; the write then goes through
+  `AsyncHistoryStore`'s `spawn_blocking` facade like every other store
+  call. Nothing awaits it. Outside a runtime there is nowhere to defer
+  to, so the row is dropped rather than written inline.
+
+### Reading it back
+
+```bash
+familiar-connect prompts --turn 4213        # every call under that turns.id
+familiar-connect prompts --slot fast        # the newest voice call
+familiar-connect prompts --limit 5          # the newest five
+```
+
+The subcommand opens `history.db` with the tantivy indexes stubbed out,
+so inspecting prompts never contends with a running bot for the FTS
+writer lock.
+
 ## Swap points
 
 ### 1. Layer order and selection (`Layer` trait)

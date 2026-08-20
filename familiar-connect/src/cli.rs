@@ -1,8 +1,9 @@
 //! CLI parsing + setup_logging (subsystem 10).
 //!
 //! `clap` (derive) replaces `argparse`; the subcommand set (`run` / `diagnose` /
-//! `version`) and the repeatable `-v/--verbose` counter are a fixed CLI
-//! contract, and there is deliberately **no** `sleep` subcommand (test-pinned).
+//! `prompts` / `version`) and the repeatable `-v/--verbose` counter are a fixed
+//! CLI contract, and there is deliberately **no** `sleep` subcommand
+//! (test-pinned).
 //! [`setup_logging`] installs a `tracing` subscriber whose event formatter
 //! reproduces the [`StyledFormatter`](crate::log_style::StyledFormatter) wire
 //! format, and pins the two-tier visibility (`warn` root, `familiar_connect` at
@@ -52,6 +53,8 @@ pub enum Command {
     Run(commands::run::RunArgs),
     /// Aggregate span timings from log files.
     Diagnose(DiagnoseArgs),
+    /// Print mirrored LLM prompts/responses from `history.db`.
+    Prompts(commands::prompts::PromptsArgs),
     /// Display package version.
     Version,
 }
@@ -275,6 +278,7 @@ pub fn main() -> ExitCode {
     let code = match command {
         Command::Run(args) => commands::run::run(&args),
         Command::Diagnose(args) => commands::diagnose::diagnose(&args.paths),
+        Command::Prompts(args) => commands::prompts::main(&args),
         Command::Version => commands::version::run(),
     };
     exit_code(code)
@@ -316,6 +320,43 @@ mod tests {
         match cli.command {
             Some(Command::Diagnose(args)) => assert_eq!(args.paths, vec!["somefile".to_owned()]),
             _ => panic!("expected diagnose"),
+        }
+    }
+
+    #[test]
+    fn prompts_subcommand_registered() {
+        let cli =
+            Cli::try_parse_from(["familiar-connect", "prompts", "--turn", "42"]).expect("parse");
+        match cli.command {
+            Some(Command::Prompts(args)) => {
+                assert_eq!(args.turn, Some(42));
+                // One call unless asked otherwise: prompts are ~15 KB each.
+                assert_eq!(args.limit, 1);
+            }
+            _ => panic!("expected prompts"),
+        }
+    }
+
+    #[test]
+    fn prompts_subcommand_takes_familiar_slot_and_limit() {
+        let cli = Cli::try_parse_from([
+            "familiar-connect",
+            "prompts",
+            "--familiar",
+            "aria",
+            "--slot",
+            "fast",
+            "--limit",
+            "3",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Command::Prompts(args)) => {
+                assert_eq!(args.familiar.as_deref(), Some("aria"));
+                assert_eq!(args.slot.as_deref(), Some("fast"));
+                assert_eq!(args.limit, 3);
+            }
+            _ => panic!("expected prompts"),
         }
     }
 

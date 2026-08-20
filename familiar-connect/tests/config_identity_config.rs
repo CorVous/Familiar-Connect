@@ -3,7 +3,9 @@
 //! checked-in `_default/character.toml`, per-section validation, and the
 //! byte-stable `ConfigError` message contract.
 
-use familiar_connect::config::{CharacterConfig, ConfigError, load_character_config};
+use familiar_connect::config::{
+    CharacterConfig, ConfigError, DEFAULT_LLM_MIRROR_CALLS, load_character_config,
+};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -663,6 +665,43 @@ fn text_window_must_be_positive_int() {
     assert_err(
         load("[providers.history]\ntext_window_size = -1\n"),
         "text_window_size",
+    );
+}
+
+#[test]
+fn llm_mirror_calls_defaults_from_the_shipped_profile() {
+    // The `_default` profile is the sole source of the default; an empty target
+    // inherits it.
+    assert_eq!(load_ok("").llm_mirror_calls, DEFAULT_LLM_MIRROR_CALLS);
+}
+
+#[test]
+fn llm_mirror_calls_override_wins() {
+    let cfg = load_ok("[providers.history]\nllm_mirror_calls = 50\n");
+    assert_eq!(cfg.llm_mirror_calls, 50);
+}
+
+#[test]
+fn llm_mirror_calls_zero_disables_mirroring() {
+    assert_eq!(
+        load_ok("[providers.history]\nllm_mirror_calls = 0\n").llm_mirror_calls,
+        0
+    );
+}
+
+#[test]
+fn llm_mirror_calls_rejects_negative() {
+    assert_err_eq(
+        load("[providers.history]\nllm_mirror_calls = -1\n"),
+        "[providers.history].llm_mirror_calls must be >= 0, got -1",
+    );
+}
+
+#[test]
+fn llm_mirror_calls_rejects_non_integer() {
+    assert_err_eq(
+        load("[providers.history]\nllm_mirror_calls = \"lots\"\n"),
+        "[providers.history].llm_mirror_calls must be a non-negative integer, got str",
     );
 }
 
