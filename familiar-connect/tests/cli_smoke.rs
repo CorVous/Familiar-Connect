@@ -83,6 +83,21 @@ fn diagnose_span_only_log_prints_no_cache_tables() {
 }
 
 #[test]
+fn prompts_reports_a_missing_database() {
+    // `--familiar` + `FAMILIARS_ROOT` pin resolution, so the test never depends
+    // on the developer's own familiars root or a checked-out `.env`.
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(root.path().join("aria")).expect("familiar dir");
+    Command::cargo_bin("familiar-connect")
+        .expect("binary")
+        .args(["prompts", "--familiar", "aria"])
+        .env("FAMILIARS_ROOT", root.path())
+        .assert()
+        .failure()
+        .stderr(contains("No history.db"));
+}
+
+#[test]
 fn diagnose_reports_prompt_cache_from_llm_call_lines() {
     // Two `[LLM call]` lines, one cached and one cold (#206).
     let input = "INFO [LLM call] slot=fast model=anthropic/claude-haiku-4.5 status=ok \

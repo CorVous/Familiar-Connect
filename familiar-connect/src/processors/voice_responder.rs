@@ -21,6 +21,7 @@ use crate::bus::topics::{TOPIC_VOICE_ACTIVITY_START, TOPIC_VOICE_TRANSCRIPT_FINA
 use crate::context::assembler::{Assembler, AssemblyContext};
 use crate::context::final_reminder::FinalReminder;
 use crate::diagnostics::cold_cache::log_signals;
+use crate::diagnostics::llm_mirror::{CallContext, with_call_context};
 use crate::diagnostics::voice_budget::{
     PHASE_LLM_FIRST_TOKEN, PHASE_TTS_FIRST_AUDIO, get_voice_budget_recorder,
 };
@@ -321,14 +322,20 @@ impl VoiceInner {
         if let Some(a) = &author {
             append = append.author(a.clone());
         }
-        self.history.append_turn(append).await?;
+        let user_turn = self.history.append_turn(append).await?;
 
         // Per-channel reply gate.
         let gate = self.gate_for(channel_id);
         let _guard = gate.lock().await;
         self.assembler.set_rag_cue(&text);
 
-        let reply = self.stream_and_speak(&scope, channel_id).await;
+        // Name the turn for every LLM call made under it, so a mirrored row
+        // joins back to `turns` (subsystem 01's call mirror).
+        let reply = with_call_context(
+            CallContext::new(Some(user_turn.id), &scope.turn_id, channel_id),
+            self.stream_and_speak(&scope, channel_id),
+        )
+        .await;
         let Some(reply) = reply else {
             return Ok(());
         };

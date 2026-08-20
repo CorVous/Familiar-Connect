@@ -47,6 +47,22 @@ text_window_size  = 200
 # (they carry platform_message_id and never coalesce).
 coalesce_max_gap_seconds = 45.0
 
+# LLM call mirror. Every LLM request/response — the assembled system
+# prompt, the message array sent, the reply, tool calls and their
+# results, plus timings and token counts — is written to the
+# `llm_calls` table in history.db so a prompt can be inspected after
+# the fact. This is the retention cap: the newest N rows per familiar
+# are kept and older ones pruned on write. 0 switches mirroring off
+# entirely (nothing is captured and nothing is stored).
+#
+# Sizing: an assembled prompt runs ~15 KB and each row stores it twice
+# (the greppable `system_prompt` column plus the verbatim message
+# array), so budget ~30 KB per row — about 30 MB at the default, or
+# ~20 sessions of 50 calls. Raise it for longer-run analytics; the
+# rows contain every participant's messages in full, so see
+# docs/legal/privacy-policy.md before you do.
+llm_mirror_calls = 1000
+
 # --- Prompt assembly budget ------------------------------------------------
 #
 # Per-tier token caps for the prompt assembler. Each cap is a hard

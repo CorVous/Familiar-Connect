@@ -103,6 +103,26 @@ pub(crate) fn guard_leaked_content(content: &str) -> String {
     strip_leaked_tool_calls(&stripped).0
 }
 
+/// The iteration's tool calls as a JSON array, for the call mirror.
+fn tool_calls_wire(tool_calls: &[Value]) -> String {
+    Value::Array(tool_calls.to_vec()).to_string()
+}
+
+/// The iteration's tool results as a JSON array of `{tool_call_id, content}`,
+/// for the call mirror. Image results project to their text part.
+fn tool_results_wire(tool_msgs: &[Message]) -> String {
+    let rows: Vec<Value> = tool_msgs
+        .iter()
+        .map(|m| {
+            json!({
+                "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": tool_content_as_text(&m.content),
+            })
+        })
+        .collect();
+    Value::Array(rows).to_string()
+}
+
 /// Project a tool-message content to plain text for history persistence.
 #[must_use]
 pub fn tool_content_as_text(content: &Content) -> String {
@@ -358,6 +378,14 @@ pub async fn agentic_loop(
             let tool_msg = run_tool_call(tc, registry, ctx, multimodal).await;
             messages.push(tool_msg.clone());
             tool_msgs.push(tool_msg);
+        }
+        // Fold this iteration's tool calls + results back into the call that
+        // requested them, while `stream` still holds its metrics. The transport
+        // mirrors one row per call at drop; without this the row would carry
+        // half the story. `tracing_tools` is false with no mirror installed, so
+        // an unmirrored tool turn never serializes its results.
+        if !tool_calls.is_empty() && stream.traces_tools() {
+            stream.note_tool_trace(tool_calls_wire(&tool_calls), tool_results_wire(&tool_msgs));
         }
 
         // Detect the silent sentinel BEFORE on_iteration_end so the call + its

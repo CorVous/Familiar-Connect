@@ -15,6 +15,29 @@ dirs are created lazily alongside the DB. Multiple character folders
 can sit side-by-side under the root; only the one `FAMILIAR_ID` points
 at is loaded per process.
 
+## Disk growth
+
+`history.db` grows without bound by design — turns are append-only and
+nothing expires. Two things dominate its size:
+
+| What | Rough cost |
+|---|---|
+| A conversation turn plus its side-index projections | a few hundred bytes to a few KB |
+| One mirrored LLM call (`llm_calls`) | ~30 KB |
+
+The `llm_calls` table is the one part with a cap. It stores the
+assembled system prompt (~15 KB) twice — once as the greppable
+`system_prompt` column and once inside the verbatim `messages_json`
+array — plus the reply, tool calls and results. At the default
+`[providers.history].llm_mirror_calls = 1000` that is roughly **30 MB**,
+or about twenty sessions of fifty calls; rows past the cap are pruned as
+new ones land. Set the knob to `0` to switch mirroring off and stop the
+table growing at all, or raise it for longer-run analytics. See
+[Configuration model](../architecture/configuration-model.md#2-character-config).
+
+The tantivy indexes under `fts/` are regenerable and roughly track the
+text they index.
+
 ## Where the familiars root lives
 
 Per-user familiars are stored under the platform per-user data directory

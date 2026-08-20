@@ -18,6 +18,7 @@ use serde_json::Value;
 use familiar_connect::bus::in_process::InProcessEventBus;
 use familiar_connect::bus::protocols::{BackpressurePolicy, EventBus};
 use familiar_connect::bus::router::TurnRouter;
+use familiar_connect::diagnostics::llm_mirror::{CallContext, current_call_context};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::identity::Author;
 use familiar_connect::llm::{LlmClient, Message};
@@ -119,6 +120,83 @@ async fn full_reply_on_final() {
         .collect();
     assert!(contents.iter().any(|c| c.contains("hi there")));
     assert!(contents.iter().any(|c| c.contains("Hello, world.")));
+}
+
+/// Records the [`CallContext`] in scope when the responder calls the LLM.
+struct ContextSpyLlm {
+    seen: Arc<std::sync::Mutex<Vec<(CallContext, String)>>>,
+}
+
+#[async_trait]
+impl LlmClient for ContextSpyLlm {
+    async fn chat(&self, _messages: Vec<Message>) -> anyhow::Result<Message> {
+        Ok(Message::new("assistant", "ok"))
+    }
+    async fn stream_completion(
+        &self,
+        messages: Vec<Message>,
+        _tools: Option<Vec<Value>>,
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
+        let system = messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(Message::content_str)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.seen
+            .lock()
+            .expect("spy mutex")
+            .push((current_call_context(), system));
+        Ok(familiar_connect::llm::LlmStream::new(stream::iter(vec![
+            Ok(text_delta("ok")),
+        ])))
+    }
+    fn slot(&self) -> Option<&str> {
+        Some("fast")
+    }
+    fn multimodal(&self) -> bool {
+        false
+    }
+    fn tool_calling_enabled(&self) -> bool {
+        false
+    }
+}
+
+impl familiar_connect::processors::ResponderLlm for ContextSpyLlm {}
+
+#[tokio::test]
+async fn the_voice_turn_scopes_the_call_context_for_the_mirror() {
+    // What lets a mirrored `llm_calls` row name its turn, channel and scope.
+    let s = store();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let llm = Arc::new(ContextSpyLlm {
+        seen: Arc::clone(&seen),
+    });
+    let (r, _) = voice_responder(Arc::clone(&s), llm, Arc::new(MockTTSPlayer::new(5, 5)));
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("who is here?", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let calls = seen.lock().expect("spy mutex").clone();
+    assert_eq!(calls.len(), 1);
+    let (ctx, system) = &calls[0];
+    assert_eq!(ctx.turn_scope.as_deref(), Some("t-1"));
+    assert_eq!(ctx.channel_id, Some(1));
+    // The anchoring turn is the user turn just appended.
+    let user_turn = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.content.contains("who is here?"))
+        .expect("user turn");
+    assert_eq!(ctx.turn_id, Some(user_turn.id));
+    // And the system prompt the mirror would store is the assembled one.
+    assert!(!system.is_empty());
 }
 
 #[tokio::test]

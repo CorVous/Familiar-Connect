@@ -12,6 +12,8 @@
 //!   declared up front in `SCHEMA`; the earlier incremental `_migrate()`
 //!   was folded in and removed (issue #202).
 //! - [`fts`] — the tantivy full-text seam (`familiar_en` analyzer). **Stage B.**
+//! - [`llm_mirror`] — the `llm_calls` table writer behind the subsystem-01
+//!   [`LlmCallSink`](crate::diagnostics::llm_mirror::LlmCallSink) seam.
 //! - [`async_store`] — the async facade over the store. **Stage B.**
 //!
 //! Value types, the [`FtsIndex`] seam, and [`HistoryStore`] are re-exported at
@@ -20,6 +22,7 @@
 pub mod async_store;
 pub mod db;
 pub mod fts;
+pub mod llm_mirror;
 pub mod store;
 
 pub use crate::identity::Author;
@@ -27,10 +30,10 @@ pub use async_store::AsyncHistoryStore;
 pub use db::Db;
 pub use fts::{CommitFault, TantivyFts};
 pub use store::{
-    AccountProfile, ActivityRecord, AlarmRow, AppendFact, AppendTurn, ChannelUnread,
+    AccountProfile, ActivityRecord, AlarmRow, AppendFact, AppendLlmCall, AppendTurn, ChannelUnread,
     FOCUS_STREAM_CHANNEL_ID, Fact, FactDraft, FactSubject, FocusPointers, FtsIndex, HistoryStore,
-    HistoryTurn, NewFact, NoopFtsIndex, OtherChannelInfo, PeopleDossierEntry, Promotion,
-    Reflection, SleepWatermark, SummaryEntry, SupersedeResult, WatermarkEntry,
+    HistoryTurn, LlmCallRow, NewFact, NoopFtsIndex, OtherChannelInfo, PeopleDossierEntry,
+    Promotion, Reflection, SleepWatermark, SummaryEntry, SupersedeResult, WatermarkEntry,
 };
 
 /// One error enum for the whole history subsystem.

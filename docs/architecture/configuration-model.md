@@ -61,6 +61,21 @@ Surface today:
   gap between them is within this many seconds. Default `45.0`; `0`
   disables. Discord text turns are unaffected (they carry
   `platform_message_id`, which suppresses coalescing).
+- `[providers.history].llm_mirror_calls` — rows the LLM call mirror
+  keeps per familiar in the `llm_calls` table (default `1000`). Every
+  LLM request/response — assembled system prompt, message array,
+  reply, tool calls and results, timings, token counts — is written
+  there for troubleshooting and analytics; the newest N rows survive
+  and older ones are pruned on write. `0` switches mirroring off
+  entirely: no sink is installed and the transport skips capturing
+  prompts, so the feature costs nothing. Negative values are rejected
+  at load (`[providers.history].llm_mirror_calls must be >= 0, got -1`)
+  — an unbounded mirror is deliberately not offered. Budget ~30 KB per
+  row. These rows contain every participant's messages in full; see
+  [Privacy policy](../legal/privacy-policy.md#what-is-stored-on-disk)
+  before raising the cap, and
+  [Memory strategies — `llm_calls`](memory-strategies.md#the-one-table-that-is-not-a-projection-llm_calls)
+  for the schema.
 - `[providers.turn_detection].strategy` — `"deepgram"` (default) or
   `"ten+smart_turn"`. See
   [Tuning — local turn detection](tuning.md#local-turn-detection-v1).

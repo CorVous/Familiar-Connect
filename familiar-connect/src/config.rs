@@ -684,6 +684,8 @@ pub struct CharacterConfig {
     pub recent_history_coalesce_max_gap_seconds: f64,
     /// Fold text turns before a silence gap this large into summary; 0 disables.
     pub text_silence_gap_fold_seconds: f64,
+    /// Rows the `llm_calls` mirror keeps per familiar; 0 disables mirroring.
+    pub llm_mirror_calls: i64,
     /// IANA timezone name (validated at load, stored as the string).
     pub display_tz: String,
     /// Sleep window `(start, end)` (may wrap midnight); `None` disarmed.
@@ -769,6 +771,7 @@ impl Default for CharacterConfig {
             text_window_size: 200,
             recent_history_coalesce_max_gap_seconds: 45.0,
             text_silence_gap_fold_seconds: 0.0,
+            llm_mirror_calls: DEFAULT_LLM_MIRROR_CALLS,
             display_tz: "UTC".to_owned(),
             sleep_window: None,
             sleep_grace_minutes: 30,
@@ -808,6 +811,15 @@ impl Default for CharacterConfig {
         }
     }
 }
+
+/// Default `llm_calls` retention: rows kept per familiar.
+///
+/// An assembled prompt runs ~15 KB and the mirror stores it twice (the
+/// `system_prompt` projection plus the verbatim message array), so a row costs
+/// ~30 KB — roughly 30 MB at this cap, or ~20 sessions of 50 calls. Enough to
+/// answer "what did the prompt contain on turn X" days later without the table
+/// outgrowing the history it annotates.
+pub const DEFAULT_LLM_MIRROR_CALLS: i64 = 1000;
 
 /// Tier → LLM slot mapping (matches the responder wiring).
 fn tier_to_slot(tier: &str) -> Option<&'static str> {
@@ -956,6 +968,7 @@ fn parse_character_config(
     let (voice_window_size, text_window_size) = parse_history_windows(history_section)?;
     let recent_history_coalesce_max_gap_seconds = parse_coalesce_gap(history_section)?;
     let text_silence_gap_fold_seconds = parse_text_silence(history_section)?;
+    let llm_mirror_calls = parse_llm_mirror_calls(history_section)?;
 
     let display_tz = data
         .get("display_tz")
@@ -1095,6 +1108,7 @@ fn parse_character_config(
         text_window_size,
         recent_history_coalesce_max_gap_seconds,
         text_silence_gap_fold_seconds,
+        llm_mirror_calls,
         display_tz,
         sleep_window,
         sleep_grace_minutes,
@@ -1441,6 +1455,24 @@ fn parse_history_windows(raw: &Table) -> Result<(i64, i64), ConfigError> {
     let voice = positive_int("[providers.history]", raw, "voice_window_size", 100, true)?;
     let text = positive_int("[providers.history]", raw, "text_window_size", 200, true)?;
     Ok((voice, text))
+}
+
+/// `[providers.history].llm_mirror_calls` — rows the `llm_calls` mirror keeps.
+///
+/// `0` switches mirroring off; anything negative is a mistake, not a synonym for
+/// unbounded (an unbounded mirror is not offered).
+fn parse_llm_mirror_calls(raw: &Table) -> Result<i64, ConfigError> {
+    match raw.get("llm_mirror_calls") {
+        None => Ok(DEFAULT_LLM_MIRROR_CALLS),
+        Some(Value::Integer(n)) if *n >= 0 => Ok(*n),
+        Some(Value::Integer(n)) => Err(ConfigError(format!(
+            "[providers.history].llm_mirror_calls must be >= 0, got {n}"
+        ))),
+        Some(other) => Err(ConfigError(format!(
+            "[providers.history].llm_mirror_calls must be a non-negative integer, got {}",
+            value_type_name(other)
+        ))),
+    }
 }
 
 fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
