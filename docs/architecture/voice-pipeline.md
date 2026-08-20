@@ -355,6 +355,20 @@ classification is shared with the agentic loop's return-time strip guard
 (`classify_leading_leak`), the single source of truth. The text path,
 which streams no content mid-turn, keeps the simpler `SilentDetector`.
 
+**Speakable-chunk gate.** A chunk only reaches TTS when it holds at
+least one letter or digit (`support::text::is_speakable`). Whitespace,
+punctuation, markdown, and emoji carry no phonemes, and Cartesia
+answers such a transcript with HTTP 400 rather than audio. The common
+case is a reply ending in a trailing emoji: the splitter closes the
+last sentence at its terminator and `flush()` hands over the lone
+emoji. `VoiceResponder::speak` is the single gate — every flush tail is
+queued unconditionally and dropped there — with the same check repeated
+in `DiscordVoicePlayer::speak` as defence in depth for other callers. A
+skipped chunk logs at debug (`[Voice] skip=unspeakable turn=… text=…`),
+never warn: it is routine, not a fault. Chunks are spoken serially, so
+dropping one leaves the rest in order and the turn records the whole
+reply, emoji included.
+
 **Cancellation.** Each `TTSPlayer::speak(sentence, scope)` call is
 awaited serially. Barge-in cancels the current `TurnScope`;
 `DiscordVoicePlayer`'s poll loop cuts the in-flight sentence within

@@ -46,6 +46,15 @@ Common startup errors and what they mean:
   `GUILD_MEMBERS` intent) stays nameless until they type or their voice state
   changes. See
   [Voice pipeline](../architecture/voice-pipeline.md#voice-member-roster).
+- **`[Player] synthesize_error=…Cartesia TTS error (status=400)…`** — the
+  provider rejected one chunk's transcript; the rest of the reply still
+  plays, so the symptom is a missing sentence, usually the last one.
+  Chunks with nothing to voice (whitespace, punctuation, or a lone
+  trailing emoji) are skipped before the request goes out, so a 400 that
+  survives that gate points at the request itself: check
+  `[tts].cartesia_voice_id` and `[tts].cartesia_model` against the voices
+  and models the account actually has. See
+  [Voice pipeline](../architecture/voice-pipeline.md#sentence-streaming).
 - **`RTCP decryption failed: Crypto(Error)` in the log** — songbird's UDP
   receive task, benign and non-fatal by design. It is filtered out by
   default (`songbird::driver::tasks::udp_rx=error`); `-vv` restores it.

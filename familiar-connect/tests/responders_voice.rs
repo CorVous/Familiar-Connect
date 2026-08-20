@@ -122,6 +122,101 @@ async fn full_reply_on_final() {
     assert!(contents.iter().any(|c| c.contains("Hello, world.")));
 }
 
+// ---------------------------------------------------------------------------
+// Speakable-chunk gate
+// ---------------------------------------------------------------------------
+
+/// The live Cartesia 400: a reply ending in a trailing emoji leaves that emoji
+/// alone as the sentence streamer's flush tail. It must never be synthesized,
+/// the sentences before it still play, and the turn persists whole.
+#[tokio::test]
+async fn trailing_emoji_tail_is_not_spoken() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[
+            "Hey, something's broken! ",
+            "I'm being honest here. ",
+            "\u{1f605}",
+        ])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("what broke?", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let spoken: Vec<String> = player.calls().into_iter().map(|c| c.0).collect();
+    assert_eq!(
+        spoken,
+        vec![
+            "Hey, something's broken!".to_owned(),
+            "I'm being honest here.".to_owned(),
+        ],
+    );
+    // The turn still records the whole reply, emoji included.
+    let contents: Vec<String> = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.content)
+        .collect();
+    assert!(contents.iter().any(|c| c.contains('\u{1f605}')));
+}
+
+/// An unspeakable chunk in the *middle* of the stream is dropped without
+/// disturbing the order of the chunks around it.
+#[tokio::test]
+async fn unspeakable_chunk_mid_stream_keeps_order() {
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        store(),
+        // "... " is a complete "sentence" to the splitter: terminator run then
+        // whitespace.
+        Arc::new(ScriptedLlm::new(&["First one. ", "... ", "Third one. "])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("go on", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let spoken: Vec<String> = player.calls().into_iter().map(|c| c.0).collect();
+    assert_eq!(
+        spoken,
+        vec!["First one.".to_owned(), "Third one.".to_owned()],
+    );
+}
+
+/// A reply ending on a boundary leaves an empty flush tail; it is not sent.
+#[tokio::test]
+async fn empty_flush_tail_is_not_spoken() {
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        store(),
+        Arc::new(ScriptedLlm::new(&["All done. "])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("done?", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let spoken: Vec<String> = player.calls().into_iter().map(|c| c.0).collect();
+    assert_eq!(spoken, vec!["All done.".to_owned()]);
+}
+
 /// Records the [`CallContext`] in scope when the responder calls the LLM.
 struct ContextSpyLlm {
     seen: Arc<std::sync::Mutex<Vec<(CallContext, String)>>>,
