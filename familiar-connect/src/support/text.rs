@@ -1,4 +1,5 @@
-//! Shared Unicode-scalar-safe text truncation.
+//! Shared Unicode-scalar-safe text helpers: truncation + the speakable-text
+//! predicate the voice path gates TTS on.
 //!
 //! All truncation caps in the port count **Unicode scalars**, never bytes —
 //! byte slicing lands mid-codepoint on emoji-heavy chat text. [`truncate`]
@@ -22,9 +23,23 @@ pub fn truncate(text: &str, limit: usize) -> String {
     }
 }
 
+/// Whether `text` holds anything a TTS engine can voice: at least one letter or
+/// digit, in any script.
+///
+/// Drawn at alphanumeric because that is what a synthesizer turns into sound.
+/// Whitespace, punctuation, markdown, and emoji carry no phonemes on their own,
+/// and Cartesia rejects such a transcript with HTTP 400 — the live failure was
+/// a reply ending in a trailing emoji, which the sentence streamer hands over
+/// alone as its flush tail. Symbols *beside* words are untouched: the predicate
+/// asks only whether anything voiceable is present.
+#[must_use]
+pub fn is_speakable(text: &str) -> bool {
+    text.chars().any(char::is_alphanumeric)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ELLIPSIS, truncate};
+    use super::{ELLIPSIS, is_speakable, truncate};
 
     #[test]
     fn shorter_than_limit_is_unchanged() {
@@ -59,5 +74,51 @@ mod tests {
         assert_eq!(truncate("café", 4), "café");
         // A cap of 3 keeps "caf" + ellipsis, not a broken 'é'.
         assert_eq!(truncate("café", 3), "caf\u{2026}");
+    }
+
+    // --- is_speakable ------------------------------------------------------
+
+    #[test]
+    fn words_and_digits_are_speakable() {
+        assert!(is_speakable("Hello, world."));
+        assert!(is_speakable("42"));
+        assert!(is_speakable("Pi is 3.14."));
+        // Non-Latin scripts count as letters.
+        assert!(is_speakable("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}"));
+        assert!(is_speakable("\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}"));
+    }
+
+    #[test]
+    fn empty_and_whitespace_are_not_speakable() {
+        assert!(!is_speakable(""));
+        assert!(!is_speakable("   \n\t"));
+        // Info separators U+001C-U+001F: `str::trim` leaves them, but they
+        // carry no speakable content either.
+        assert!(!is_speakable("\u{1c}\u{1f}"));
+    }
+
+    #[test]
+    fn punctuation_only_is_not_speakable() {
+        assert!(!is_speakable("..."));
+        assert!(!is_speakable("?!"));
+        assert!(!is_speakable(" \u{2014} "));
+        assert!(!is_speakable("**"));
+    }
+
+    #[test]
+    fn emoji_only_is_not_speakable() {
+        // The live 400: a reply ending in a trailing emoji leaves the emoji
+        // alone as the sentence streamer's flush tail.
+        assert!(!is_speakable("\u{1f605}"));
+        assert!(!is_speakable(" \u{1f49b}\u{1f49a} "));
+        // ZWJ sequences and variation selectors are symbols too.
+        assert!(!is_speakable("\u{1f469}\u{200d}\u{1f4bb}"));
+        assert!(!is_speakable("\u{2764}\u{fe0f}"));
+    }
+
+    #[test]
+    fn emoji_beside_words_stays_speakable() {
+        assert!(is_speakable("\u{1f605} Who am I missing?"));
+        assert!(is_speakable("Nice work. \u{1f49b}"));
     }
 }

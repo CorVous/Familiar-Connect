@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bus::envelope::TurnScope;
 use crate::diagnostics::voice_budget::{PHASE_PLAYBACK_START, get_voice_budget_recorder};
 use crate::log_style as ls;
+use crate::support::text::is_speakable;
 use crate::tts::{StreamingTtsClient, TTSResult, TtsClient, TtsStream};
 use crate::tts_player::protocol::TtsPlayer;
 use crate::voice::audio::{StreamingPcmSource, mono_to_stereo};
@@ -238,9 +239,10 @@ impl TtsPlayer for DiscordVoicePlayer {
         if scope.is_cancelled() {
             return;
         }
-        // Defense-in-depth: Cartesia 400s on empty/whitespace transcript.
-        if text.trim().is_empty() {
-            warn_skip("empty_text", Some(&scope.turn_id));
+        // Defense-in-depth: Cartesia 400s on a transcript with nothing to voice
+        // (empty, whitespace, punctuation, or emoji only). Routine, so debug.
+        if !is_speakable(text) {
+            debug_skip("unspeakable", &scope.turn_id, text);
             return;
         }
         if self.tts.as_streaming().is_some() {
@@ -279,6 +281,19 @@ fn warn_skip(reason: &str, turn: Option<&str>) {
             ls::kv_styled("skip", reason, ls::W, ls::LY),
         );
     }
+}
+
+/// Debug `[Player] skip=<reason> turn=<id> text=<trunc>` — an expected skip, not
+/// a fault (a chunk with nothing to voice).
+fn debug_skip(reason: &str, turn: &str, text: &str) {
+    tracing::debug!(
+        target: TARGET,
+        "{} {} {} {}",
+        ls::tag("Player", ls::Y),
+        ls::kv_styled("skip", reason, ls::W, ls::LY),
+        ls::kv_styled("turn", turn, ls::W, ls::LC),
+        ls::kv_styled("text", &ls::trunc(text, 40), ls::W, ls::LW),
+    );
 }
 
 /// Warn `[Player] <key>=<repr>` in red (synthesize/play/stream/convert errors).

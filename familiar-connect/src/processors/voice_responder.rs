@@ -36,6 +36,7 @@ use crate::processors::{
 };
 use crate::sentence_streamer::SentenceStreamer;
 use crate::silence::{StreamDecision, StreamGate};
+use crate::support::text::is_speakable;
 use crate::tools::agentic::{
     AgenticHooks, agentic_loop, guard_leaked_content, tool_content_as_text,
 };
@@ -535,10 +536,8 @@ impl VoiceInner {
             gate_open = true;
         }
         if gate_open {
-            let tail = streamer.flush();
-            if !tail.trim().is_empty() {
-                pending.push_back(tail);
-            }
+            // `speak` is the single speakable gate; push the tail as-is.
+            pending.push_back(streamer.flush());
             while let Some(sentence) = pending.pop_front() {
                 if scope.is_cancelled() {
                     if !decision_logged {
@@ -607,10 +606,9 @@ impl VoiceInner {
             return None;
         }
         if st.gate_open {
+            // `speak` is the single speakable gate; push the tail as-is.
             let tail = st.streamer.flush();
-            if !tail.trim().is_empty() {
-                st.pending.push_back(tail);
-            }
+            st.pending.push_back(tail);
             while let Some(sentence) = st.pending.pop_front() {
                 if scope.is_cancelled() {
                     break;
@@ -640,7 +638,12 @@ impl VoiceInner {
     }
 
     async fn speak(&self, text: &str, scope: &TurnScope) {
-        if text.trim().is_empty() {
+        // A chunk with nothing to voice (whitespace, punctuation, or a trailing
+        // emoji left alone by the splitter) is a 400 at Cartesia, not audio.
+        // Skipping keeps the turn intact: chunks are spoken serially, so the
+        // rest still play in order.
+        if !is_speakable(text) {
+            log_skip_unspeakable(&scope.turn_id, text);
             return;
         }
         // First call per turn marks tts_first_audio (the recorder dedupes).
@@ -728,6 +731,18 @@ impl VoiceInner {
             ls::kv_styled("turn", turn_id, ls::W, ls::LC),
         );
     }
+}
+
+/// Debug `[Voice] skip=unspeakable turn=<id> text=<trunc>` — a chunk with
+/// nothing to voice never reaches TTS. Routine, so debug, not warn.
+fn log_skip_unspeakable(turn_id: &str, text: &str) {
+    tracing::debug!(
+        "{} {} {} {}",
+        ls::tag("Voice", ls::Y),
+        ls::kv_styled("skip", "unspeakable", ls::W, ls::LY),
+        ls::kv_styled("turn", turn_id, ls::W, ls::LC),
+        ls::kv_styled("text", &ls::trunc(text, 40), ls::W, ls::LW),
+    );
 }
 
 fn log_preempted(turn_id: &str) {
@@ -828,10 +843,9 @@ impl AgenticHooks for VoiceToolHooks<'_> {
         {
             let mut st = self.state.lock().await;
             if st.gate_open {
+                // `speak` is the single speakable gate; push the tail as-is.
                 let tail = st.streamer.flush();
-                if !tail.trim().is_empty() {
-                    st.pending.push_back(tail);
-                }
+                st.pending.push_back(tail);
                 while let Some(sentence) = st.pending.pop_front() {
                     if self.scope.is_cancelled() {
                         break;
