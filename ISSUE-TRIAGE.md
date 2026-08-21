@@ -15,7 +15,7 @@ upstream; this file is the whole record.
 | 208 | Close out familiar location migration | bounded chore | fixed |
 | 219 | `dim` contradicting `fastembed_model` fails silently | bounded bug | fixed |
 | 220 | silent reported as cancelled | bounded bug | fixed |
-| 221 | Tool calling is no longer optional | bounded bug | fixed |
+| 221 | Tool calling is no longer optional | bounded bug | fixed, then **deliberately reversed** 2026-08-21 — see below |
 | 222 | Familiars don't report focused channel correctly | bounded bug | fixed — first pass missed the root cause, see below |
 | 199 | High volume of decryption failures | investigation | fixed — and a worse defect found beside it |
 | 214 | Add Privacy Policy and Terms of Use | bounded docs | fixed |
@@ -73,6 +73,23 @@ completion. `diagnose`'s span regex does not scrape this line (no `span=` key);
 the #206 `[LLM call]` pass added later does, and counts the status vocabulary
 open-endedly, so `silent` / `suppressed` appear in its status column without
 further change.
+
+### 221 — REVERSED on 2026-08-21
+
+The fix below stands as a description of what was wrong, but the decision it
+rests on has been overturned by the owner, deliberately and with the trade-off
+stated. Silence is now a tool call and nothing else, so a slot without tool
+calling can never decline to speak — `tool_calling = false` is a load-time
+error. Their reasoning: "It's August 2026, most models are RL'd to use tools,
+not to inject tokens into the output token stream", and "it's becoming
+extremely rare for models *not* to support tool calling."
+
+What survives from the original fix: the leaked-tool-call guard on the bare
+text path, and the reminder no longer coaching a model toward a tool it cannot
+reach. What is moot: the non-tool ping fallback, since tool-less slots are no
+longer a supported configuration.
+
+Recorded so the next reader sees a reversal rather than a contradiction.
 
 ### 221 — tool calling is no longer optional
 `shift_focus` was the only post-startup mutator of focus, so a slot with
@@ -708,3 +725,66 @@ glm-5v-turbo (n=15). `budget.rs` had documented `len/4` as deliberately
 numbers. The upward-only clamp added earlier is vindicated: this is precisely
 the case it exists for. Calibration is now persisted across restarts so a cold
 start is no longer blind, and the false claim is corrected in the docs.
+
+## Failure modes worth remembering
+
+Three findings from the 2026-08-20/21 sessions that are not bugs in any one
+file. Each cost real debugging time, and each will recur in a different
+costume.
+
+### F1 — a bug that outlives its fix, as a memory
+
+The voice roster reached the prompt on 2026-08-20 and the familiar still
+insisted it could not see anyone. The code was correct: the prompt provably
+contained `In the call: Fratal 👻, Cor Vous, Cassidy.` The reply was *"I still
+can't see anyone in here, Cassie. My eyes are broken, remember?"*
+
+Four **live** facts said otherwise — 1836 ("a visibility issue both confirm is
+ongoing"), 1837 ("Cor claimed to have fixed it, but the problem persists"),
+1851, 1838. The two facts recording that it *had* been fixed (1821, 1825) were
+**retired**, correctly, because it broke again afterwards.
+
+So supersession worked perfectly and left exactly the wrong belief standing.
+The familiar weighed one line of live perception against several remembered
+facts plus its own prior turns, and trusted memory — which is what a memory
+system is *for*.
+
+The general shape: **a fact asserting system capability has a shelf life that a
+fact about a person does not.** Nothing in the extractor distinguishes them.
+#153's self-capability filter tries to drop this shape but only matches
+first-person phrasing; these were third-person ("Tam and Sapphire cannot see
+each other") and sailed through.
+
+Retired via `~/retire-visibility-facts.py` (supersession, not deletion).
+
+### F2 — prompts write the self-dossier, which writes the prompts
+
+The self-dossier for `ego:test-familiar` reads *"Tam is a backup — 'iteration
+two' … **She** calls Cassidy 'Cassie'"*. Facts mentioning Tam split 17 gendered
+/ 29 they-them, so the corpus disagrees with itself and the model picks per
+turn.
+
+Nobody decided Tam's pronouns. "Sapphire" is the canonical example name baked
+into `identity.rs`, `prompt_fill.rs`, `macros.rs` and several docs, and project
+materials gender Sapphire as "she". That leaked into extraction, became facts,
+consolidated into the *self*-dossier, and is now re-read every turn as
+authoritative self-knowledge.
+
+The loop closes: prompt → fact → dossier → prompt. An inference becomes an
+identity claim with no step where anyone asserted it. (The assistant made the
+same error independently, reading "her" from `.audit-fixes.md` and #130 — two
+routes, same attractor.)
+
+Argues that self-referential extracted facts need different handling from facts
+about other people. Related to #130's self-capture concerns.
+
+### F3 — an analysis that is not written down did not happen
+
+The owner asked on 2026-08-20 whether the `silent` tool competed with other
+tool calls. The answer given — "mechanically they do not conflict" — was
+incomplete, and was recorded nowhere. It surfaced again on 2026-08-21 from the
+owner's own notes, and the re-examination found a real defect the first pass
+had missed: `shift_focus` + `silent` committed the focus shift and then
+returned before `on_iteration_end`, so the shift was never persisted.
+
+The note survived because it was written down. The verdict did not.
