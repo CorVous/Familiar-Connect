@@ -131,7 +131,9 @@ pub struct LLMSlotConfig {
     pub provider_allow_fallbacks: bool,
     /// OpenRouter reasoning effort; `None` = model default (`"default"` → None).
     pub reasoning: Option<String>,
-    /// Surface-only tool-calling flag.
+    /// Surface-only tool-calling flag. Defaults `true` and `false` is refused
+    /// at load: silence is a tool call, so a tool-less slot cannot decline to
+    /// reply.
     pub tool_calling: bool,
     /// Gate for `view_image` registration.
     ///
@@ -171,7 +173,7 @@ impl Default for LLMSlotConfig {
             provider_order: None,
             provider_allow_fallbacks: true,
             reasoning: None,
-            tool_calling: false,
+            tool_calling: true,
             image_tools: false,
             multimodal: None,
         }
@@ -1664,7 +1666,16 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
                 )));
             }
         };
-        let tool_calling = field_bool(section, &prefix, "tool_calling", false)?;
+        let tool_calling = field_bool(section, &prefix, "tool_calling", true)?;
+        if !tool_calling {
+            return Err(ConfigError(format!(
+                "[llm.{name}].tool_calling = false is unsupported: silence and \
+                 every other decision the familiar declines to speak for are \
+                 tool calls, so a slot without tool calling can never stay \
+                 quiet — remove the key (it defaults to true) or set \
+                 [llm.{name}].tool_calling = true"
+            )));
+        }
         let image_tools = field_bool(section, &prefix, "image_tools", false)?;
         let multimodal = field_bool_opt(section, &prefix, "multimodal")?;
         slots.insert(

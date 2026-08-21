@@ -130,8 +130,8 @@ fn tool_calling_declared_on_a_model_without_tools_is_a_mismatch() {
     assert_eq!(found[0].model, "vendor/vision");
     assert_eq!(
         found[0].remediation,
-        "set [llm.prose].tool_calling = false, or pick a model whose \
-         supported_parameters include 'tools'"
+        "pick a model whose supported_parameters include 'tools' — \
+         [llm.prose].tool_calling cannot be turned off"
     );
 }
 
@@ -171,17 +171,11 @@ fn image_tools_declared_on_a_text_only_model_is_a_mismatch() {
 // compare_slot — the inverse (advisory / INFO direction)
 // ---------------------------------------------------------------------------
 
+/// Tool calling is mandatory, so a model that supports it earns no advisory.
 #[test]
-fn tools_supported_but_not_declared_is_advisory() {
-    let cfg = slot("vendor/text"); // tool_calling defaults false
-    let found = compare_slot("fast", &cfg, &text_tools());
-    assert_eq!(found.len(), 1, "one advisory: {found:?}");
-    assert_eq!(found[0].flag, "tool_calling");
-    assert_eq!(found[0].kind, MismatchKind::SupportedNotDeclared);
-    assert_eq!(
-        found[0].remediation,
-        "model supports tools; set [llm.fast].tool_calling = true to use them"
-    );
+fn tools_supported_and_declared_says_nothing() {
+    let cfg = slot("vendor/text"); // tool_calling defaults true
+    assert_eq!(compare_slot("fast", &cfg, &text_tools()), Vec::new());
 }
 
 #[test]
@@ -233,6 +227,8 @@ fn a_fully_matched_slot_reports_nothing() {
 #[test]
 fn declaring_only_image_tools_silences_the_image_advisory() {
     let mut cfg = slot("vendor/vision");
+    // Isolate the image side: this model lists no `tools` parameter.
+    cfg.tool_calling = false;
     cfg.image_tools = true;
     let found = compare_slot("prose", &cfg, &vision_no_tools());
     assert_eq!(found, Vec::new(), "no advisory when image input is used");
@@ -347,35 +343,36 @@ fn declared_unsupported_logs_error_and_the_inverse_logs_info() {
 
 #[test]
 fn tool_calling_off_on_text_names_the_ping_fallback() {
-    let cfg = slot("vendor/text"); // tool_calling defaults false
+    let mut cfg = slot("vendor/text");
+    cfg.tool_calling = false;
     let msg = focus_unreachable_message("text", "prose", &cfg, true).expect("flagged");
     assert_eq!(
         msg,
-        "[llm.prose].tool_calling = false disables every tool call on the text \
-         surface, so shift_focus is unreachable — the familiar can only follow a \
-         direct ping to another text channel, never move on its own judgement — \
-         set [llm.prose].tool_calling = true to let the familiar change channels"
+        "[llm.prose].tool_calling = false is unsupported: silence and shift_focus \
+         are both tool calls, so the text surface can never decline to reply and \
+         can only follow a direct ping to another text channel, never move on its \
+         own judgement — set [llm.prose].tool_calling = true"
     );
 }
 
 #[test]
 fn tool_calling_off_on_voice_pins_focus_for_the_session() {
     // Voice has no direct-ping fallback, so the stronger claim holds there.
-    let cfg = slot("vendor/text");
+    let mut cfg = slot("vendor/text");
+    cfg.tool_calling = false;
     let msg = focus_unreachable_message("voice", "fast", &cfg, false).expect("flagged");
     assert_eq!(
         msg,
-        "[llm.fast].tool_calling = false disables every tool call on the voice \
-         surface, so shift_focus is unreachable and the voice channel focus is \
-         fixed for the session — set [llm.fast].tool_calling = true to let the \
-         familiar change channels"
+        "[llm.fast].tool_calling = false is unsupported: silence and shift_focus \
+         are both tool calls, so the voice surface can never decline to reply and \
+         the voice channel focus is fixed for the session — set \
+         [llm.fast].tool_calling = true"
     );
 }
 
 #[test]
 fn tool_calling_on_is_silent() {
-    let mut cfg = slot("vendor/text");
-    cfg.tool_calling = true;
+    let cfg = slot("vendor/text"); // tool_calling defaults true
     assert_eq!(
         focus_unreachable_message("voice", "fast", &cfg, false),
         None

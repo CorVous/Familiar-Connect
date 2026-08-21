@@ -198,8 +198,8 @@ songbird logs and file upstream.
 `voice.transcript.final` (visible via debug-logger at `-vv`); `[Voice]
 decision=respond turn=voice-...`; audible reply.
 **If it fails:** transcript only after your *next* utterance → idle-finalize not
-firing (see Sharp Edges); `decision=silent` (`[💤 Voice]`) → `<silent>` sentinel
-latched, expected for filler; no audio out → the `|| None` voice-client seam.
+firing (see Sharp Edges); `decision=silent` (`[💤 Voice]`) → the turn resolved
+to silence (a tool call with no `silent: false`), expected for filler; no audio out → the `|| None` voice-client seam.
 
 ### Stage 4 (d) — MULTI-SPEAKER per-SSRC receive  ← #1 residual risk
 

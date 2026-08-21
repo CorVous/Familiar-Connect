@@ -2,7 +2,7 @@
 //! 05).
 //!
 //! Restates the current time (so the model doesn't drift on long-lived caches)
-//! and enumerates text-channel sentinels, the per-mode operating directive, an
+//! and enumerates text-channel input markers, the per-mode operating directive, an
 //! optional voice tool nudge, a focus + unread digest block, and any
 //! post-history etiquette. Responders render it twice per turn (head copy with
 //! `include_time=false`; tail copy with the clock, mode instruction, post-history
@@ -383,14 +383,6 @@ mod tests {
         assert!(out.contains("It is now: 2026-05-04 2:30PM UTC"));
         assert!(out.contains("[@DisplayName]"));
         assert!(out.contains("[\u{21a9} <message_id>]"));
-    }
-
-    #[test]
-    fn text_mode_no_silent_sentinel() {
-        let out = FinalReminder::new("text")
-            .now(at(2026, 5, 4, 14, 30))
-            .render();
-        assert!(!out.contains("`<silent>`"));
     }
 
     #[test]

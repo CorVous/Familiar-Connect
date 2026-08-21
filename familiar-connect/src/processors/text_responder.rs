@@ -1,8 +1,9 @@
 //! Text reply orchestrator (subsystem 06).
 //!
 //! Consumes `discord.text` events, assembles a layered prompt (05), streams an
-//! LLM reply (08), gates it through the `<silent>` sentinel, rewrites its
-//! ping/thread markers, and delivers it via the injected [`SendText`] callback,
+//! LLM reply (08), gates it through the leaked-tool-call guard and the turn's
+//! silence decision, rewrites its ping/thread markers, and delivers it via the
+//! injected [`SendText`] callback,
 //! persisting user + assistant turns to history (03). Everything runs inline
 //! under a per-turn [`TurnScope`] so a typing-cancel or a newer event's
 //! `begin_turn` supersedes in-flight work cooperatively.
@@ -33,7 +34,7 @@ use crate::processors::{
     ActivityGate, DiscordTextPayload, FocusManagerApi, GateAction, ResponderLlm, SendText,
     ToolContextFactory, TriggerTyping, TypingIndicator,
 };
-use crate::silence::{SilentDetector, StreamDecision, StreamGate};
+use crate::silence::{StreamDecision, StreamGate};
 use crate::tools::agentic::{
     AgenticHooks, DEFAULT_MAX_ITERATIONS, agentic_loop, tool_content_as_text,
 };
@@ -859,9 +860,9 @@ impl TextResponder {
         typing: &mut Option<Box<dyn TypingIndicator>>,
     ) -> Option<String> {
         let mut accumulated = String::new();
-        // Same gate voice uses: `<silent>` plus the leaked-tool-call guard, so a
-        // tool-less model imitating `shift_focus(…)` never reaches Discord
-        // (#221; the tool path has the return-time strip guard instead).
+        // Same gate voice uses: the leaked-tool-call guard, so a tool-less model
+        // imitating `shift_focus(…)` never reaches Discord (#221; the tool path
+        // has the return-time strip guard too).
         let mut gate = StreamGate::new();
         let mut stream = match self.llm.stream_completion(messages, None).await {
             Ok(s) => s,
@@ -957,7 +958,7 @@ impl TextResponder {
             scope,
             channel_id,
             guild_id,
-            silent: Mutex::new(SilentDetector::new()),
+            gate: Mutex::new(StreamGate::new()),
             typing: Mutex::new(None),
             typing_started: AtomicBool::new(false),
             bail_silent: AtomicBool::new(false),
@@ -1058,7 +1059,7 @@ struct TextToolHooks<'a> {
     scope: &'a TurnScope,
     channel_id: i64,
     guild_id: Option<i64>,
-    silent: Mutex<SilentDetector>,
+    gate: Mutex<StreamGate>,
     typing: Mutex<Option<Box<dyn TypingIndicator>>>,
     typing_started: AtomicBool,
     bail_silent: AtomicBool,
@@ -1074,15 +1075,18 @@ impl AgenticHooks for TextToolHooks<'_> {
             return;
         }
         let decision = self
-            .silent
+            .gate
             .lock()
-            .expect("tool silent mutex")
+            .expect("tool stream gate mutex")
             .feed(&delta.content);
         match decision {
-            Some(true) => {
+            // A leaked `silent(…)` reply: abandon before the typing indicator
+            // flickers. A leaked non-silent call is left to the return-time
+            // strip, which keeps any prose that trailed it.
+            StreamDecision::Silent => {
                 self.bail_silent.store(true, Ordering::SeqCst);
             }
-            Some(false) => {
+            StreamDecision::Speak => {
                 if !self.typing_started.swap(true, Ordering::SeqCst)
                     && let Some(trigger) = &self.responder.trigger_typing
                 {
@@ -1090,7 +1094,7 @@ impl AgenticHooks for TextToolHooks<'_> {
                     *self.typing.lock().expect("typing mutex") = Some(ind);
                 }
             }
-            None => {}
+            StreamDecision::Suppress | StreamDecision::Pending => {}
         }
     }
 
