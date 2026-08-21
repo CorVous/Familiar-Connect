@@ -2,7 +2,8 @@
 //!
 //! Alone in its own binary so the process-wide span collector starts empty (see
 //! `responders_voice_budget.rs` for the rationale): a silent turn records no
-//! TTS phase, so `voice.ttft_to_tts` must be absent.
+//! TTS phase, so `voice.ttft_to_tts` must be absent. Silence here comes from a
+//! leaked `silent(…)` call — the tool-less path's only route to it.
 
 #[path = "responders_support/mod.rs"]
 mod support;
@@ -23,7 +24,7 @@ async fn no_budget_spans_on_silent_reply() {
     let assembler = make_assembler(Arc::clone(&s));
     let r = VoiceResponder::new(
         assembler,
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&["silent(reasoning=\"not for me\")"])),
         Arc::new(MockTTSPlayer::new(1, 5)),
         s,
         Arc::new(TurnRouter::new()),

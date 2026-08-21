@@ -126,13 +126,14 @@ async fn filler_spoken_when_tool_call_has_empty_content() {
     reg.register(Tool::new("set_alarm", "", json!({}), Arc::new(handler)))
         .unwrap();
 
-    // iteration 1: ONLY a tool_call (no content) → the filler should fire.
+    // iteration 1: ONLY a tool_call (no content), and the call opts into speech
+    // → the filler should fire.
     let llm = Arc::new(ScriptedToolLlm::new(vec![
         vec![
             tc_delta(
                 "c1",
                 "set_alarm",
-                json!({"reason": "x", "delay_seconds": 30}),
+                json!({"reason": "x", "delay_seconds": 30, "silent": false}),
             ),
             finish("tool_calls"),
         ],
@@ -169,6 +170,53 @@ async fn filler_spoken_when_tool_call_has_empty_content() {
         "filler not spoken before tool: {:?}",
         snap[0]
     );
+}
+
+/// A silent tool call is going to say nothing at all, so the filler must not
+/// fire — it would be the only thing heard.
+#[tokio::test]
+async fn no_filler_when_the_tool_call_is_silent() {
+    let spoken = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = FnHandler(|_a: Value, _c: ToolContext| async move {
+        Ok(ToolOutput::Text(json!({"ok": true}).to_string()))
+    });
+    let mut reg = ToolRegistry::new();
+    reg.register(Tool::new("set_alarm", "", json!({}), Arc::new(handler)))
+        .unwrap();
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            tc_delta(
+                "c1",
+                "set_alarm",
+                json!({"reason": "x", "delay_seconds": 30}),
+            ),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("Done."), finish("stop")],
+    ]));
+    let player = Arc::new(RecordingVoicePlayer {
+        spoken: Arc::clone(&spoken),
+    });
+    let s = store();
+    let assembler = make_assembler(Arc::clone(&s));
+    let r = VoiceResponder::new(
+        assembler,
+        llm,
+        player,
+        s,
+        Arc::new(TurnRouter::new()),
+        "fam",
+    )
+    .with_tools(Arc::new(reg), voice_ctx_factory())
+    .with_tool_filler_phrases(vec!["hang on...".to_owned()]);
+    r.handle(&activity_start("voice:1", "t-3", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("set alarm", "voice:1", "t-3", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert!(spoken.lock().unwrap().is_empty(), "{spoken:?}");
 }
 
 #[tokio::test]
@@ -285,8 +333,9 @@ async fn shipped_default_voice_tool_ack_reaches_the_trailing_reminder() {
     let trailing = trailing_with_ack(&default_config().voice_tool_ack).await;
     assert!(
         trailing.contains(
-            "Always speak at least a brief acknowledgement before calling a tool. \
-             Never reply with a tool call alone."
+            "When you call a tool and still mean to be heard, pass `silent: \
+             false` and speak at least a brief acknowledgement in the same \
+             reply. A tool call on its own is silent \u{2014} nothing is spoken."
         ),
         "{trailing}"
     );

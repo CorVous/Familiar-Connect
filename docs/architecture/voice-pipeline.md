@@ -341,19 +341,24 @@ single-letter initials (`J. K. Rowling`) don't trip a boundary. A
 trailing partial without a terminator (model omits the final period)
 is drained on stream end via `flush()` and spoken last.
 
-**Silent sentinel + leak guard.** `StreamGate` (Rust `silence.rs`) runs
-ahead of the splitter on every delta. Sentences finalised before the
-gate decides are buffered; on `silent` they're dropped and TTS is never
-invoked; on `speak` they flush and the streamer feeds TTS as new
-sentences arrive. Beyond `<silent>`, the gate also recognises a
-tool-call block the model occasionally leaks as plain text (`<invoke …`,
-`silent(…)`, `read_channel(…)`, `<tool_call …`), staying pending while
-the token is still split across delta boundaries and latching `suppress`
-(or `silent`, for a leaked `silent` call) so the raw XML never reaches
-TTS or the persisted turn (issue #109). The confirmed-leak
-classification is shared with the agentic loop's return-time strip guard
-(`classify_leading_leak`), the single source of truth. The text path,
-which streams no content mid-turn, keeps the simpler `SilentDetector`.
+**Leak guard.** `StreamGate` (Rust `silence.rs`) runs ahead of the
+splitter on every delta. Sentences finalised before the gate decides are
+buffered; on `silent` they're dropped and TTS is never invoked; on
+`speak` they flush and the streamer feeds TTS as new sentences arrive.
+The gate recognises a tool-call block the model occasionally leaks as
+plain text (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`),
+staying pending while the token is still split across delta boundaries
+and latching `suppress` (or `silent`, for a leaked `silent` call) so the
+raw XML never reaches TTS or the persisted turn (issue #109). The
+confirmed-leak classification is shared with the agentic loop's
+return-time strip guard (`classify_leading_leak`), the single source of
+truth. The same gate runs on the text path.
+
+Deliberate silence is separate and arrives through tool calls, not text:
+a turn that called any tool with no `silent: false` speaks nothing, and
+once that is known no later iteration's prose reaches TTS either. The
+filler phrase is skipped on such a turn — it would be the only thing
+heard.
 
 **Speakable-chunk gate.** A chunk only reaches TTS when it holds at
 least one letter or digit (`support::text::is_speakable`). Whitespace,
@@ -540,7 +545,7 @@ It also carries `status`, the call's outcome:
 | `ok` | Stream ran to its terminal event. |
 | `error` | Transport or HTTP fault (the request never opened, or the body broke mid-stream). |
 | `cancelled` | Consumer dropped the stream early — a barge-in. |
-| `silent` | Consumer dropped the stream early because the reply latched the `<silent>` sentinel. |
+| `silent` | Consumer dropped the stream early because the turn resolved to silence (a leaked `silent(` call on the streaming path). |
 | `suppressed` | Consumer dropped the stream early because the reply leaked a tool call as plain content. |
 
 The transport can only ever infer `cancelled` for an early drop, so the
@@ -564,7 +569,7 @@ See [Voice reply loop](overview.md#voice-reply-loop).
 
 Every voice turn emits exactly one decision line for observability:
 
-- `[💤 Voice] decision=silent` — `<silent>` sentinel latched.
+- `[💤 Voice] decision=silent` — the turn resolved to silence.
 - `[Voice] decision=respond` — gate opened on real content.
 - `[Voice] decision=preempted` — barge-in cancelled the turn before
   the gate latched. Without this line a continuously-speaking user
@@ -599,7 +604,7 @@ A per-channel `tokio::sync::Mutex` (`VoiceResponder::gate_for`) serializes
 reply *generation*: `set_rag_cue` → assemble → stream → assistant-turn
 commit run under the lock. The waiting pipeline therefore assembles
 only after the prior reply lands in history, sees it in context, and
-can resolve `<silent>` instead of duplicating. Two further points:
+can stay silent instead of duplicating. Two further points:
 
 - **No perceived latency.** Playback is already serial on the shared
   voice client, so the second reply can't be *heard* until the first

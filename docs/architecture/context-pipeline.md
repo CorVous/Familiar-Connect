@@ -85,7 +85,7 @@ for an assembler's lifetime, so no invalidation key includes it.
 
 | Layer | Source | Invalidation |
 |---|---|---|
-| `CharacterCardLayer` | `data/familiars/<id>/character.md` (persona plus operational essentials — `<silent>` token, first-person, conciseness) | BLAKE2b content hash — catches sub-second edits |
+| `CharacterCardLayer` | `data/familiars/<id>/character.md` (persona plus operational essentials — how to stay silent, first-person, conciseness) | BLAKE2b content hash — catches sub-second edits |
 | `OperatingModeLayer` | in-memory `modes` dict, keyed on `viewer_mode` | `viewer_mode` |
 | `LorebookLayer` | `data/familiars/<id>/lorebook.toml` (optional) | file content hash + matched entry indices |
 
@@ -825,10 +825,10 @@ silently degrade to threading on the inbound message.
 ### Final reminder
 
 Every system prompt closes with a small block restating *current time*
-(`YYYY-MM-DD H:MMpm UTC`) and the literal sentinels the responder
+(`YYYY-MM-DD H:MMpm UTC`) and the literal input markers the responder
 honours. Rebuilt per-call (cheap), so the model never sees a stale
 clock — useful when the prompt cache lives across long-tailed turns.
-Voice channels see only `<silent>`; text channels also list
+Voice channels see no markers; text channels list
 `[@DisplayName]` and `[↩ <message_id>]`. Source:
 `familiar-connect/src/context/final_reminder.rs`.
 
@@ -873,7 +873,7 @@ turn, where behavioral nudges land hardest. It is rendered verbatim
 (markdown fine) and only in the trailing copy, never the up-front one,
 so "post-history" stays literal. Empty string omits it. The shipped
 default is a short roleplay-etiquette note steering the familiar
-toward `<silent>` so it doesn't over-talk on voice. Source of the
+toward silence so it doesn't over-talk on voice. Source of the
 default: `data/familiars/_default/character.toml` `[prompt]`.
 
 There is **no per-channel enumeration** of pingable users. The LLM
@@ -1012,26 +1012,25 @@ turn for me?" without a separate gating LLM call:
    timestamps tells the model whether a conversation is flowing
    between humans. The `#channel_id` disambiguates source once the
    cross-channel window mixes multiple channels.
-2. **Silent sentinel in the reply.** The system prompt instructs the
-   model to emit the literal token `<silent>` as its *entire* reply
-   when the latest message isn't for it. `SilentDetector`
-   (`familiar_connect::silence`) inspects the streaming reply
-   delta-by-delta; on a prefix match it short-circuits the stream, the
-   responder skips Discord posting / TTS, and no assistant turn is
-   appended. The user turn is still recorded — observation is not
-   gated by response.
+2. **Silence as a tool call.** When the latest message isn't for it, the
+   model calls a tool instead of writing a reply. Every tool call is
+   silent unless it passes `silent: false`, and `silent(reasoning)` is
+   the explicit "do nothing, say nothing" case: it returns a sentinel
+   that makes `agentic_loop` return `AgenticResult(is_silent=true)`
+   without re-prompting, and the responder skips Discord posting / TTS
+   with no assistant turn appended. The user turn is still recorded —
+   observation is not gated by response.
 
-The sentinel is best-effort: it relies on the model following the
-system-prompt instruction. A stray `<silent>` mid-reply is treated as
-content (prefix-only match); the decision latches once made and
-subsequent deltas don't re-open it.
+There is no `<silent>` text sentinel; the literal string in model output
+is ordinary prose and gets spoken like any other text. What survives on
+the tool-less streaming path is the leak guard: a `silent(…)` or
+`<invoke …>` block the model emits as *text* is caught mid-stream by
+`StreamGate` (`familiar_connect::silence`) and honoured as silence
+(`silent`) or suppressed (any other tool). Prefix-only — a stray
+mention mid-reply is content — and the decision latches once made.
 
-Under tool calling the same decision is also reachable as a tool: the
-`silent(reasoning)` tool returns a sentinel that makes `agentic_loop`
-return `AgenticResult(is_silent=True)` without re-prompting, and the
-responder bails exactly as it does on the `<silent>` text token. The
-two coexist — `<silent>` gates the bare streaming path, `silent()`
-gates the agentic path.
+Because silence needs a tool, `[llm.<slot>].tool_calling` is mandatory:
+it defaults to `true` and `false` is refused at config load.
 
 ## Attentional stream
 
@@ -1129,8 +1128,8 @@ subscribed-but-unfocused channel calls `shift_now` on that channel and
 then replies there, instead of staging and returning.
 
 It is gated on the responder having no agentic loop for this turn —
-no tool registry / context factory, or neither `tool_calling` nor
-`image_tools` on the slot. The same flag gates the reminder's
+no tool registry / context factory wired (`tool_calling` itself can no
+longer be turned off). The same flag gates the reminder's
 `shift_focus` coaching, so the two always agree. When tools *are*
 available the behavior is unchanged: `shift_focus` is the model's own
 deliberate control and an automatic shift underneath it would fight
@@ -1246,10 +1245,13 @@ Discord text on channel C
       seeds RagContextLayer cue = content
       Assembler.assemble(ctx, viewer_mode="text")
       LLMClient.chat_stream (cancellable via scope; StreamGate watches deltas
-       for `<silent>` and leaked tool calls on the tool-less path)
+       for leaked tool calls)
       (shift_focus, if called, already moved focus + promoted staged, and is
-       recorded turn-locally as this turn's send target)
-      if `<silent>` detected: bail (no send, no assistant turn)
+       recorded turn-locally as this turn's send target; its call is persisted
+       even when the turn is silent)
+      if the turn is silent (any tool call without `silent: false`, the
+       `silent` tool, or a leaked `silent(` call): bail (no send, no
+       assistant prose turn)
       if wake turn AND no shift this turn: suppress (shift-or-silent, #170)
       else: BotHandle.send_text(this turn's shift target, else channel C, reply)
             append assistant turn to that same channel  (never the global focus
@@ -1269,8 +1271,8 @@ Voice transcript final on channel C (voice:C)
         → PeopleDossierLayer: read from people_dossiers, capped at max_people
         → RagContextLayer: FTS search on cue
         → RecentHistoryLayer: last N consumed turns across all channels
-      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
-      if `<silent>` detected: bail (no TTS, no assistant turn)
+      LLMClient.chat_stream (cancellable via scope; StreamGate watches deltas)
+      if the turn is silent: bail (no TTS, no assistant turn)
       else: TTSPlayer.speak; append assistant turn
       router.end_turn(scope); FocusManager.end_turn()
 

@@ -1,8 +1,10 @@
 //! `silent` tool + the [`SILENT_RESULT`] sentinel (subsystem 08).
 //!
-//! Suppresses the familiar's reply for a turn. The agentic loop detects the
-//! sentinel among a turn's tool results and returns
-//! `AgenticResult { is_silent: true, .. }` without re-prompting the model. The
+//! The explicit no-op: do nothing, say nothing. Every tool call is silent by
+//! default, so this one exists for the turn where there is nothing else to do.
+//! The agentic loop detects [`SILENT_RESULT`] among a turn's tool results, ends
+//! the turn without re-prompting, and keeps this call + its private reasoning
+//! out of history (other calls in the same iteration are still persisted). The
 //! tool itself just logs the reasoning and returns the sentinel — even with
 //! empty/missing reasoning.
 
@@ -34,9 +36,10 @@ pub fn silent_handler(args: &Value, _ctx: &ToolContext) -> ToolOutput {
 pub fn build_silent_tool() -> Tool {
     Tool::new(
         "silent",
-        "Stay completely silent — send no reply to the channel. Use when the \
-         conversation is not aimed at you and you have no stake. The reasoning \
-         argument is a private internal note — never shown in chat.",
+        "Do nothing and say nothing this turn — no reply reaches the channel. \
+         Use when the conversation is not aimed at you and you have no stake, \
+         and there is no other tool to call. The reasoning argument is a \
+         private internal note — never shown in chat.",
         json!({
             "type": "object",
             "properties": {

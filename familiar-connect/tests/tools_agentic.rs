@@ -103,6 +103,21 @@ fn delta_tool_call(call_id: &str, name: &str, args: &Value) -> LlmDelta {
     }
 }
 
+/// Like [`delta_tool_call`] but at an explicit accumulator index, so one
+/// iteration can carry several calls.
+fn delta_tool_call_at(index: i64, call_id: &str, name: &str, args: &Value) -> LlmDelta {
+    LlmDelta {
+        content: String::new(),
+        tool_calls: vec![json!({
+            "index": index,
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": args.to_string()},
+        })],
+        finish_reason: None,
+    }
+}
+
 fn delta_finish(reason: &str) -> LlmDelta {
     LlmDelta {
         content: String::new(),
@@ -401,7 +416,11 @@ async fn executes_tool_then_re_calls_llm() {
 
     let scripts = vec![
         vec![
-            delta_tool_call("c1", "set_alarm", &json!({"reason": "wake"})),
+            delta_tool_call(
+                "c1",
+                "set_alarm",
+                &json!({"reason": "wake", "silent": false}),
+            ),
             delta_finish("tool_calls"),
         ],
         vec![delta_text("Done."), delta_finish("stop")],
@@ -419,7 +438,11 @@ async fn executes_tool_then_re_calls_llm() {
     .await
     .unwrap();
 
-    assert_eq!(*seen.lock().unwrap(), vec![json!({"reason": "wake"})]);
+    // The shared `silent` flag reaches the handler with the rest of the args.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![json!({"reason": "wake", "silent": false})]
+    );
     assert_eq!(result.final_content, "Done.");
     assert_eq!(result.iterations, 2);
     assert_eq!(result.tool_calls_made, 1);
@@ -446,7 +469,7 @@ async fn handler_exception_surfaced_as_tool_error() {
         .unwrap();
     let scripts = vec![
         vec![
-            delta_tool_call("c1", "broken", &json!({})),
+            delta_tool_call("c1", "broken", &json!({"silent": false})),
             delta_finish("tool_calls"),
         ],
         vec![delta_text("Tool failed, sorry."), delta_finish("stop")],
@@ -769,7 +792,11 @@ async fn loop_serialises_image_result_textonly() {
     let mut registry = ToolRegistry::new();
     registry.register(image_tool()).unwrap();
     let scripts = vec![
-        vec![delta_tool_call("call-1", "view_image", &json!({}))],
+        vec![delta_tool_call(
+            "call-1",
+            "view_image",
+            &json!({"silent": false}),
+        )],
         vec![delta_text("done")],
     ];
     let llm = ScriptedLlm::new(scripts).multimodal(false);
@@ -795,7 +822,11 @@ async fn loop_serialises_image_result_multimodal() {
     let mut registry = ToolRegistry::new();
     registry.register(image_tool()).unwrap();
     let scripts = vec![
-        vec![delta_tool_call("call-1", "view_image", &json!({}))],
+        vec![delta_tool_call(
+            "call-1",
+            "view_image",
+            &json!({"silent": false}),
+        )],
         vec![delta_text("done")],
     ];
     let llm = ScriptedLlm::new(scripts).multimodal(true);
@@ -849,8 +880,10 @@ async fn silent_tool_sets_is_silent_true() {
     assert!(result.is_silent);
 }
 
+/// The inversion: a tool call with no `silent` argument silences the turn, even
+/// when a later iteration produces prose.
 #[tokio::test]
-async fn normal_tool_does_not_set_is_silent() {
+async fn tool_call_without_silent_argument_silences_the_turn() {
     let mut registry = ToolRegistry::new();
     registry.register(named_ok_tool("noop")).unwrap();
     let scripts = vec![
@@ -862,7 +895,109 @@ async fn normal_tool_does_not_set_is_silent() {
     ];
     let mut msgs = vec![user("hi")];
     let result = run(scripts, &registry, &mut msgs).await;
+    assert!(result.is_silent);
+    assert!(
+        result.final_content.is_empty(),
+        "silence implies no content"
+    );
+}
+
+#[tokio::test]
+async fn silent_true_argument_silences_the_turn() {
+    let mut registry = ToolRegistry::new();
+    registry.register(named_ok_tool("noop")).unwrap();
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "noop", &json!({"silent": true})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("done"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &registry, &mut msgs).await;
+    assert!(result.is_silent);
+}
+
+#[tokio::test]
+async fn silent_false_lets_the_turn_speak() {
+    let mut registry = ToolRegistry::new();
+    registry.register(named_ok_tool("noop")).unwrap();
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "noop", &json!({"silent": false})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("done"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &registry, &mut msgs).await;
     assert!(!result.is_silent);
+    assert_eq!(result.final_content, "done");
+}
+
+/// One `silent: false` anywhere in the turn is enough.
+#[tokio::test]
+async fn silent_false_on_any_call_lets_the_turn_speak() {
+    let mut registry = ToolRegistry::new();
+    registry.register(named_ok_tool("noop")).unwrap();
+    registry.register(named_ok_tool("other")).unwrap();
+    let scripts = vec![
+        vec![
+            delta_tool_call_at(0, "c1", "noop", &json!({})),
+            delta_tool_call_at(1, "c2", "other", &json!({"silent": false})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("done"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &registry, &mut msgs).await;
+    assert!(!result.is_silent);
+}
+
+/// `silent: false` in an earlier iteration still speaks after a later
+/// default-silent call — the opt-in latches for the turn.
+#[tokio::test]
+async fn speak_opt_in_latches_across_iterations() {
+    let mut registry = ToolRegistry::new();
+    registry.register(named_ok_tool("noop")).unwrap();
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "noop", &json!({"silent": false})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_tool_call("c2", "noop", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("done"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &registry, &mut msgs).await;
+    assert!(!result.is_silent);
+}
+
+/// Unparseable arguments cannot claim the opt-in: silence stays the default.
+#[tokio::test]
+async fn unparseable_arguments_stay_silent() {
+    let mut registry = ToolRegistry::new();
+    registry.register(named_ok_tool("noop")).unwrap();
+    let broken = LlmDelta {
+        content: String::new(),
+        tool_calls: vec![json!({
+            "index": 0,
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "noop", "arguments": "{not json"},
+        })],
+        finish_reason: None,
+    };
+    let scripts = vec![
+        vec![broken, delta_finish("tool_calls")],
+        vec![delta_text("done"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &registry, &mut msgs).await;
+    assert!(result.is_silent);
 }
 
 #[tokio::test]
@@ -904,4 +1039,48 @@ async fn silent_tool_does_not_call_on_iteration_end() {
     .unwrap();
     assert!(result.is_silent);
     assert!(recorder.events.lock().unwrap().is_empty());
+}
+
+/// A response calling a real tool AND `silent` must still persist the real
+/// call: the handler already committed its side effect, so history has to show
+/// it. Only the `silent` call and its private reasoning stay out.
+#[tokio::test]
+async fn silent_tool_still_persists_the_other_calls_in_its_iteration() {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(familiar_connect::tools::silent::build_silent_tool())
+        .unwrap();
+    registry.register(named_ok_tool("shift_focus")).unwrap();
+    let scripts = vec![vec![
+        delta_tool_call_at(0, "c1", "shift_focus", &json!({"channel_id": 7})),
+        delta_tool_call_at(1, "c2", "silent", &json!({"reasoning": "slip away"})),
+        delta_finish("tool_calls"),
+    ]];
+    let recorder = IterRecorder {
+        events: Mutex::new(Vec::new()),
+    };
+    let llm = ScriptedLlm::new(scripts);
+    let mut msgs = vec![user("hi")];
+    let result = agentic_loop(
+        &llm,
+        &mut msgs,
+        &registry,
+        &ctx(),
+        Some(&recorder),
+        DEFAULT_MAX_ITERATIONS,
+    )
+    .await
+    .unwrap();
+    assert!(result.is_silent);
+    let events = recorder.events.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "the shift must reach history");
+    let (assistant, tool_msgs) = &events[0];
+    let calls = assistant.tool_calls.clone().expect("tool calls persisted");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["function"]["name"], "shift_focus");
+    assert_eq!(tool_msgs.len(), 1);
+    assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("c1"));
+    // The private reasoning never reaches the hook.
+    let dump = format!("{assistant:?}{tool_msgs:?}");
+    assert!(!dump.contains("slip away"), "{dump}");
 }
