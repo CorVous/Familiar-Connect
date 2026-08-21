@@ -346,6 +346,52 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared `silent` flag
+// ---------------------------------------------------------------------------
+
+/// Schema property name of the shared per-turn silence flag every tool carries.
+pub const SILENT_ARG: &str = "silent";
+
+/// Model-facing wording for [`SILENT_ARG`]. One string for every tool, so the
+/// contract reads identically wherever the model meets it.
+const SILENT_ARG_DESCRIPTION: &str = "Silence is the default: calling this tool \
+     sends no reply this turn. Pass false to also say something this turn.";
+
+/// Inject [`SILENT_ARG`] into a tool's `parameters` schema.
+///
+/// [`Tool::new`] applies it, so a new tool cannot forget the flag. Never
+/// `required` — omitting it means silent. A non-object schema (or one whose
+/// `properties` is not an object) passes through untouched; nothing shipped
+/// builds one.
+#[must_use]
+pub fn with_silent_flag(mut parameters: Value) -> Value {
+    if let Some(obj) = parameters.as_object_mut()
+        && let Some(props) = obj
+            .entry("properties")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+    {
+        props.insert(
+            SILENT_ARG.to_owned(),
+            json!({
+                "type": "boolean",
+                "default": true,
+                "description": SILENT_ARG_DESCRIPTION,
+            }),
+        );
+    }
+    parameters
+}
+
+/// Whether a decoded argument object opts the turn into speech
+/// (`silent: false`). Anything else — absent, null, `true`, wrong type — is
+/// silence, the default.
+#[must_use]
+pub fn opts_into_speech(args: &Value) -> bool {
+    args.get(SILENT_ARG).and_then(Value::as_bool) == Some(false)
+}
+
 /// One callable tool exposed to the model.
 #[derive(Clone)]
 pub struct Tool {
@@ -362,7 +408,8 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// Construct a tool with the default `10.0`s timeout.
+    /// Construct a tool with the default `10.0`s timeout. The shared
+    /// [`SILENT_ARG`] flag is injected into `parameters` here.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
@@ -373,7 +420,7 @@ impl Tool {
         Self {
             name: name.into(),
             description: description.into(),
-            parameters,
+            parameters: with_silent_flag(parameters),
             handler,
             timeout_s: 10.0,
         }
@@ -544,11 +591,68 @@ mod tests {
                 "function": {
                     "name": "set_alarm",
                     "description": "Schedule a wake.",
-                    "parameters": params,
+                    "parameters": with_silent_flag(params),
                 },
             }
         ]);
         assert_eq!(Value::Array(registry.as_openai_tools()), expected);
+    }
+
+    // -- shared `silent` flag ------------------------------------------------
+
+    #[test]
+    fn tool_new_injects_silent_flag_defaulting_true() {
+        let tool = make_tool("echo");
+        let flag = &tool.parameters["properties"]["silent"];
+        assert_eq!(flag["type"], "boolean");
+        assert_eq!(flag["default"], json!(true));
+        assert!(
+            flag["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Pass false")
+        );
+    }
+
+    #[test]
+    fn silent_flag_is_never_required() {
+        let tool = Tool::new(
+            "echo",
+            "",
+            json!({"type": "object", "properties": {}, "required": ["x"]}),
+            noop_handler(),
+        );
+        assert_eq!(tool.parameters["required"], json!(["x"]));
+    }
+
+    #[test]
+    fn with_silent_flag_creates_missing_properties() {
+        let out = with_silent_flag(json!({}));
+        assert_eq!(out["properties"]["silent"]["type"], "boolean");
+    }
+
+    #[test]
+    fn with_silent_flag_keeps_sibling_properties() {
+        let out = with_silent_flag(json!({
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+        }));
+        assert_eq!(out["properties"]["reason"]["type"], "string");
+        assert_eq!(out["properties"]["silent"]["default"], json!(true));
+    }
+
+    #[test]
+    fn with_silent_flag_leaves_non_object_schema_alone() {
+        assert_eq!(with_silent_flag(json!("nope")), json!("nope"));
+    }
+
+    #[test]
+    fn opts_into_speech_only_on_explicit_false() {
+        assert!(opts_into_speech(&json!({"silent": false})));
+        assert!(!opts_into_speech(&json!({"silent": true})));
+        assert!(!opts_into_speech(&json!({})));
+        assert!(!opts_into_speech(&json!({"silent": null})));
+        assert!(!opts_into_speech(&json!({"silent": "false"})));
     }
 
     #[test]

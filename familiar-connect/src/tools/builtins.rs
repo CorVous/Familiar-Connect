@@ -249,6 +249,37 @@ mod tests {
         assert_eq!(tool.description, "POLICY_MARKER");
     }
 
+    /// Every shipped tool carries the shared `silent` flag, defaulting true —
+    /// the whole registry, so a new tool cannot ship without it.
+    #[test]
+    fn every_tool_carries_the_silent_flag() {
+        let registries = [
+            build_voice_registry(&scheduler(), true),
+            build_text_registry(
+                &scheduler(),
+                true,
+                "be brief",
+                &policy(),
+                true,
+                Some(Arc::new(FakeEngine)),
+                "go outside",
+            ),
+        ];
+        for reg in &registries {
+            for tool in reg.tools() {
+                let flag = &tool.parameters["properties"]["silent"];
+                assert_eq!(flag["type"], "boolean", "{}", tool.name);
+                assert_eq!(flag["default"], json!(true), "{}", tool.name);
+                let required = tool.parameters["required"].as_array();
+                assert!(
+                    !required.is_some_and(|r| r.iter().any(|v| v == "silent")),
+                    "{} marks silent required",
+                    tool.name
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "images")]
     #[test]
     fn text_registry_view_image_gated_on_image_tools() {

@@ -1,78 +1,23 @@
-//! Silent-sentinel detection for LLM reply streams (subsystem 06).
+//! Leaked-tool-call detection for LLM reply streams (subsystem 06).
 //!
-//! The system prompt tells the model to emit `<silent>` as its entire reply
-//! when staying silent. [`SilentDetector`] watches streamed deltas and decides
-//! as soon as possible, so a responder aborts before paying downstream cost
-//! (Discord post, TTS synthesis).
+//! Models occasionally emit a tool call as plain assistant *text*
+//! (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`) instead of
+//! calling it. [`StreamGate`] catches that *mid-stream* — before the raw XML
+//! reaches Discord or TTS (issue #109) — staying pending while the leading text
+//! could still complete a leak token, and latching *speak* once every one is
+//! ruled out. The confirmed-leak classification ([`classify_leading_leak`]) is
+//! shared with the return-time strip guard in [`crate::tools::agentic`], the
+//! single source of truth.
 //!
-//! Prefix-only: a stray `<silent>` mid-reply is content, not a gate.
+//! Prefix-only: a stray `silent(` mid-reply is content, not a gate.
 //!
-//! [`StreamGate`] widens that logic for the voice path: as well as `<silent>`
-//! it recognises a tool-call block the model occasionally leaks as plain text
-//! (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`) so the leak is
-//! caught *mid-stream* — before it reaches TTS (issue #109). The confirmed-leak
-//! classification ([`classify_leading_leak`]) is shared with the return-time
-//! strip guard in [`crate::tools::agentic`], the single source of truth.
+//! There is no text sentinel for silence. A turn goes quiet by calling a tool
+//! (every call is silent unless it passes `silent: false`); `<silent>` in model
+//! output is ordinary prose.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
-
-/// The model-output sentinel that gates a whole reply into silence.
-pub const SILENT_TOKEN: &str = "<silent>";
-
-/// Streaming inspector for the silent sentinel.
-///
-/// [`feed`](SilentDetector::feed) returns `Some(true)` once the leading
-/// non-whitespace matches [`SILENT_TOKEN`], `Some(false)` on mismatch, and
-/// `None` while undecided. The decision **latches** — further calls return the
-/// same value and ignore their argument.
-#[derive(Debug, Default)]
-pub struct SilentDetector {
-    buf: String,
-    decided: Option<bool>,
-}
-
-impl SilentDetector {
-    /// A fresh, undecided detector.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The latched decision: `Some(true)` silent, `Some(false)` speak, `None`
-    /// pending.
-    #[must_use]
-    pub const fn decided(&self) -> Option<bool> {
-        self.decided
-    }
-
-    /// Feed one streamed delta; returns the (possibly newly latched) decision.
-    pub fn feed(&mut self, delta: &str) -> Option<bool> {
-        if let Some(decided) = self.decided {
-            return Some(decided);
-        }
-        self.buf.push_str(delta);
-        let stripped = self.buf.trim_start();
-        if stripped.starts_with(SILENT_TOKEN) {
-            self.decided = Some(true);
-            return Some(true);
-        }
-        // Length compare in Unicode scalars (the token is ASCII, so multibyte
-        // content that reaches 8+ chars decides `false` either way).
-        if stripped.chars().count() >= SILENT_TOKEN.chars().count() {
-            // Enough non-whitespace seen to rule out the sentinel.
-            self.decided = Some(false);
-            return Some(false);
-        }
-        if !stripped.is_empty() && !SILENT_TOKEN.starts_with(stripped) {
-            // Diverged before reaching full length.
-            self.decided = Some(false);
-            return Some(false);
-        }
-        None
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Leaked-tool-call detection (shared with the return-time strip guard in
@@ -134,21 +79,21 @@ pub enum StreamDecision {
     Pending,
     /// Genuine prose — open the speak path.
     Speak,
-    /// The reply led with `<silent>` or a leaked `silent` call — stay silent.
+    /// The reply led with a leaked `silent` call — stay silent.
     Silent,
     /// The reply led with a leaked non-silent tool call — suppress to empty.
     Suppress,
 }
 
-/// Streaming gate for the voice reply path.
+/// Streaming gate for the reply paths that stream straight out (voice TTS, the
+/// tool-less text path).
 ///
-/// [`SilentDetector`] recognises only `<silent>`, latching *speak* the moment a
-/// leading `<invoke …` diverges at the second char — so a leaked tool-call block
-/// reaches TTS before the return-time guard runs (issue #109). `StreamGate`
-/// stays *pending* while the leading text could still complete a leak token
-/// (handling a token split across delta boundaries), latches *silent* /
-/// *suppress* on a confirmed leak, and only latches *speak* once every leak
-/// token is ruled out. `<silent>` semantics are preserved exactly (spec S1-S4).
+/// A naive prefix check latches *speak* the moment a leading `<invoke …`
+/// diverges at the second char — so a leaked tool-call block reaches TTS before
+/// the return-time guard runs (issue #109). `StreamGate` stays *pending* while
+/// the leading text could still complete a leak token (handling a token split
+/// across delta boundaries), latches *silent* / *suppress* on a confirmed leak,
+/// and only latches *speak* once every leak token is ruled out.
 #[derive(Debug, Default)]
 pub struct StreamGate {
     buf: String,
@@ -184,10 +129,6 @@ impl StreamGate {
         let stripped = self.buf.trim_start();
         if stripped.is_empty() {
             return StreamDecision::Pending;
-        }
-        // `<silent>` sentinel (spec S1-S4), including the split-delta case.
-        if stripped.starts_with(SILENT_TOKEN) {
-            return self.latch(StreamDecision::Silent);
         }
         // Confirmed leaked tool call (shared classifier). A leaked `<invoke …`
         // latches before its `name="…"` attribute has fully streamed; for the
@@ -229,11 +170,9 @@ fn leak_prefix_possible(stripped: &str) -> bool {
         .map_or_else(|| call_prefix_possible(stripped), xml_prefix_possible)
 }
 
-/// XML-family prefixes: `<silent>`, `<[ns:]invoke`, `<[ns:]tool_call`.
+/// XML-family prefixes: `<[ns:]invoke`, `<[ns:]tool_call`.
 fn xml_prefix_possible(after: &str) -> bool {
-    prefix_compatible(after, "silent>")
-        || local_name_possible(after, "invoke")
-        || local_name_possible(after, "tool_call")
+    local_name_possible(after, "invoke") || local_name_possible(after, "tool_call")
 }
 
 /// Whether `after` (the text after a leading `<`) could still complete
@@ -288,10 +227,7 @@ fn is_xml_name(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LeadingLeak, SILENT_TOKEN, SilentDetector, StreamDecision, StreamGate,
-        classify_leading_leak,
-    };
+    use super::{LeadingLeak, StreamDecision, StreamGate, classify_leading_leak};
 
     /// Feed a delta sequence through a fresh gate and return the final decision.
     fn gate_run(deltas: &[&str]) -> StreamDecision {
@@ -301,98 +237,6 @@ mod tests {
             last = g.feed(d);
         }
         last
-    }
-
-    #[test]
-    fn pending_until_first_chars() {
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed(""), None);
-        assert_eq!(d.decided(), None);
-    }
-
-    #[test]
-    fn detects_full_token_in_one_delta() {
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed(SILENT_TOKEN), Some(true));
-        assert_eq!(d.decided(), Some(true));
-    }
-
-    #[test]
-    fn detects_token_split_across_deltas() {
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed("<sil"), None);
-        assert_eq!(d.feed("ent>"), Some(true));
-    }
-
-    #[test]
-    fn tolerates_leading_whitespace() {
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed("   "), None);
-        assert_eq!(d.feed("<silent>"), Some(true));
-    }
-
-    #[test]
-    fn rejects_token_not_at_prefix() {
-        // Mid-reply `<silent>` is content, not a gate.
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed("Sure, "), Some(false));
-        assert_eq!(d.feed("<silent>"), Some(false));
-    }
-
-    #[test]
-    fn rejects_normal_content() {
-        let mut d = SilentDetector::new();
-        // 'H' diverges immediately from '<'.
-        assert_eq!(d.feed("Hello world"), Some(false));
-    }
-
-    #[test]
-    fn rejects_when_diverges_mid_token() {
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed("<sil"), None);
-        // 'k' diverges from expected 'e'.
-        assert_eq!(d.feed("k"), Some(false));
-    }
-
-    #[test]
-    fn decision_latches() {
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed("<silent>"), Some(true));
-        // Subsequent feeds return the cached decision without re-inspecting.
-        assert_eq!(d.feed("anything goes here"), Some(true));
-    }
-
-    #[test]
-    fn decision_latches_for_speak() {
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed("Hi "), Some(false));
-        assert_eq!(d.feed("<silent>"), Some(false));
-    }
-
-    #[test]
-    fn long_run_of_whitespace_stays_pending() {
-        // Pure whitespace can't decide; the empty-reply guard handles it.
-        let mut d = SilentDetector::new();
-        assert_eq!(d.feed("\n\n\n   "), None);
-        assert_eq!(d.decided(), None);
-    }
-
-    #[test]
-    fn parameterized() {
-        let cases: &[(&[&str], bool)] = &[
-            (&["<", "s", "i", "l", "e", "n", "t", ">"], true),
-            (&["  <silent>"], true),
-            (&["<silently I disagree>"], false),
-            (&["  Hello"], false),
-        ];
-        for (deltas, expected) in cases {
-            let mut d = SilentDetector::new();
-            let mut result: Option<bool> = None;
-            for delta in *deltas {
-                result = d.feed(delta);
-            }
-            assert_eq!(result, Some(*expected), "deltas={deltas:?}");
-        }
     }
 
     // -- classify_leading_leak (shared with the return-time strip guard) -----
@@ -427,18 +271,6 @@ mod tests {
     }
 
     // -- StreamGate ----------------------------------------------------------
-
-    #[test]
-    fn gate_silent_sentinel() {
-        assert_eq!(gate_run(&["<silent>"]), StreamDecision::Silent);
-    }
-
-    #[test]
-    fn gate_silent_split_across_deltas() {
-        let mut g = StreamGate::new();
-        assert_eq!(g.feed("<sil"), StreamDecision::Pending);
-        assert_eq!(g.feed("ent>"), StreamDecision::Silent);
-    }
 
     #[test]
     fn gate_leaked_invoke_read_channel_split_across_deltas_suppresses() {
@@ -490,6 +322,18 @@ mod tests {
         );
     }
 
+    /// The `<silent>` sentinel is gone: the literal string is now ordinary
+    /// prose and the gate opens on it like any other text.
+    #[test]
+    fn gate_silent_string_is_ordinary_prose() {
+        assert_eq!(gate_run(&["<silent>"]), StreamDecision::Speak);
+        assert_eq!(gate_run(&["  <silent>"]), StreamDecision::Speak);
+        assert_eq!(
+            gate_run(&["<sil", "ent> is not a rune anymore"]),
+            StreamDecision::Speak
+        );
+    }
+
     #[test]
     fn gate_normal_prose_speaks() {
         assert_eq!(gate_run(&["Hello there!"]), StreamDecision::Speak);
@@ -535,9 +379,9 @@ mod tests {
     }
 
     #[test]
-    fn gate_leading_whitespace_then_silent() {
+    fn gate_leading_whitespace_then_leaked_silent_call() {
         let mut g = StreamGate::new();
         assert_eq!(g.feed("   "), StreamDecision::Pending);
-        assert_eq!(g.feed("<silent>"), StreamDecision::Silent);
+        assert_eq!(g.feed("silent(reasoning=x)"), StreamDecision::Silent);
     }
 }

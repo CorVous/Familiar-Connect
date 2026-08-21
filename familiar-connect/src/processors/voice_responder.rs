@@ -38,7 +38,7 @@ use crate::sentence_streamer::SentenceStreamer;
 use crate::silence::{StreamDecision, StreamGate};
 use crate::support::text::is_speakable;
 use crate::tools::agentic::{
-    AgenticHooks, agentic_loop, guard_leaked_content, tool_content_as_text,
+    AgenticHooks, agentic_loop, calls_opt_into_speech, guard_leaked_content, tool_content_as_text,
 };
 use crate::tools::registry::ToolRegistry;
 use crate::tts_player::protocol::TtsPlayer;
@@ -582,11 +582,13 @@ impl VoiceInner {
                 gate_open: false,
                 first_delta_seen: false,
                 decision_logged: false,
+                saw_tool_calls: false,
+                speak_opt_in: false,
             }),
         };
         let llm: &dyn LlmClient = self.llm.as_ref();
 
-        if let Err(exc) = agentic_loop(
+        let result = match agentic_loop(
             llm,
             &mut messages,
             registry,
@@ -596,17 +598,27 @@ impl VoiceInner {
         )
         .await
         {
-            log_agentic_error(&exc);
-            return None;
-        }
+            Ok(r) => r,
+            Err(exc) => {
+                log_agentic_error(&exc);
+                return None;
+            }
+        };
 
         let mut st = hooks.state.lock().await;
-        // A leaked `<silent>` / tool-call block that led the stream (issue #109):
-        // abandon the turn as silent/empty so nothing is spoken or persisted.
+        // A leaked tool-call block that led the stream (issue #109): abandon the
+        // turn as silent/empty so nothing is spoken or persisted.
         if matches!(
             st.gate.decided(),
             Some(StreamDecision::Silent | StreamDecision::Suppress)
         ) {
+            return None;
+        }
+        // A silent turn (no call opted into speech) persists nothing — unless
+        // audio already went out, which cannot be recalled: what was said has to
+        // be recorded.
+        if result.is_silent && !st.gate_open {
+            self.log_silent(&scope.turn_id, channel_id);
             return None;
         }
         if st.gate_open {
@@ -778,6 +790,10 @@ fn log_agentic_error(exc: &anyhow::Error) {
 // Voice tool-path hooks
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent latches on one streaming turn, not a state enum"
+)]
 struct VoiceToolState {
     accumulated: String,
     streamer: SentenceStreamer,
@@ -786,6 +802,10 @@ struct VoiceToolState {
     gate_open: bool,
     first_delta_seen: bool,
     decision_logged: bool,
+    /// The turn has called at least one tool.
+    saw_tool_calls: bool,
+    /// Some call passed `silent: false` — latches for the turn.
+    speak_opt_in: bool,
 }
 
 struct VoiceToolHooks<'a> {
@@ -802,6 +822,11 @@ impl AgenticHooks for VoiceToolHooks<'_> {
             return;
         }
         let mut st = self.state.lock().await;
+        // A turn already known silent (a tool called with no `silent: false`)
+        // speaks nothing further — including a later iteration's prose.
+        if st.saw_tool_calls && !st.speak_opt_in {
+            return;
+        }
         if !st.first_delta_seen {
             get_voice_budget_recorder().record(&self.scope.turn_id, PHASE_LLM_FIRST_TOKEN, None);
             st.first_delta_seen = true;
@@ -844,6 +869,15 @@ impl AgenticHooks for VoiceToolHooks<'_> {
     }
 
     async fn on_before_tools(&self, assistant: &Message) {
+        let calls = assistant.tool_calls.as_deref().unwrap_or_default();
+        let speaking = {
+            let mut st = self.state.lock().await;
+            if !calls.is_empty() {
+                st.saw_tool_calls = true;
+                st.speak_opt_in |= calls_opt_into_speech(calls);
+            }
+            st.speak_opt_in || !st.saw_tool_calls
+        };
         {
             let mut st = self.state.lock().await;
             if st.gate_open {
@@ -859,12 +893,10 @@ impl AgenticHooks for VoiceToolHooks<'_> {
             }
         }
         // Filler backstop: an imminent tool call with no spoken content →
-        // speak the next filler phrase BEFORE the handler runs.
-        let has_calls = assistant
-            .tool_calls
-            .as_ref()
-            .is_some_and(|tc| !tc.is_empty());
-        if has_calls && assistant.content_str().trim().is_empty() {
+        // speak the next filler phrase BEFORE the handler runs. Skipped on a
+        // silent turn: nothing else will be said, so the filler would be the
+        // only thing heard.
+        if !calls.is_empty() && speaking && assistant.content_str().trim().is_empty() {
             let phrase = self.inner.next_filler_phrase();
             if !phrase.is_empty() && !self.scope.is_cancelled() {
                 self.inner.speak(&phrase, self.scope).await;

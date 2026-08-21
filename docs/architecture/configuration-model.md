@@ -124,11 +124,13 @@ Surface today:
   `provider_order`, `reasoning`, `think_prepend`, `tool_calling`,
   `image_tools`, `multimodal`). Schema and call-site →
   slot mapping at [Tuning — LLM slots](tuning.md#llm-slots).
-  `tool_calling` is wired end-to-end: when `true`, the responder for
-  that slot installs the in-process `ToolRegistry` (today: `set_alarm`,
-  `cancel_alarm`, and optionally `view_image`) and runs the agentic loop.
-  `image_tools` (default `false`) independently gates `view_image`
-  registration — the loop runs when either flag is set. `multimodal`
+  `tool_calling` is wired end-to-end: the responder for that slot
+  installs the in-process `ToolRegistry` (today: `set_alarm`,
+  `cancel_alarm`, `silent`, and optionally `view_image`) and runs the
+  agentic loop. It defaults to `true` and `false` is refused at load —
+  silence is a tool call, so a tool-less slot could never decline to
+  reply. `image_tools` (default `false`) independently gates
+  `view_image` registration. `multimodal`
   controls whether `ImageResult` tool-result messages include JPEG
   content blocks (`true`) or the text description only (`false`).
   See [Tool calling](overview.md#tool-calling) and
@@ -190,7 +192,7 @@ to `false`.
   most recency-biased slot, so behavioral nudges land hardest here.
   Rendered verbatim (markdown fine); empty string omits the block.
   The shipped default is a short roleplay-etiquette note nudging the
-  familiar to lean on `<silent>`. See
+  familiar to stay quiet unless it means to speak. See
   [Context pipeline — Final reminder](context-pipeline.md#final-reminder).
 - `[prompt].operating_mode_voice` / `.operating_mode_text` — the per-mode
   operating directive. **One source for two consumers**: the
@@ -256,11 +258,12 @@ OpenRouter model string, so config loading cannot validate them — and must not
 try, because that would make loading depend on the network. Two checks run
 after loading instead (`src/model_diagnostics.rs`).
 
-**Focus reachability** — immediate, no network. Both responder surfaces get a
-focus manager wired unconditionally, so `tool_calling = false` on `[llm.prose]`
-(text) or `[llm.fast]` (voice) makes `shift_focus` unreachable and pins that
-surface's channel focus for the whole session. Logged at `ERROR` at boot with
-the slot named.
+**Tool-calling reachability** — immediate, no network. Config loading already
+refuses `tool_calling = false`; this boot check is the backstop for a config
+built in process. Both responder surfaces get a focus manager wired
+unconditionally, so a tool-less slot could neither decline to reply nor reach
+`shift_focus`. Logged at `ERROR` at boot with the slot named, phrased as
+unsupported rather than merely limited.
 
 **Capability audit** — detached, best-effort. After the bus starts, a
 fire-and-forget task fetches `GET https://openrouter.ai/api/v1/models` and
@@ -268,8 +271,7 @@ compares each slot's declared flags against the model's metadata:
 
 | Declared | Model metadata | Level |
 |---|---|---|
-| `tool_calling = true` | `supported_parameters` lacks `tools` | `ERROR` |
-| `tool_calling = false` | `supported_parameters` has `tools` | `INFO` (advisory) |
+| `tool_calling = true` (always) | `supported_parameters` lacks `tools` | `ERROR` — the only fix is a different model |
 | `multimodal = true` (explicit) | `architecture.input_modalities` lacks `image` | `ERROR` |
 | `image_tools = true` | `input_modalities` lacks `image` | `ERROR` |
 | `image_tools = false` | `input_modalities` has `image` | `INFO` (advisory) |

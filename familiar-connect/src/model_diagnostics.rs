@@ -6,9 +6,10 @@
 //! - **Capability audit** — declared `[llm.<slot>]` capability flags vs. the
 //!   model metadata OpenRouter serves at `GET /models`. Fetched off a detached
 //!   task after boot; never gates readiness.
-//! - **Focus reachability** (#221) — `tool_calling = false` on a slot whose
-//!   surface has a focus manager wired. Needs no network, so it runs
-//!   unconditionally at composition time.
+//! - **Tool-calling reachability** (#221) — `tool_calling = false` on a slot
+//!   whose surface has a focus manager wired. Unsupported since silence became
+//!   a tool call; config loading refuses it, and this runs unconditionally at
+//!   composition time as a backstop. Needs no network.
 //!
 //! The same catalog also *drives* config: [`cache`] persists the last known
 //! good copy so the tri-state `multimodal` flag can auto-detect at boot off a
@@ -128,7 +129,8 @@ pub struct AuditReport {
 /// `multimodal` is tri-state: only an explicit `true` can contradict a
 /// text-only model, and an unset one needs no advisory because the catalog
 /// already decides it (`cache::apply_detected_multimodal`). What is left to
-/// advise on is `image_tools`, which stays a deliberate opt-in.
+/// advise on is `image_tools`, which stays a deliberate opt-in. `tool_calling`
+/// is mandatory, so only its unsupported direction is reported.
 #[must_use]
 pub fn compare_slot(
     slot: &str,
@@ -148,21 +150,17 @@ pub fn compare_slot(
         });
     };
 
-    match (cfg.tool_calling, supports_tools) {
-        (true, false) => push(
+    // Only the declared-unsupported direction is left: tool calling can no
+    // longer be switched off, so "the model supports tools" is never news.
+    if cfg.tool_calling && !supports_tools {
+        push(
             "tool_calling",
             MismatchKind::DeclaredUnsupported,
             format!(
-                "set [llm.{slot}].tool_calling = false, or pick a model whose \
-                 supported_parameters include '{TOOLS_PARAM}'"
+                "pick a model whose supported_parameters include \
+                 '{TOOLS_PARAM}' — [llm.{slot}].tool_calling cannot be turned off"
             ),
-        ),
-        (false, true) => push(
-            "tool_calling",
-            MismatchKind::SupportedNotDeclared,
-            format!("model supports tools; set [llm.{slot}].tool_calling = true to use them"),
-        ),
-        _ => {}
+        );
     }
 
     if supports_image {
@@ -234,8 +232,13 @@ fn lookup<'a>(catalog: &'a [ModelCapabilities], model: &str) -> Option<&'a Model
 // Focus reachability (#221)
 // ---------------------------------------------------------------------------
 
-/// `Some(message)` when `slot` cannot reach `shift_focus` because tool calling
-/// is off on a surface that has a focus manager wired.
+/// `Some(message)` when `slot` has tool calling off on a wired surface.
+///
+/// Unsupported, not merely limited: silence and `shift_focus` are both tool
+/// calls, so the familiar could neither decline to reply nor move.
+///
+/// Config loading refuses `tool_calling = false` outright; this stays as a
+/// boot-time backstop for a config built in process.
 ///
 /// `ping_fallback` marks a surface that can still move focus without a tool —
 /// today only text, via the direct-ping fallback in `TextResponder`. Voice has
@@ -250,20 +253,17 @@ pub fn focus_unreachable_message(
     (!slot.tool_calling).then(|| {
         let consequence = if ping_fallback {
             format!(
-                "so shift_focus is unreachable — the familiar can only follow a \
-                 direct ping to another {surface} channel, never move on its own \
-                 judgement"
+                "and can only follow a direct ping to another {surface} channel, \
+                 never move on its own judgement"
             )
         } else {
-            format!(
-                "so shift_focus is unreachable and the {surface} channel focus is \
-                 fixed for the session"
-            )
+            format!("and the {surface} channel focus is fixed for the session")
         };
         format!(
-            "[llm.{slot_name}].tool_calling = false disables every tool call on the \
-             {surface} surface, {consequence} — set [llm.{slot_name}].tool_calling = \
-             true to let the familiar change channels"
+            "[llm.{slot_name}].tool_calling = false is unsupported: silence and \
+             shift_focus are both tool calls, so the {surface} surface can never \
+             decline to reply {consequence} — set [llm.{slot_name}].tool_calling \
+             = true"
         )
     })
 }

@@ -293,6 +293,38 @@ fn reasoning_omitted_means_none() {
     assert!(cfg.llm.get("prose").unwrap().reasoning.is_none());
 }
 
+// -- tool_calling is mandatory ----------------------------------------------
+
+#[test]
+fn tool_calling_defaults_true() {
+    let cfg = load_missing_target();
+    for slot in ["fast", "prose", "background"] {
+        assert!(
+            cfg.llm.get(slot).unwrap().tool_calling,
+            "slot {slot} defaulted tool calling off"
+        );
+    }
+}
+
+/// Silence is a tool call now, so a tool-less slot can never decline to reply.
+/// The refusal is explicit rather than a silent degradation.
+#[test]
+fn tool_calling_false_is_refused() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"m\"\ntool_calling = false\n"),
+        "[llm.prose].tool_calling = false is unsupported: silence and every \
+         other decision the familiar declines to speak for are tool calls, so \
+         a slot without tool calling can never stay quiet — remove the key (it \
+         defaults to true) or set [llm.prose].tool_calling = true",
+    );
+}
+
+#[test]
+fn tool_calling_true_is_accepted() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\ntool_calling = true\n");
+    assert!(cfg.llm.get("prose").unwrap().tool_calling);
+}
+
 #[test]
 fn sampling_params_parsed() {
     let cfg = load_ok(
@@ -373,20 +405,11 @@ fn reasoning_must_be_string() {
 }
 
 #[test]
-fn tool_calling_parsed() {
-    let cfg = load_ok(
-        "[llm.background]\nmodel = \"m\"\ntool_calling = true\n[llm.fast]\nmodel = \"m\"\ntool_calling = false\n",
-    );
-    assert!(cfg.llm.get("background").unwrap().tool_calling);
-    assert!(!cfg.llm.get("fast").unwrap().tool_calling);
-}
-
-#[test]
-fn tool_calling_omitted_defaults_false() {
+fn tool_calling_omitted_defaults_true() {
     let defaults =
         "[llm.fast]\nmodel = \"x\"\n[llm.prose]\nmodel = \"x\"\n[llm.background]\nmodel = \"x\"\n";
     let cfg = load_custom(None, defaults).unwrap();
-    assert!(!cfg.llm.get("prose").unwrap().tool_calling);
+    assert!(cfg.llm.get("prose").unwrap().tool_calling);
 }
 
 #[test]
@@ -409,7 +432,7 @@ fn unknown_tts_provider_rejected() {
 #[test]
 fn post_history_instructions_default_from_profile() {
     let cfg = load_ok("");
-    assert!(cfg.post_history_instructions.contains("<silent>"));
+    assert!(cfg.post_history_instructions.contains("silent()"));
     assert!(!cfg.post_history_instructions.trim().is_empty());
 }
 
@@ -494,8 +517,9 @@ fn voice_tool_ack_default_from_profile() {
     let cfg = load_ok("");
     assert_eq!(
         cfg.voice_tool_ack,
-        "Always speak at least a brief acknowledgement before calling a tool. \
-         Never reply with a tool call alone."
+        "When you call a tool and still mean to be heard, pass `silent: false` \
+         and speak at least a brief acknowledgement in the same reply. A tool \
+         call on its own is silent \u{2014} nothing is spoken."
     );
 }
 

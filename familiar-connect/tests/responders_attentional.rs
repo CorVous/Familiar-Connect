@@ -24,8 +24,8 @@ use serde_json::json;
 
 use support::{
     CapturingLlm, CapturingSend, RecordingBus, ScriptedLlm, ScriptedToolLlm, TestFocusManager,
-    activity_start, discord_text_event, finish, make_assembler, store, tc_delta, text_delta,
-    text_payload, voice_final,
+    activity_start, discord_text_event, finish, make_assembler, store, tc_delta, tc_delta_at,
+    text_delta, text_payload, voice_final,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -313,13 +313,14 @@ async fn voice_no_focus_manager_backward_compat() {
 
 #[tokio::test]
 async fn voice_end_turn_not_called_on_silent() {
+    // A leaked `silent(…)` call is the bare path's only route to silence now.
     let s = store();
     let fm = Arc::new(TestFocusManager::focused(200));
     let player = Arc::new(MockTTSPlayer::new(1, 5));
     let assembler = make_assembler(Arc::clone(&s));
     let r = VoiceResponder::new(
         assembler,
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&["silent(reasoning=\"not for me\")"])),
         player.clone(),
         s,
         Arc::new(TurnRouter::new()),
@@ -364,6 +365,8 @@ fn real_focus_responder(
 
     let mut reg = ToolRegistry::new();
     reg.register(build_shift_focus_tool()).unwrap();
+    reg.register(familiar_connect::tools::silent::build_silent_tool())
+        .unwrap();
 
     let fm_ctx = Arc::clone(&fm);
     let store_ctx = Arc::clone(&s);
@@ -388,15 +391,25 @@ fn real_focus_responder(
     (r, fm, s)
 }
 
+/// A silent `shift_focus` call — no `silent: false`, so the turn stays quiet.
 fn shift_tc(channel_id: i64) -> familiar_connect::llm::LlmDelta {
     tc_delta("sf-1", "shift_focus", json!({ "channel_id": channel_id }))
+}
+
+/// `shift_focus` that also opts the turn into speaking.
+fn shift_tc_speaking(channel_id: i64) -> familiar_connect::llm::LlmDelta {
+    tc_delta(
+        "sf-1",
+        "shift_focus",
+        json!({ "channel_id": channel_id, "silent": false }),
+    )
 }
 
 #[tokio::test]
 async fn silent_shift_focus_moves_immediately() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
         vec![shift_tc(200), finish("tool_calls")],
-        vec![text_delta("<silent>"), finish("stop")],
+        vec![text_delta("moved"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
     let (r, fm, _) = real_focus_responder(llm, send.clone());
@@ -414,7 +427,7 @@ async fn silent_shift_focus_moves_immediately() {
 async fn silent_peek_then_old_channel_stages() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
         vec![shift_tc(200), finish("tool_calls")],
-        vec![text_delta("<silent>"), finish("stop")],
+        vec![text_delta("peeked"), finish("stop")],
         vec![text_delta("should not send"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
@@ -443,10 +456,41 @@ async fn silent_peek_then_old_channel_stages() {
     assert!(ping.consumed_at.is_none());
 }
 
+/// The #221 regression: a response calling `shift_focus` AND `silent` shifted
+/// focus globally and then discarded the whole iteration, so the move left no
+/// trace in history. The shift must be recorded even though the turn is silent.
+#[tokio::test]
+async fn shift_focus_plus_silent_moves_focus_and_records_the_shift() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        tc_delta("sf-1", "shift_focus", json!({ "channel_id": 200 })),
+        tc_delta_at(1, "si-1", "silent", json!({"reasoning": "slip away"})),
+        finish("tool_calls"),
+    ]]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, s) = real_focus_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    assert!(send.calls().is_empty());
+
+    let turns = s.sync().recent("fam", 100, 20, None, None).unwrap();
+    assert!(
+        turns.iter().any(|t| t.role == "assistant"),
+        "the shift's assistant turn is recorded: {turns:?}"
+    );
+    let tool_turns: Vec<&_> = turns.iter().filter(|t| t.role == "tool").collect();
+    assert_eq!(tool_turns.len(), 1, "only the shift result: {tool_turns:?}");
+    assert!(tool_turns[0].content.contains("\"channel_id\":200"));
+    // The silent tool's own call and private reasoning stay out of history.
+    assert!(turns.iter().all(|t| !t.content.contains("slip away")));
+    assert!(turns.iter().all(|t| !t.content.contains("__SILENT__")));
+}
+
 #[tokio::test]
 async fn shift_focus_with_reply_posts_to_new_channel() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
-        vec![shift_tc(200), finish("tool_calls")],
+        vec![shift_tc_speaking(200), finish("tool_calls")],
         vec![text_delta("hello over here"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
@@ -465,7 +509,7 @@ async fn wake_reply_after_shift_posts_to_shifted_channel() {
     // Wake = shift-or-silent (#170): a wake turn that DOES shift focus this turn
     // is delivered — to the channel it shifted to (per-turn routing).
     let llm = Arc::new(ScriptedToolLlm::new(vec![
-        vec![shift_tc(200), finish("tool_calls")],
+        vec![shift_tc_speaking(200), finish("tool_calls")],
         vec![text_delta("over here now"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());

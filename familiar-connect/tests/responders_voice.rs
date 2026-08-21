@@ -301,7 +301,7 @@ async fn trailing_reminder_carries_post_history() {
     let player = Arc::new(MockTTSPlayer::new(5, 5));
     let r = {
         let (r, _) = voice_responder(Arc::clone(&s), llm.clone(), player);
-        r.with_post_history_instructions("# Etiquette\n\nPrefer <silent>.")
+        r.with_post_history_instructions("# Etiquette\n\nKeep it brief.")
     };
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
         .await
@@ -342,13 +342,41 @@ async fn respond_decision_logged_once() {
     assert!(out.contains("t-1"));
 }
 
+/// The tool-less path's only route to silence: a `silent` call the model leaked
+/// as plain text. There is no text sentinel.
+const SILENT_LEAK: &str = "silent(reasoning=\"not addressed to me\")";
+
+/// `<silent>` used to gate the whole reply. It is ordinary prose now.
 #[tokio::test]
-async fn silent_sentinel_skips_tts_and_assistant_turn() {
+async fn literal_silent_string_is_spoken_like_any_other_text() {
     let s = store();
     let player = Arc::new(MockTTSPlayer::new(5, 5));
     let (r, _) = voice_responder(
         Arc::clone(&s),
         Arc::new(ScriptedLlm::new(&["<silent>"])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert!(
+        player.calls().iter().any(|c| c.0.contains("<silent>")),
+        "{:?}",
+        player.calls()
+    );
+}
+
+#[tokio::test]
+async fn leaked_silent_call_skips_tts_and_assistant_turn() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         player.clone(),
     );
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
@@ -374,7 +402,7 @@ async fn silent_sentinel_skips_tts_and_assistant_turn() {
 async fn silent_decision_notes_silent_abandon_status() {
     let s = store();
     let player = Arc::new(MockTTSPlayer::new(5, 5));
-    let llm = Arc::new(ScriptedLlm::new(&["<silent>"]));
+    let llm = Arc::new(ScriptedLlm::new(&[SILENT_LEAK]));
     let (r, _) = voice_responder(Arc::clone(&s), llm.clone(), player.clone());
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
         .await
@@ -409,7 +437,7 @@ async fn silent_split_across_deltas_gates() {
     let player = Arc::new(MockTTSPlayer::new(1, 5));
     let (r, _) = voice_responder(
         Arc::clone(&s),
-        Arc::new(ScriptedLlm::new(&["<sil", "ent>"])),
+        Arc::new(ScriptedLlm::new(&["sil", "ent(reasoning=x)"])),
         player.clone(),
     );
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
@@ -680,9 +708,9 @@ async fn barge_in_during_stream_prevents_speech() {
     }
 }
 
-/// A stream gated between the two deltas: it yields `<sil` (leaving the silent
-/// detector undecided), signals `d1`, then parks until `release`, then yields
-/// `ent>`. This makes the "cancel lands between deltas" scenario deterministic
+/// A stream gated between the two deltas: it yields `<sil` (an ambiguous
+/// prefix, leaving the stream gate undecided), signals `d1`, then parks until
+/// `release`, then yields `ent>`. This makes the "cancel lands between deltas" scenario deterministic
 /// under any test-runner load (no wall-clock racing).
 struct GatedLlm {
     d1_flag: Arc<AtomicBool>,
@@ -986,7 +1014,7 @@ impl LlmClient for BarrierLlm {
             .await;
         }
         self.active.fetch_sub(1, Ordering::SeqCst);
-        let content = if already { "<silent>" } else { "Sure thing." };
+        let content = if already { SILENT_LEAK } else { "Sure thing." };
         Ok(familiar_connect::llm::LlmStream::new(stream::once(
             async move { Ok(text_delta(content)) },
         )))
@@ -1276,7 +1304,7 @@ async fn silent_log_names_server_and_channel() {
     );
     let (r, _) = voice_responder(
         store(),
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         Arc::new(MockTTSPlayer::new(5, 5)),
     );
     let r = r.with_focus_manager(fm);
