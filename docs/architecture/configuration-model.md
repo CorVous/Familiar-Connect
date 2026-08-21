@@ -202,6 +202,12 @@ to `false`.
 - `[prompt].voice_tool_ack` — voice-tier nudge to speak before calling a
   tool. Rendered only when the voice slot actually has tool calling; blank
   omits it. See [Overview — voice tool ordering](overview.md#tool-calling).
+- `[prompt].shift_focus_coaching` — the clause spliced onto the unread
+  digest after an em dash (`There are new messages in #x (id N) (3) —
+  <this>`). One line, no leading dash; rendered only when the text slot
+  has tool calling, and blank leaves the digest a plain statement of
+  fact. See [Context pipeline — Final
+  reminder](context-pipeline.md#final-reminder).
 - `[prompt].start_activity_description` — the when-to-go policy carried by
   the `start_activity` tool description. Roleplay guidance rather than API
   contract, so it is config; the activity enum and its availability hints

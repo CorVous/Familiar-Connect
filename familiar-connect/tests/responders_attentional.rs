@@ -391,6 +391,48 @@ fn real_focus_responder(
     (r, fm, s)
 }
 
+/// Drive one tool-enabled text turn with an unread sibling channel and return
+/// the trailing system message (the one carrying the unread digest).
+async fn trailing_with_coaching(coaching: &str) -> String {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        text_delta("ok"),
+        finish("stop"),
+    ]]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, _fm, _s) = real_focus_responder(Arc::clone(&llm), send);
+    let r = r.with_shift_focus_coaching(coaching);
+    // Stage traffic in the unfocused sibling so the digest is non-empty.
+    r.handle(
+        &discord_text_event(text_payload(200, "chatter"), "e-0"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    llm.calls()[0].last().unwrap().content_str()
+}
+
+#[tokio::test]
+async fn shipped_default_shift_focus_coaching_reaches_the_trailing_reminder() {
+    let trailing = trailing_with_coaching(&support::default_config().shift_focus_coaching).await;
+    assert!(
+        trailing.contains(
+            "\u{2014} use shift_focus if one pulls your attention: it moves you \
+             there quietly, or pass silent: false to arrive and speak."
+        ),
+        "{trailing}"
+    );
+}
+
+#[tokio::test]
+async fn overridden_shift_focus_coaching_reaches_the_trailing_reminder() {
+    let trailing = trailing_with_coaching("COACH_MARKER").await;
+    assert!(trailing.contains("COACH_MARKER"), "{trailing}");
+    assert!(!trailing.contains("pulls your attention"), "{trailing}");
+}
+
 /// A silent `shift_focus` call — no `silent: false`, so the turn stays quiet.
 fn shift_tc(channel_id: i64) -> familiar_connect::llm::LlmDelta {
     tc_delta("sf-1", "shift_focus", json!({ "channel_id": channel_id }))

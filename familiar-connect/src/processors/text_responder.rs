@@ -176,6 +176,7 @@ pub struct TextResponder {
     tool_registry: Option<Arc<ToolRegistry>>,
     tool_context_factory: Option<ToolContextFactory>,
     post_history_instructions: String,
+    shift_focus_coaching: String,
     mode_instructions: HashMap<String, String>,
     display_tz: String,
     focus_manager: Option<Arc<dyn FocusManagerApi>>,
@@ -211,6 +212,7 @@ impl TextResponder {
             tool_registry: None,
             tool_context_factory: None,
             post_history_instructions: String::new(),
+            shift_focus_coaching: String::new(),
             mode_instructions: HashMap::new(),
             display_tz: "UTC".to_owned(),
             focus_manager: None,
@@ -243,6 +245,13 @@ impl TextResponder {
     #[must_use]
     pub fn with_post_history_instructions(mut self, text: impl Into<String>) -> Self {
         self.post_history_instructions = text.into();
+        self
+    }
+    /// Set the unread-digest `shift_focus` clause
+    /// (`[prompt].shift_focus_coaching`); empty = omitted.
+    #[must_use]
+    pub fn with_shift_focus_coaching(mut self, text: impl Into<String>) -> Self {
+        self.shift_focus_coaching = text.into();
         self
     }
     /// Set the per-mode operating directives (`[prompt].operating_mode_*`);
@@ -778,6 +787,7 @@ impl TextResponder {
         let mut head = FinalReminder::new("text")
             .include_time(false)
             .tools_enabled(tool_mode)
+            .shift_focus_coaching(&self.shift_focus_coaching)
             .channel_names(ch_names.clone())
             .guild_names(gn_names.clone());
         if let Some(fc) = focus_ch {
@@ -803,6 +813,7 @@ impl TextResponder {
             .include_mode_instruction(true)
             .mode_instructions(self.mode_instructions.clone())
             .tools_enabled(tool_mode)
+            .shift_focus_coaching(&self.shift_focus_coaching)
             .post_history_instructions(&self.post_history_instructions)
             .channel_names(ch_names)
             .guild_names(gn_names);
