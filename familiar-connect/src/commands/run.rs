@@ -148,7 +148,7 @@ pub fn resolve_familiar_root(
 ///
 /// The composition root calls this BEFORE opening the history store / FTS: a
 /// misconfigured embedding backend (e.g. `fastembed` without the `local-embed`
-/// extra) must refuse to start rather than wipe the FTS and then die deep in
+/// feature) must refuse to start rather than wipe the FTS and then die deep in
 /// `create_projectors` under a misleading Discord-token hint. The backend error
 /// (which already names the real fix) is propagated, never swallowed into
 /// `None`.
@@ -535,7 +535,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     // rebuilds the history store / FTS). A misconfigured backend must refuse to
     // start here, while nothing has been mutated — not fail deep in
     // `create_projectors` after the store is already open. Its error names the
-    // real fix (e.g. the `local-embed` extra), so surface it verbatim.
+    // real fix (e.g. the `local-embed` feature), so surface it verbatim.
     let embedder = match resolve_embedder(&config.embedding) {
         Ok(embedder) => embedder,
         Err(err) => {
@@ -1498,17 +1498,17 @@ mod tests {
     /// The composition root must surface the embedder feature-gap as an error
     /// (which names the `local-embed` fix), not swallow it into `None` and let
     /// startup proceed to mutate the store. The default test build lacks the
-    /// `local-embed` extra, so `fastembed` genuinely has no backend here.
+    /// `local-embed` feature, so `fastembed` genuinely has no backend here.
     #[cfg(not(feature = "local-embed"))]
     #[test]
-    fn resolve_embedder_fastembed_without_extra_errors() {
+    fn resolve_embedder_fastembed_without_feature_errors() {
         let config = EmbeddingConfig {
             backend: "fastembed".to_owned(),
             ..EmbeddingConfig::default()
         };
         let err = resolve_embedder(&config)
             .err()
-            .expect("fastembed without the local-embed extra must fail fast");
+            .expect("fastembed without the local-embed feature must fail fast");
         assert!(
             err.to_string().contains("local-embed"),
             "error must name the real fix, got: {err}"
