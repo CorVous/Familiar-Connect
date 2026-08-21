@@ -289,8 +289,8 @@ mod tests {
             _cache_dir: Option<&str>,
         ) -> anyhow::Result<Box<dyn TextModel>> {
             anyhow::bail!(
-                "FastEmbedEmbedder requires the 'local-embed' extra. \
-                 Install with `uv sync --extra local-embed`."
+                "FastEmbedEmbedder requires the 'local-embed' feature. \
+                 Rebuild with `cargo build --release --features local-embed`."
             )
         }
     }
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_extra_surfaces_pointed_error() {
+    async fn missing_feature_surfaces_pointed_error() {
         let e = with_loader("BAAI/bge-small-en-v1.5", None, Arc::new(FailingLoader));
         let err = e
             .embed(&["any text".to_owned()])

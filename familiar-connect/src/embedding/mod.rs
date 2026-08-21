@@ -57,10 +57,10 @@ pub enum EmbeddingError {
         valid: String,
     },
 
-    /// The `fastembed` backend was selected without the `local-embed` extra.
+    /// The `fastembed` backend was selected without the `local-embed` feature.
     #[error(
-        "embedding backend 'fastembed' requires the 'local-embed' extra. \
-         Install with `uv sync --extra local-embed`."
+        "embedding backend 'fastembed' requires the 'local-embed' feature. \
+         Rebuild with `cargo build --release --features local-embed`."
     )]
     FastembedMissing,
 }
