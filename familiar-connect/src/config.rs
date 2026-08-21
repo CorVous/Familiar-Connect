@@ -65,12 +65,13 @@ const DEFAULT_PROJECTORS: [&str; 5] = [
     "reflection",
     "fact_supersede",
 ];
-const PROMPT_FIELDS: [&str; 14] = [
+const PROMPT_FIELDS: [&str; 15] = [
     "post_history_instructions",
     "image_description_constraints",
     "operating_mode_voice",
     "operating_mode_text",
     "voice_tool_ack",
+    "shift_focus_coaching",
     "start_activity_description",
     "rolling_summary_system",
     "reflection_system",
@@ -725,6 +726,8 @@ pub struct CharacterConfig {
     pub operating_mode_text: String,
     /// Voice-tier nudge to speak before calling a tool.
     pub voice_tool_ack: String,
+    /// `shift_focus` clause spliced onto the unread digest.
+    pub shift_focus_coaching: String,
     /// Roleplay guidance carried by `start_activity`'s tool description.
     pub start_activity_description: String,
     /// Static rolling-summary instruction text.
@@ -792,6 +795,7 @@ impl Default for CharacterConfig {
             operating_mode_voice: String::new(),
             operating_mode_text: String::new(),
             voice_tool_ack: String::new(),
+            shift_focus_coaching: String::new(),
             start_activity_description: String::new(),
             rolling_summary_system: String::new(),
             reflection_system: String::new(),
@@ -1129,6 +1133,7 @@ fn parse_character_config(
         operating_mode_voice: prompt.operating_mode_voice,
         operating_mode_text: prompt.operating_mode_text,
         voice_tool_ack: prompt.voice_tool_ack,
+        shift_focus_coaching: prompt.shift_focus_coaching,
         start_activity_description: prompt.start_activity_description,
         rolling_summary_system: prompt.rolling_summary_system,
         reflection_system: prompt.reflection_system,
@@ -2503,6 +2508,7 @@ struct PromptFields {
     operating_mode_voice: String,
     operating_mode_text: String,
     voice_tool_ack: String,
+    shift_focus_coaching: String,
     start_activity_description: String,
     rolling_summary_system: String,
     reflection_system: String,
@@ -2532,6 +2538,7 @@ fn parse_prompt_config(raw: &Table) -> Result<PromptFields, ConfigError> {
         operating_mode_voice: get("operating_mode_voice")?,
         operating_mode_text: get("operating_mode_text")?,
         voice_tool_ack: get("voice_tool_ack")?,
+        shift_focus_coaching: get("shift_focus_coaching")?,
         start_activity_description: get("start_activity_description")?,
         rolling_summary_system: get("rolling_summary_system")?,
         reflection_system: get("reflection_system")?,

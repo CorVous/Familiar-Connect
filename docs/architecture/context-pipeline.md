@@ -838,20 +838,37 @@ When a `FocusManager` is wired, the block also carries a prose
 `channel_names`:
 
 > Your attention is currently on #general. There is a new message in
-> #other-channel — use shift_focus if it pulls your attention.
+> #other-channel (id 456) — use shift_focus if one pulls your
+> attention: it moves you there quietly, or pass silent: false to
+> arrive and speak.
 
 The focus clause names the active channel; the unread clause lists
 channels with staged (unconsumed) turns and nudges toward the
-`shift_focus` tool. Counts > 1 render as `#channel (N)`. Both clauses
-omit when their source is empty. This is the model-facing surface of
-the attentional stream (see [below](#attentional-stream)).
+`shift_focus` tool. Every unread entry carries its numeric id, because
+that id is what `shift_focus` takes as an argument. Counts > 1 render
+as `#channel (id N) (2)`; DMs render as `DM from <name> (id N)`, and a
+channel the gateway name cache missed as `unnamed channel (id N)` —
+never a bare `#<snowflake>`, which would claim the channel is *named*
+after its id (issue #222). Digest ids come from staged turns in the
+history store while names come from the gateway cache, so an id with
+no name is routine rather than exceptional. Both clauses omit when
+their source is empty. This is the model-facing surface of the
+attentional stream (see [below](#attentional-stream)).
 
-The `— use shift_focus if it pulls your attention` half of the unread
-clause is gated on `tools_enabled`, which both responders set from the
-slot's own tool mode. A slot that cannot call tools sees the plain
-`There is a new message in #other-channel.` instead: coaching a model
-toward a tool it has no way to call only invites it to type the call
-out as prose (issue #221).
+The trailing coaching half of the unread clause is
+`[prompt].shift_focus_coaching`, spliced in after an em dash. It is
+gated on `tools_enabled`, which both responders set from the slot's own
+tool mode; a blank value drops it too. A slot that cannot call tools
+sees the plain `There is a new message in #other-channel (id 456).`
+instead: coaching a model toward a tool it has no way to call only
+invites it to type the call out as prose (issue #221).
+
+The shipped wording names both ways to use the tool. Since every tool
+call defaults to `silent: true`, a bare `shift_focus` is "move and say
+nothing" — strictly `silent` plus a side effect — so a model told only
+to "use shift_focus if it pulls your attention" reaches for the plainly
+described `silent` every time and never shifts. Spelling out the quiet
+move *and* the `silent: false` opt-in makes the choice legible.
 
 Both responders also append a *second* copy of the same block as a
 trailing `system` message, after recent history, with
@@ -1186,9 +1203,20 @@ on ready, an in-flight activity re-asserts its away presence afterwards,
 so the online focus line never clobbers an idle/dnd status.
 
 A channel that still misses the cache never renders as a bare snowflake:
-labels read `unnamed channel (id <cid>)` (presence, focus line) or
-`#unnamed(<cid>)` (logs, tool labels), which says *name unknown* instead
-of implying the channel is named after its id.
+labels read `unnamed channel (id <cid>)` (presence, focus line, unread
+digest) or `#unnamed(<cid>)` (logs, tool labels), which says *name
+unknown* instead of implying the channel is named after its id.
+
+Naming is guild-driven, not subscription-driven: nothing walks the
+subscription list to fill gaps, and there is no REST fetch when the
+cache misses. `message_create` carries no channel name either (the DM
+branch is the exception — it names the channel after the peer). So a
+channel can stage unread turns, and therefore appear in the digest,
+while never having been named: threads and forum posts are absent from
+`Guild.channels` and so are never named by the `guild_create` path, and
+a guild whose `guild_create` never arrives (joined out of band, resume
+gap, shard still working through the post-READY burst) leaves all of
+its channels nameless until a rename event lands.
 
 Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N
 missed=N` on a text shift, `[Focus] guild=… named=N` (debug) per naming
