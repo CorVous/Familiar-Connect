@@ -379,6 +379,11 @@ greetings         = []
 # voice_tool_ack: voice-tier nudge to speak before calling a tool. Rendered
 # only when the voice slot actually has tools; blank omits it.
 #
+# shift_focus_coaching: the clause spliced onto the unread digest after an em
+# dash ("There are new messages in #x (id N) (3) — <this>"). ONE line, no
+# leading dash. Rendered only when the text slot has tools; blank leaves the
+# digest a plain statement of fact.
+#
 # start_activity_description: the when-to-go policy carried by the
 # `start_activity` tool description. Roleplay guidance, not API contract — the
 # activity enum and its availability hints stay code-built from the catalog.
@@ -424,6 +429,10 @@ voice_tool_ack = """
 When you call a tool and still mean to be heard, pass `silent: false` and \
 speak at least a brief acknowledgement in the same reply. A tool call on its \
 own is silent — nothing is spoken.
+"""
+shift_focus_coaching = """
+use shift_focus if one pulls your attention: it moves you there quietly, or \
+pass silent: false to arrive and speak.
 """
 start_activity_description = """
 Head out and do something away from the screen for a while. Use when the \

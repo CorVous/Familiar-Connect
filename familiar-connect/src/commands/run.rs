@@ -1188,6 +1188,7 @@ async fn async_main(
     )
     .with_tools(text_tool_registry, text_factory)
     .with_post_history_instructions(familiar.config.post_history_instructions.clone())
+    .with_shift_focus_coaching(familiar.config.shift_focus_coaching.clone())
     .with_mode_instructions(operating_modes(&familiar.config))
     .with_display_tz(familiar.config.display_tz.clone())
     .with_focus_manager(focus_manager.clone() as Arc<dyn FocusManagerApi>)

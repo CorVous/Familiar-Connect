@@ -530,6 +530,22 @@ fn voice_tool_ack_override() {
 }
 
 #[test]
+fn shift_focus_coaching_default_from_profile() {
+    let cfg = load_ok("");
+    assert_eq!(
+        cfg.shift_focus_coaching,
+        "use shift_focus if one pulls your attention: it moves you there \
+         quietly, or pass silent: false to arrive and speak."
+    );
+}
+
+#[test]
+fn shift_focus_coaching_override() {
+    let cfg = load_ok("[prompt]\nshift_focus_coaching = \"go look\"\n");
+    assert_eq!(cfg.shift_focus_coaching, "go look");
+}
+
+#[test]
 fn start_activity_description_default_from_profile() {
     let cfg = load_ok("");
     // Same budget + policy contract the tool schema used to pin in code.
@@ -598,6 +614,7 @@ fn relocated_prompts_absent_default_empty() {
     assert!(cfg.operating_mode_voice.is_empty());
     assert!(cfg.operating_mode_text.is_empty());
     assert!(cfg.voice_tool_ack.is_empty());
+    assert!(cfg.shift_focus_coaching.is_empty());
     assert!(cfg.start_activity_description.is_empty());
     assert!(cfg.rolling_summary_system.is_empty());
     assert!(cfg.reflection_system.is_empty());
