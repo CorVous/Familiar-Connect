@@ -11,6 +11,7 @@ use familiar_connect::bus::router::TurnRouter;
 use familiar_connect::bus::topics::TOPIC_DISCORD_TEXT;
 use familiar_connect::focus::FocusManager;
 use familiar_connect::history::async_store::AsyncHistoryStore;
+use familiar_connect::history::store::AppendTurn;
 use familiar_connect::processors::text_responder::TextResponder;
 use familiar_connect::processors::voice_responder::VoiceResponder;
 use familiar_connect::processors::{
@@ -578,6 +579,135 @@ async fn wake_reply_after_shift_posts_to_shifted_channel() {
     assert_eq!(send.calls().len(), 1);
     assert_eq!(send.calls()[0].0, 200);
     assert_eq!(send.calls()[0].1, "over here now");
+}
+
+// ---------------------------------------------------------------------------
+// Wake-turn message shape: never ends on an assistant turn
+// ---------------------------------------------------------------------------
+
+/// A wake event on `channel_id`.
+fn wake_event(channel_id: i64) -> Event {
+    Event {
+        event_id: "wake-shape".to_owned(),
+        turn_id: "unread-wake-shape".to_owned(),
+        session_id: format!("discord:{channel_id}"),
+        parent_event_ids: Vec::new(),
+        topic: TOPIC_DISCORD_TEXT.to_owned(),
+        timestamp: chrono::Utc::now(),
+        sequence_number: 0,
+        payload: wrap_payload(DiscordTextPayload {
+            familiar_id: "fam".to_owned(),
+            channel_id,
+            content: "[unread messages waiting elsewhere]".to_owned(),
+            author: None,
+            wake: true,
+            ..Default::default()
+        }),
+    }
+}
+
+/// A wake stages no user message, so replayed history ends on her own reply.
+/// Trailing assistant + `tools` reads as prefix completion on some providers
+/// ("Function call should not be used with prefix"), so the wake event itself
+/// closes the array as a user turn.
+#[tokio::test]
+async fn wake_turn_appends_a_user_notice_after_history() {
+    let s = store();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "user", "hi"))
+        .unwrap();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "assistant", "her last reply"))
+        .unwrap();
+    // Unread traffic elsewhere — what the wake is about.
+    s.sync()
+        .stage_turn(AppendTurn::new("fam", 200, "user", "over here"))
+        .unwrap();
+    s.sync()
+        .stage_turn(AppendTurn::new("fam", 200, "user", "and here"))
+        .unwrap();
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let fm = Arc::new(TestFocusManager::focused(100).with_channel_name(200, "art"));
+    let r = text_responder(
+        Arc::clone(&s),
+        llm.clone(),
+        Arc::new(CapturingSend::new()),
+        Some(fm),
+    );
+    r.handle(&wake_event(100), &bus()).await.unwrap();
+
+    let cap = llm.captured();
+    let msgs = &cap[0];
+    let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles.last().copied(), Some("system"));
+    // The last conversational turn is the wake notice, not her own reply.
+    assert_eq!(roles[roles.len() - 2], "user");
+    assert_eq!(roles[roles.len() - 3], "assistant");
+    assert_eq!(
+        msgs[msgs.len() - 2].content_str(),
+        "(You notice new messages in #art.)"
+    );
+}
+
+/// No focus manager -> no digest; the notice still reads sensibly.
+#[tokio::test]
+async fn wake_turn_notice_is_generic_without_a_digest() {
+    let s = store();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "assistant", "her last reply"))
+        .unwrap();
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let r = text_responder(
+        Arc::clone(&s),
+        llm.clone(),
+        Arc::new(CapturingSend::new()),
+        None,
+    );
+    r.handle(&wake_event(100), &bus()).await.unwrap();
+
+    let cap = llm.captured();
+    let msgs = &cap[0];
+    assert_eq!(msgs[msgs.len() - 2].role, "user");
+    assert_eq!(
+        msgs[msgs.len() - 2].content_str(),
+        "(You notice unread messages waiting elsewhere.)"
+    );
+}
+
+/// Guard against re-broadening: an ordinary turn's array is byte-identical to
+/// what it was before the wake notice existed — `[system, <history>, system]`
+/// with nothing appended.
+#[tokio::test]
+async fn normal_turn_message_shape_is_unchanged() {
+    let s = store();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "assistant", "her last reply"))
+        .unwrap();
+    s.sync()
+        .stage_turn(AppendTurn::new("fam", 200, "user", "over here"))
+        .unwrap();
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let fm = Arc::new(TestFocusManager::focused(100).with_channel_name(200, "art"));
+    let r = text_responder(
+        Arc::clone(&s),
+        llm.clone(),
+        Arc::new(CapturingSend::new()),
+        Some(fm),
+    );
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+
+    let cap = llm.captured();
+    let msgs = &cap[0];
+    let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, vec!["system", "assistant", "user", "system"]);
+    // Last conversational turn is the real user message, verbatim history.
+    assert!(msgs[2].content_str().ends_with("hi"), "{:?}", msgs[2]);
+    assert!(
+        !msgs.iter().any(|m| m.content_str().contains("You notice")),
+        "wake notice leaked into a normal turn"
+    );
 }
 
 // ---------------------------------------------------------------------------

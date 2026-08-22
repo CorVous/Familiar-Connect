@@ -631,7 +631,7 @@ presence_penalty         = 1.5              # optional, [-2, 2]
 provider_order           = ["z-ai"]         # optional, OpenRouter pin
 provider_allow_fallbacks = true             # optional, default true
 reasoning                = "medium"         # "off"|"none"|"low"|"medium"|"high"|"default"|omit
-think_prepend            = false            # optional, default false
+think_prepend            = false            # optional, default false (only false)
 tool_calling             = true             # optional, default true (only true)
 image_tools              = false            # optional, default false
 multimodal               = false            # optional, default false
@@ -655,7 +655,7 @@ Maps to OpenRouter's `reasoning` parameter:
   models that reason by default, like GLM 5.1).
 - `"none"` → `reasoning.effort = "none"` (disable thinking generation
   entirely — the no-think mode for hybrid-reasoning models like
-  Qwen3.6; pair with `think_prepend`).
+  Qwen3.6).
 - `"low"` / `"medium"` / `"high"` → `reasoning.effort = <level>`.
 - `"default"` → no `reasoning` field; reclaims the model default over
   a level merged in from `_default/character.toml`.
@@ -667,8 +667,24 @@ Maps to OpenRouter's `reasoning` parameter:
 Appends a fake closed think block (`<think>\n\n</think>`) as an
 assistant prefill message on every request from this slot's client.
 Qwen3.6 no-think stabiliser: with `reasoning = "none"` and no prefill,
-the model leaks thinking as plain text. Useless on other models —
-leave `false`.
+the model leaks thinking as plain text.
+
+**Default `false`, and `true` is refused at config load.** A trailing
+assistant message *is* prefix completion, and providers that implement
+prefix mode refuse to pair it with a `tools` array — DeepSeek answers
+`Function call should not be used with prefix`. `tool_calling` is
+mandatory, so every slot sends tools and the prefill has nowhere left
+to work. Writing `think_prepend = true` fails the load with:
+
+```text
+[llm.<slot>].think_prepend = true is unsupported: it appends a trailing
+assistant message, which providers read as prefix completion, and prefix
+completion cannot be combined with the tools array every slot now sends —
+remove the key (it defaults to false) or set [llm.<slot>].think_prepend = false
+```
+
+See
+[`think_prepend` and tools](configuration-model.md#think_prepend-and-tools).
 
 ### `tool_calling`
 
