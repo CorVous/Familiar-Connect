@@ -1240,6 +1240,40 @@ events skip the user-turn persist (no transcript pollution) and
 `mark_nudge_pending()` dedupes arrival bursts for the
 `nudge_debounce_seconds` window. Logs `[⏰ Nudge]`.
 
+##### The wake turn's message shape
+
+Skipping the user-turn persist means a wake turn stages nothing, so
+replayed history ends on the familiar's own last reply and the array
+reads `[system, …, assistant, system]`. Some providers treat a trailing
+assistant message as a request to *continue* it — prefix completion —
+which they refuse to combine with a `tools` array: DeepSeek answers
+`Function call should not be used with prefix` and the turn 400s. (This
+is provider-specific tolerance, not a universal rule; the same shape
+runs fine on GLM, and Anthropic supports trailing-assistant prefill
+deliberately.)
+
+So a wake turn appends one short **user** message naming the wake event
+itself, immediately before the trailing reminder — the array ends
+`[…, assistant, user, system]`. The text is
+`final_reminder.wake_notice(unread_digest, channel_names)`:
+
+> (You notice new messages in #art.)
+
+Singular when the digest totals one; channels with no unread are
+skipped; an empty or absent digest degrades to `(You notice unread
+messages waiting elsewhere.)`. The labels carry no ids — the digest in
+the reminder just above already lists them with ids for `shift_focus`.
+
+This is honest content rather than a role workaround: a wake genuinely
+is an event she is reacting to. It is also **wake-only** — the trailing
+reminder stays a `system` message on every turn, and an ordinary turn's
+array is byte-identical to what it was before, because an ordinary turn
+already ends on the user message that triggered it. Alarm wakes are
+unaffected too: they carry `alarm: True`, not `wake`, and persist an
+`[alarm fired: …]` user turn of their own. Voice has no wake path at
+all — `VoiceResponder` never sets `unread_digest` and only ever runs off
+a transcript, which is always a user turn.
+
 ### Unread digest
 
 `staged_channels(familiar_id)` returns `{channel_id: staged_count}`

@@ -327,14 +327,41 @@ fn tool_calling_true_is_accepted() {
 
 #[test]
 fn sampling_params_parsed() {
-    let cfg = load_ok(
-        "[llm.fast]\nmodel = \"m\"\ntop_p = 0.8\ntop_k = 20\npresence_penalty = 1.5\nthink_prepend = true\n",
-    );
+    let cfg =
+        load_ok("[llm.fast]\nmodel = \"m\"\ntop_p = 0.8\ntop_k = 20\npresence_penalty = 1.5\n");
     let slot = cfg.llm.get("fast").unwrap();
     approx(slot.top_p.unwrap(), 0.8);
     assert_eq!(slot.top_k, Some(20));
     approx(slot.presence_penalty.unwrap(), 1.5);
-    assert!(slot.think_prepend);
+    assert!(!slot.think_prepend);
+}
+
+// -- think_prepend is incompatible with the mandatory tools array ------------
+
+/// `think_prepend` is deliberate prefix mode; every slot sends tools now, and
+/// no provider accepts both.
+#[test]
+fn think_prepend_true_is_refused() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"m\"\nthink_prepend = true\n"),
+        "[llm.prose].think_prepend = true is unsupported: it appends a trailing \
+         assistant message, which providers read as prefix completion, and \
+         prefix completion cannot be combined with the tools array every slot \
+         now sends — remove the key (it defaults to false) or set \
+         [llm.prose].think_prepend = false",
+    );
+}
+
+#[test]
+fn think_prepend_unset_loads() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\n");
+    assert!(!cfg.llm.get("prose").unwrap().think_prepend);
+}
+
+#[test]
+fn think_prepend_false_loads() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\nthink_prepend = false\n");
+    assert!(!cfg.llm.get("prose").unwrap().think_prepend);
 }
 
 #[test]

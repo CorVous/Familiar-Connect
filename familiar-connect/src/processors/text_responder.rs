@@ -23,7 +23,7 @@ use crate::bus::protocols::EventBus;
 use crate::bus::router::TurnRouter;
 use crate::bus::topics::TOPIC_DISCORD_TEXT;
 use crate::context::assembler::{Assembler, AssemblyContext};
-use crate::context::final_reminder::FinalReminder;
+use crate::context::final_reminder::{FinalReminder, wake_notice};
 use crate::diagnostics::llm_mirror::{CallContext, with_call_context};
 use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::AppendTurn;
@@ -484,6 +484,7 @@ impl TextResponder {
                 images,
                 activity_state_line,
                 &shift_target,
+                is_wake,
             ),
         )
         .await;
@@ -736,6 +737,11 @@ impl TextResponder {
         Ok(label_to_key)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one turn's assembly inputs, taken whole"
+    )]
     async fn stream_reply(
         &self,
         scope: &TurnScope,
@@ -744,6 +750,7 @@ impl TextResponder {
         images: HashMap<String, String>,
         activity_state_line: Option<String>,
         shift_target: &Arc<Mutex<Option<i64>>>,
+        is_wake: bool,
     ) -> Option<String> {
         let mut ctx = AssemblyContext::new(&self.familiar_id, Some(channel_id))
             .with_viewer_mode("text")
@@ -803,6 +810,15 @@ impl TextResponder {
         );
         let mut messages: Vec<Message> = vec![Message::new("system", system)];
         messages.extend(prompt.recent_history);
+        // A wake stages no user turn, so history ends on her own reply; trailing
+        // assistant + a tools array reads as prefix completion on some providers
+        // and 400s. Name the wake event itself — honest content, wake turns only.
+        if is_wake {
+            messages.push(Message::new(
+                "user",
+                wake_notice(unread_digest.as_deref().unwrap_or_default(), &ch_names),
+            ));
+        }
 
         let guild_name = self
             .focus_manager

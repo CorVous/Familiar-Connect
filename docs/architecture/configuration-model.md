@@ -133,6 +133,8 @@ Surface today:
   `view_image` registration. `multimodal`
   controls whether `ImageResult` tool-result messages include JPEG
   content blocks (`true`) or the text description only (`false`).
+  `think_prepend = true` is refused at load for the same reason — see
+  [`think_prepend` and tools](#think_prepend-and-tools).
   See [Tool calling](overview.md#tool-calling) and
   [Image viewing](overview.md#image-viewing). Both flags are cross-checked
   against the model at startup — see
@@ -256,6 +258,26 @@ meaningful selection.
 removed; a profile still naming one fails config validation with a message
 saying the provider is no longer supported. The `TtsClient` /
 `StreamingTtsClient` seam remains the extension point for further backends.
+
+### `think_prepend` and tools
+
+`think_prepend` appends a fake closed think block (`<think>\n\n</think>`)
+as a trailing **assistant** message on every request from that slot — genuine,
+opt-in prefix completion, and a Qwen3.6 no-think stabiliser. Providers that
+implement prefix mode refuse to combine it with a `tools` array (DeepSeek
+answers `Function call should not be used with prefix`). Since `tool_calling`
+is mandatory, every slot sends tools, so `think_prepend` is not merely risky —
+it is unusable. Writing `think_prepend = true` fails the load with:
+
+```text
+[llm.<slot>].think_prepend = true is unsupported: it appends a trailing
+assistant message, which providers read as prefix completion, and prefix
+completion cannot be combined with the tools array every slot now sends —
+remove the key (it defaults to false) or set [llm.<slot>].think_prepend = false
+```
+
+Remove the key rather than flipping it; the default is the only supported
+value.
 
 ### Startup model diagnostics
 
