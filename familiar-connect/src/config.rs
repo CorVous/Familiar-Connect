@@ -1681,6 +1681,17 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
                  [llm.{name}].tool_calling = true"
             )));
         }
+        // Deliberate prefix mode, and tools are no longer optional — the pair
+        // 400s ("Function call should not be used with prefix").
+        if think_prepend {
+            return Err(ConfigError(format!(
+                "[llm.{name}].think_prepend = true is unsupported: it appends a \
+                 trailing assistant message, which providers read as prefix \
+                 completion, and prefix completion cannot be combined with the \
+                 tools array every slot now sends — remove the key (it defaults \
+                 to false) or set [llm.{name}].think_prepend = false"
+            )));
+        }
         let image_tools = field_bool(section, &prefix, "image_tools", false)?;
         let multimodal = field_bool_opt(section, &prefix, "multimodal")?;
         slots.insert(

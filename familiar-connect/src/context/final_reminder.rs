@@ -67,7 +67,7 @@ fn fmt_when(now: DateTime<Utc>, display_tz: &str) -> String {
 /// Focus-line label. An unnamed channel says so — `#<snowflake>` would tell the
 /// model the channel is *named* after its id (#222) — and keeps the id, which
 /// `shift_focus` needs.
-fn channel_label(names: &HashMap<i64, String>, cid: i64) -> String {
+fn channel_label<S: std::hash::BuildHasher>(names: &HashMap<i64, String, S>, cid: i64) -> String {
     names.get(&cid).map_or_else(
         || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
         |name| format!("#{name}"),
@@ -99,6 +99,44 @@ fn channel_label_with_id(
         || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
         |name| format!("#{name} (id {cid})"),
     )
+}
+
+/// The wake turn's user-role notice — the wake event itself, stated as an
+/// observation.
+///
+/// A wake stages no user message, so replayed history ends on the familiar's
+/// own reply. A trailing assistant turn alongside a `tools` array reads as
+/// prefix-completion mode on some providers (DeepSeek 400s
+/// "Function call should not be used with prefix"), so the wake turn names what
+/// she noticed and the array ends on a user turn again.
+///
+/// Channel labels carry no id: the digest in the reminder just above already
+/// lists them with ids for `shift_focus`.
+#[must_use]
+pub fn wake_notice<S: std::hash::BuildHasher>(
+    digest: &[(i64, (i64, i64))],
+    channel_names: &HashMap<i64, String, S>,
+) -> String {
+    let active: Vec<(i64, i64)> = digest
+        .iter()
+        .filter(|(_, (unread, _))| *unread > 0)
+        .map(|(cid, (unread, _))| (*cid, *unread))
+        .collect();
+    if active.is_empty() {
+        return "(You notice unread messages waiting elsewhere.)".to_owned();
+    }
+    let total: i64 = active.iter().map(|(_, unread)| *unread).sum();
+    let noun = if total == 1 {
+        "a new message"
+    } else {
+        "new messages"
+    };
+    let list = active
+        .iter()
+        .map(|(cid, _)| channel_label(channel_names, *cid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("(You notice {noun} in {list}.)")
 }
 
 /// The closing "final reminder" block builder.
@@ -358,7 +396,7 @@ impl FinalReminder {
 
 #[cfg(test)]
 mod tests {
-    use super::FinalReminder;
+    use super::{FinalReminder, wake_notice};
     use crate::focus::PRIVATE_MESSAGE_GUILD_NAME;
     use chrono::{TimeZone, Utc};
     use std::collections::HashMap;
@@ -390,6 +428,56 @@ mod tests {
         ]
         .into_iter()
         .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Wake notice (the wake turn's user-role message)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wake_notice_names_the_unread_channels() {
+        let out = wake_notice(
+            &[(10, (3, 0)), (20, (1, 0))],
+            &names(&[(10, "general"), (20, "art")]),
+        );
+        assert_eq!(out, "(You notice new messages in #general, #art.)");
+    }
+
+    #[test]
+    fn wake_notice_singular_for_one_message() {
+        let out = wake_notice(&[(10, (1, 0))], &names(&[(10, "general")]));
+        assert_eq!(out, "(You notice a new message in #general.)");
+    }
+
+    /// No digest (no focus manager) still yields a sensible user turn.
+    #[test]
+    fn wake_notice_without_digest_is_generic() {
+        assert_eq!(
+            wake_notice(&[], &HashMap::new()),
+            "(You notice unread messages waiting elsewhere.)"
+        );
+    }
+
+    /// Zero-unread entries are not news — same generic line.
+    #[test]
+    fn wake_notice_skips_zero_unread_channels() {
+        assert_eq!(
+            wake_notice(&[(10, (0, 0))], &names(&[(10, "general")])),
+            "(You notice unread messages waiting elsewhere.)"
+        );
+        assert_eq!(
+            wake_notice(&[(10, (0, 0)), (20, (2, 0))], &names(&[(20, "art")])),
+            "(You notice new messages in #art.)"
+        );
+    }
+
+    /// Unnamed channel says so rather than claiming a `#<snowflake>` name (#222).
+    #[test]
+    fn wake_notice_labels_unnamed_channels() {
+        assert_eq!(
+            wake_notice(&[(123, (2, 0))], &HashMap::new()),
+            "(You notice new messages in unnamed channel (id 123).)"
+        );
     }
 
     #[test]
