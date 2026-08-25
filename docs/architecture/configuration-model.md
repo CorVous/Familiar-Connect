@@ -51,7 +51,12 @@ Surface today:
   drive the reserved `sleep` activity (catalog entry in
   `activities.toml`). Omit the table to leave the schedule disarmed.
   See [Sleep § The window](sleep.md#the-window).
-- `aliases` — names the familiar answers to.
+- `aliases` — names the familiar answers to. Two consumers: the
+  prompt-facing display name (the first alias, else the title-cased
+  id), and STT keyterm biasing — every alias is fed to the voice
+  keyterm list so the familiar's own name transcribes correctly. See
+  [Voice pipeline — Keyterms are vocabulary, not
+  membership](voice-pipeline.md#keyterms-are-vocabulary-not-membership).
 - `[providers.history].voice_window_size` / `.text_window_size` —
   recent-history layer windows, tiered by responder (defaults
   100 / 200). Safety nets behind the token-aware `[budget.<tier>]`

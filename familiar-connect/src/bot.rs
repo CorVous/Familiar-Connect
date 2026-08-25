@@ -1070,11 +1070,16 @@ impl BotHandle {
         self.voice_members.member(user_id)
     }
 
-    /// Every cached voice member's proper nouns — `all_known_names()` (display /
-    /// username / aliases) plus the per-guild nickname — for STT keyterm biasing
-    /// (#198). Returned raw (with duplicates); the transcriber's `set_keyterms`
-    /// merges these with the config keyterms and normalizes/dedupes/caps. All
-    /// current members are enumerated so a name one speaker utters biases every
+    /// The call's spoken vocabulary for STT keyterm biasing (#198): the
+    /// familiar's own configured names, every cached voice member's proper nouns
+    /// (`all_known_names()` — display / username / aliases — plus the per-guild
+    /// nickname), and every seated bot's.
+    ///
+    /// A *vocabulary* read, not a roster read: the roster filter drops the
+    /// familiar and sibling bots, which are the most-uttered proper nouns in the
+    /// room. Returned raw (with duplicates); the transcriber's `set_keyterms`
+    /// merges these behind the config keyterms and normalizes/dedupes/caps.
+    /// Everyone is enumerated so a name one speaker utters biases every
     /// speaker's independent stream.
     #[must_use]
     pub fn voice_member_keyterms(&self) -> Vec<String> {
@@ -1415,15 +1420,25 @@ impl BotEvents {
     /// everyone already seated when the familiar joined stays unresolvable for
     /// the whole session — anonymous turns, no STT keyterms (N16). Replaces
     /// rather than merges: a re-join must not inherit the last call's roster.
+    ///
+    /// Two passes over one list: humans seat the roster, bots only stock the
+    /// keyterm vocabulary. Both replace wholesale and neither depends on the
+    /// other's order.
     pub fn on_voice_roster(&self, members: Vec<VoiceMemberView>) {
         let own = self.bot_user_id();
+        let (bots, humans): (Vec<_>, Vec<_>) = members
+            .into_iter()
+            .filter(|m| own != Some(m.member_id))
+            .partition(|m| m.is_bot);
         // Seeding narrates nothing: nobody "just joined" — the familiar did.
-        self.handle.voice_members.snapshot(
-            members
-                .into_iter()
-                .filter(|m| !m.is_bot && own != Some(m.member_id))
-                .map(|m| (m.member_id, m.author)),
-        );
+        self.handle
+            .voice_members
+            .snapshot(humans.into_iter().map(|m| (m.member_id, m.author)));
+        // Sibling familiars get said constantly; the familiar's own names come
+        // from config, not from its Discord account.
+        self.handle
+            .voice_members
+            .snapshot_bots(bots.into_iter().map(|m| (m.member_id, m.author)));
     }
 
     /// `on_voice_state_update` (B-EV23): track voice-only members of the
@@ -1433,7 +1448,8 @@ impl BotEvents {
     /// Removal is keyed by member id alone, so an update from elsewhere in the
     /// guild needs no before-channel: the member simply isn't in the roster. A
     /// repeat update for a seated member (mute / deafen / camera) is not
-    /// re-narrated.
+    /// re-narrated. A bot lands in the keyterm-only set instead — biased, never
+    /// seated, never narrated.
     pub fn on_voice_state_update(&self, ev: VoiceStateUpdateView) {
         if self.bot_user_id() == Some(ev.member_id) {
             return;
@@ -1450,7 +1466,12 @@ impl BotEvents {
             .after_channel_id
             .is_some_and(|c| u64::try_from(c).is_ok_and(|c| sub.channel_id == c));
         if joined_ours {
-            if !ev.is_bot {
+            if ev.is_bot {
+                // Keyterms only — never the roster line.
+                self.handle
+                    .voice_members
+                    .bot_joined(ev.member_id, ev.author);
+            } else {
                 self.handle
                     .voice_members
                     .member_joined(ev.member_id, ev.author);
@@ -5422,6 +5443,46 @@ mod tests {
         assert!(handle.voice_members.view().events.is_empty());
     }
 
+    // Bots are vocabulary, not company: a sibling familiar sharing the guild is
+    // said constantly, so its name must bias STT — without ever reaching the
+    // "In the call: …" line.
+    #[test]
+    fn voice_roster_snapshot_biases_bots_without_seating_them() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+
+        events.on_voice_roster(vec![
+            VoiceMemberView {
+                member_id: 1,
+                is_bot: false,
+                author: voice_author(1, "Ada"),
+            },
+            VoiceMemberView {
+                member_id: 2,
+                is_bot: true,
+                author: voice_author(2, "Sapphire"),
+            },
+        ]);
+
+        assert_eq!(roster_labels(&handle), vec!["Ada".to_owned()]);
+        let terms = handle.voice_member_keyterms();
+        assert!(terms.contains(&"Sapphire".to_owned()), "got {terms:?}");
+        assert!(terms.contains(&"Ada".to_owned()));
+
+        // A re-join with no bots present clears the last call's bots.
+        events.on_voice_roster(vec![VoiceMemberView {
+            member_id: 1,
+            is_bot: false,
+            author: voice_author(1, "Ada"),
+        }]);
+        assert!(
+            !handle
+                .voice_member_keyterms()
+                .contains(&"Sapphire".to_owned()),
+            "a stale bot would bias the next call"
+        );
+    }
+
     // A re-join replaces the roster rather than merging into a stale one.
     #[test]
     fn voice_roster_snapshot_replaces_previous_roster() {
@@ -5636,15 +5697,20 @@ mod tests {
         events.on_voice_state_update(voice_state(1, Some(555), false));
         assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
 
-        // A bot joining stays out.
+        // A bot joining stays out of the line but keeps biasing keyterms.
         events.on_voice_state_update(voice_state(2, Some(555), true));
         // The familiar itself stays out.
         events.on_voice_state_update(voice_state(999, Some(555), false));
         assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
+        assert!(handle.voice_member_keyterms().contains(&"User2".to_owned()));
 
         // Moves to another channel in the guild.
         events.on_voice_state_update(voice_state(1, Some(556), false));
         assert!(roster_labels(&handle).is_empty());
+        assert!(!handle.voice_member_keyterms().contains(&"User1".to_owned()));
+
+        // The bot moving away drops its keyterms too.
+        events.on_voice_state_update(voice_state(2, Some(556), true));
         assert!(handle.voice_member_keyterms().is_empty());
 
         // Moves back in, then disconnects entirely.

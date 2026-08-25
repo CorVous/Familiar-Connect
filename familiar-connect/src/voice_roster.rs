@@ -7,6 +7,12 @@
 //! [`crate::focus::FocusManager`] — one concrete `Arc`-shared type, no
 //! second copy that could drift.
 //!
+//! Two collections, deliberately: `members` is *who is in the call* (humans, the
+//! `In the call: …` line), `bots` is keyterm-only vocabulary. Separate maps
+//! rather than a flag on one slot, so no future reader can leak a bot into the
+//! rendered line by forgetting a filter — [`VoiceRoster::view`] simply has no
+//! bot to reach.
+//!
 //! Events decay: an entry older than the configured window is pruned on the next
 //! read, and the log is hard-capped so a long call with churn cannot grow it
 //! without bound. Every state change (including a decay eviction) bumps
@@ -67,6 +73,8 @@ struct Slot {
 
 struct State {
     members: BTreeMap<i64, Slot>,
+    /// Bots seated in the channel — keyterm vocabulary only, never rendered.
+    bots: BTreeMap<i64, Author>,
     events: VecDeque<RosterEvent>,
     revision: u64,
     next_seq: u64,
@@ -77,6 +85,17 @@ pub struct VoiceRoster {
     state: Mutex<State>,
     clock: Clock,
     event_window_seconds: f64,
+    /// Familiar's own names (config `aliases` + display name). Immutable, and
+    /// outside `state` — it is vocabulary, not membership.
+    own_names: Vec<String>,
+}
+
+/// One author's proper nouns: known names + the per-guild nickname.
+fn author_names(author: &Author) -> impl Iterator<Item = String> + use<> {
+    author
+        .all_known_names()
+        .into_iter()
+        .chain(author.guild_nick.clone())
 }
 
 fn monotonic_clock() -> Clock {
@@ -97,12 +116,14 @@ impl VoiceRoster {
         Self {
             state: Mutex::new(State {
                 members: BTreeMap::new(),
+                bots: BTreeMap::new(),
                 events: VecDeque::new(),
                 revision: 0,
                 next_seq: 0,
             }),
             clock: monotonic_clock(),
             event_window_seconds: DEFAULT_EVENT_WINDOW_SECONDS,
+            own_names: Vec::new(),
         }
     }
 
@@ -117,6 +138,13 @@ impl VoiceRoster {
     #[must_use]
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Builder: the familiar's own names, for [`keyterms`](Self::keyterms) only.
+    #[must_use]
+    pub fn with_own_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.own_names = names.into_iter().collect();
         self
     }
 
@@ -147,10 +175,15 @@ impl VoiceRoster {
     }
 
     /// Record a departure; unknown ids are ignored.
+    ///
+    /// Also drops the id from the bot set — the gateway routes every departure
+    /// here, bot or not. A bot leaving narrates nothing and cannot change the
+    /// rendered line, so no event and no revision bump.
     pub fn member_left(&self, user_id: i64) {
         let now = (self.clock)();
         let mut st = self.lock();
         st.prune(now, self.event_window_seconds);
+        st.bots.remove(&user_id);
         let Some(slot) = st.members.remove(&user_id) else {
             return;
         };
@@ -177,9 +210,24 @@ impl VoiceRoster {
         st.revision += 1;
     }
 
-    /// Drop every member + event (bot left the call).
+    /// Record a bot's arrival. Keyterm vocabulary only: no event, no revision
+    /// bump — the rendered roster line cannot change.
+    pub fn bot_joined(&self, user_id: i64, author: Author) {
+        self.lock().bots.insert(user_id, author);
+    }
+
+    /// Replace the bot set wholesale (join-time snapshot). Independent of
+    /// [`snapshot`](Self::snapshot), so call order does not matter.
+    pub fn snapshot_bots(&self, bots: impl IntoIterator<Item = (i64, Author)>) {
+        let mut st = self.lock();
+        st.bots.clear();
+        st.bots.extend(bots);
+    }
+
+    /// Drop every member, bot + event (bot left the call).
     pub fn clear(&self) {
         let mut st = self.lock();
+        st.bots.clear();
         if st.members.is_empty() && st.events.is_empty() {
             return;
         }
@@ -195,20 +243,27 @@ impl VoiceRoster {
         self.lock().members.get(&user_id).map(|s| s.author.clone())
     }
 
-    /// Every member's proper nouns — `all_known_names()` (display / username /
-    /// aliases) plus the per-guild nickname — for STT keyterm biasing (#198).
-    /// Returned raw (with duplicates); `set_keyterms` normalizes and caps.
+    /// Spoken vocabulary for STT keyterm biasing (#198): the familiar's own
+    /// names, then every member's proper nouns, then every seated bot's.
+    ///
+    /// Per name: `all_known_names()` (display / username / aliases) plus the
+    /// per-guild nickname. Not a roster read — the filter that keeps bots and
+    /// the familiar out of "who is in the call" would starve the list of the
+    /// most-uttered proper nouns in the room. Own names lead so they survive
+    /// the cap. Returned raw (with duplicates); `set_keyterms` normalizes,
+    /// dedupes and caps.
     #[must_use]
     pub fn keyterms(&self) -> Vec<String> {
-        self.lock()
-            .members
-            .values()
-            .flat_map(|slot| {
-                slot.author
-                    .all_known_names()
-                    .into_iter()
-                    .chain(slot.author.guild_nick.clone())
-            })
+        let st = self.lock();
+        self.own_names
+            .iter()
+            .cloned()
+            .chain(
+                st.members
+                    .values()
+                    .flat_map(|slot| author_names(&slot.author)),
+            )
+            .chain(st.bots.values().flat_map(author_names))
             .collect()
     }
 
