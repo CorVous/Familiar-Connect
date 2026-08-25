@@ -440,17 +440,29 @@ supported`, so the breakage is loud and names the fix. The `TtsClient` /
 `StreamingTtsClient` seam is untouched: adding a real backend is still one new
 type (roadmap V4).
 
-### N2 — Deepgram connect URL with member names is logged at INFO `[fixed]`
+### N2 — "Deepgram connect URL with member names is logged at INFO" `[wrong — never logged; hardening kept]`
 
-Up to 100 voice-member display names, usernames, aliases, and guild nicks are
-appended to the Deepgram websocket URL as `keyterm=` recognition hints
-(`src/bot.rs:916-927` → `src/bot.rs:2400-2404` → `src/stt/deepgram.rs:461-497`).
-That full URL was then logged at INFO, so every voice session wrote its
-participant roster into the logs.
+**Correction — this entry's claim was wrong, and the severity with it.** It said
+the full connect URL, carrying participant names, was written to the log at
+INFO. It was not, and never had been. The URL was passed as a *structured
+tracing field* (`url = %...`), and this crate's custom `StyledFormatter` renders
+only the `message` field: `MessageVisitor` (`src/cli.rs`) matches on
+`field.name() == "message"` and discards every other field, so no field value
+ever reaches the output line. That matches the observed record — a pre-fix log
+contains no connect URL. Nothing leaked.
 
-Fixed on this branch: `DeepgramTranscriber::redacted_ws_url` renders the same
-URL with the keyterm values replaced by a count, keeping the tunables that make
-the line worth logging. The connect log uses it.
+The underlying fact still holds: up to 100 voice-member display names,
+usernames, aliases, and guild nicks (plus, since the keyterm-vocabulary change,
+the familiar's own aliases and any bots present) are appended to the Deepgram
+websocket URL as `keyterm=` recognition hints
+(`src/bot.rs` `voice_member_keyterms` → `IntakeCtx::ensure_transcriber` →
+`src/stt/deepgram.rs` `build_ws_url`).
+
+The redaction added on this branch is kept, as defense in depth rather than as a
+leak fix: `DeepgramTranscriber::redacted_ws_url` renders the same URL with the
+keyterm values replaced by a count, keeping the tunables that make the line worth
+logging, and the connect log uses it. Swapping in a JSON subscriber — which does
+render fields — would otherwise turn that line into a participant roster.
 
 ### N3 — `view_image` fetches attacker-chosen hosts `[fixed]`
 

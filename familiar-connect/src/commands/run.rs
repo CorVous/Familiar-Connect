@@ -949,9 +949,18 @@ async fn async_main(
     let bot_user_id = Arc::new(Mutex::new(None::<i64>));
     // One roster, two readers: the gateway writes membership through the handle,
     // the voice assembler's roster layer renders it.
+    //
+    // Own names are keyterm vocabulary, not membership: the familiar's own name
+    // is the most-uttered proper noun in any call, and the roster filter
+    // deliberately never holds it (#198). `display_name()` leads (it *is*
+    // `aliases[0]` when set, so the duplicate folds in `set_keyterms`).
     let voice_roster = Arc::new(
         VoiceRoster::new()
-            .with_event_window_seconds(familiar.config.voice.roster_event_window_seconds),
+            .with_event_window_seconds(familiar.config.voice.roster_event_window_seconds)
+            .with_own_names(
+                std::iter::once(familiar.display_name())
+                    .chain(familiar.config.aliases.iter().cloned()),
+            ),
     );
     let (handle, client) = create_bot(CreateBotDeps {
         token: token.clone(),

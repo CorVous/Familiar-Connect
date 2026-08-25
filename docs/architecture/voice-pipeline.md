@@ -148,14 +148,56 @@ to drift. See
 [Context pipeline — Voice call roster](context-pipeline.md#voice-call-roster)
 for the layer, its position, and the decay rule.
 
-Keyterms are baked into the Deepgram connect URL when a speaker's stream
-opens, so a member who leaves mid-call stays in the keyterms of streams that
-are already open; those streams close after `idle_close_s` and the next one
-picks up the current roster.
-
 A resolver miss no longer erases the speaker: the persisted turn keeps the
 numeric user id (`Author` with platform + id, no names), so unnamed speakers
 stay distinct from each other rather than fusing into one anonymous voice.
+
+### Keyterms are vocabulary, not membership
+
+"Who is in the call" and "what proper nouns will be spoken" are different
+questions, and the roster only answers the first. The roster filter drops bots
+and the familiar itself — correct for the rendered line, wrong for STT, because
+those are the most-uttered names in the room. Measured over a live
+263-transcript session, proper-noun accuracy was around 85% (29 correct, 5
+misses); two of the five were the familiar's own name coming back as `Tim`
+instead of `Tam`, a name that was never in the keyterm list at all.
+
+So `VoiceRoster::keyterms()` draws from three sources, in this order:
+
+1. **The familiar's own names** — `display_name()` plus the top-level
+   `aliases` config key, held on the roster as immutable vocabulary outside the
+   membership state. Never seated, never rendered, always biased.
+2. **Roster members** — each human's display name, username, aliases, and
+   per-guild nickname.
+3. **Bots present in the channel** — a sibling familiar sharing the guild gets
+   said constantly. Bots live in a *separate* collection on the roster, not
+   behind a flag on the member slot, so `view()` has no bot to reach and the
+   `In the call: …` line cannot leak one by a forgotten filter. Bot arrivals and
+   departures narrate nothing and do not bump `revision`, so they never
+   invalidate the prompt cache.
+
+`DeepgramTranscriber::set_keyterms` then merges that list *behind* the config
+`keyterms`, so project jargon survives the `MAX_KEYTERMS` (100) cap ahead of
+runtime names; the merged set is trimmed, stripped of letter-free tokens,
+case-insensitively deduped (first spelling wins), and capped.
+
+Keyterm biasing is probabilistic, not a lookup table: a name in the list can
+still come back wrong. The same session missed `Kulvar` as `Colvar` twice out of
+four utterances *while Kulvar was a biased roster member*. That is the
+technique's ceiling, not a wiring bug.
+
+### Caveat: keyterms are frozen per stream
+
+Keyterms are baked into the Deepgram connect URL at `start()`, and each
+speaker's transcriber clone is then cached for the session in the intake state.
+A name that becomes known *after* a speaker's stream opened — someone joining
+mid-call, a bot arriving late — does not bias that stream. Likewise, a member
+who leaves mid-call stays in the keyterms of streams that are already open. The
+idle watchdog closes a stream after `idle_close_s` (default `30.0`) of silence
+from that speaker; the next clone for them picks up the current list. The
+familiar's own names are exempt from this: they come from config and are known
+before any stream opens.
+
 
 ## Turn detection
 
