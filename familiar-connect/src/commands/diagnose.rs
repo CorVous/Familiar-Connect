@@ -1,4 +1,4 @@
-//! diagnose subcommand: log grep + summary table (subsystem 10).
+//! diagnose subcommand: log grep + summary tables (subsystem 10).
 //!
 //! Reads `span=<name> … ms=<int> … status=<word>` markers from one or more log
 //! files (or stdin for `-`), groups by span, and prints the same code-fenced
@@ -7,6 +7,11 @@
 //! [`crate::diagnostics::collector`] and shared here; the
 //! in-process [`SpanCollector`](crate::diagnostics::collector::SpanCollector)
 //! resets on restart, so the durable log is the only cross-run record.
+//!
+//! A log carrying `[LLM call]` lines gets a second pass
+//! ([`crate::diagnostics::llm_calls`]) and prints the prompt-cache tables after
+//! the span table — the #206 measurement surface. A span-only log renders
+//! exactly as before.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -16,7 +21,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::diagnostics::collector::{SpanStats, percentile};
-use crate::diagnostics::report::render_summary_table;
+use crate::diagnostics::llm_calls::aggregate_calls;
+use crate::diagnostics::report::{render_llm_call_report, render_summary_table};
 
 /// Matches `span=<name>` + `ms=<int>` + `status=<word>` KV markers, tolerating
 /// interleaved single-parameter ANSI codes and arbitrary intervening tokens
@@ -108,17 +114,33 @@ fn read_lines(paths: &[String]) -> Vec<String> {
     out
 }
 
-/// Aggregate the given log files and print the summary table; always `0`.
+/// The whole printed report: the span table, plus the `[LLM call]` cache tables
+/// when the log carries any such line.
+///
+/// A span-only log renders byte-identically to the span table alone — the
+/// existing `diagnose` contract.
+#[must_use]
+pub fn render_report(lines: &[String]) -> String {
+    let mut out = render_summary_table(&aggregate(lines));
+    let calls = aggregate_calls(lines);
+    if !calls.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&render_llm_call_report(&calls));
+    }
+    out
+}
+
+/// Aggregate the given log files and print the report; always `0`.
 #[must_use]
 pub fn diagnose(paths: &[String]) -> i32 {
-    let summary = aggregate(read_lines(paths));
-    println!("{}", render_summary_table(&summary));
+    println!("{}", render_report(&read_lines(paths)));
     0
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregate, diagnose};
+    use super::{aggregate, diagnose, render_report};
+    use crate::diagnostics::llm_calls::fixture::Line;
     use crate::diagnostics::report::render_summary_table;
 
     fn span_line(name: &str, ms: i64, status: &str) -> String {
@@ -233,6 +255,45 @@ mod tests {
         // Both spans survive the bad byte between them.
         assert!((summary["llm"].count - 2.0).abs() < f64::EPSILON);
         assert!((summary["llm"].last_ms - 200.0).abs() < f64::EPSILON);
+    }
+
+    // --- render_report: the span table stays untouched ---
+
+    #[test]
+    fn span_only_log_renders_byte_identically_to_the_span_table() {
+        // The #206 addition must not perturb the existing contract: with no
+        // `[LLM call]` line in the log, output is exactly today's table.
+        let lines = vec![
+            span_line("llm", 50, "ok"),
+            span_line("llm", 150, "ok"),
+            span_line("tts", 20, "ok"),
+            "junk line".to_owned(),
+        ];
+        assert_eq!(
+            render_report(&lines),
+            render_summary_table(&aggregate(&lines))
+        );
+    }
+
+    #[test]
+    fn log_with_no_recognised_lines_renders_only_the_placeholder() {
+        let lines = vec!["nothing here".to_owned()];
+        assert_eq!(
+            render_report(&lines),
+            render_summary_table(&aggregate(&lines))
+        );
+        assert!(render_report(&lines).contains("no spans"));
+    }
+
+    #[test]
+    fn llm_call_lines_append_the_cache_report() {
+        let lines = vec![span_line("llm", 50, "ok"), Line::default().render()];
+        let out = render_report(&lines);
+        // Span table first, unchanged, then the new report.
+        let span_table = render_summary_table(&aggregate(&lines));
+        assert!(out.starts_with(&span_table), "{out}");
+        assert!(out.contains("LLM calls by slot / model"), "{out}");
+        assert!(out.contains("anthropic/claude-haiku-4.5"), "{out}");
     }
 
     #[test]

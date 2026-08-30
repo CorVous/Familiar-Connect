@@ -72,7 +72,7 @@ flowchart LR
 - **Discord text** — `on_message` event handler plus `subscribe-text` / `unsubscribe-text` slash commands. Built on serenity.
 - **Discord voice** — `subscribe-voice` / `unsubscribe-voice` slash commands join a voice channel with `DaveVoiceClient` (DAVE E2E encryption). On subscribe the bot attaches a `RecordingSink` and runs a `VoiceSource` task draining transcripts onto the bus. The audio pump dispatches per Discord user_id: the first audio chunk from a new SSRC lazily clones the configured Deepgram transcriber and opens a fresh WebSocket for that speaker, so two people talking concurrently get independent endpointing and don't slice each other's sentences. A per-user fan-in tags every result with the originating user_id before forwarding to the shared result queue. On unsubscribe the pump, source, and every per-user fan-in are cancelled, recording is stopped, and every per-user transcriber is closed.
 - **Transcription** — Deepgram streaming client. The instance loaded at startup acts as a *template*: `clone()` is called once per Discord user that speaks. Diarization stays off — Discord delivers per-SSRC audio, so attribution is exact, not AI-inferred. Knobs live in `[providers.stt.deepgram]`; defaults bias toward fewer mid-sentence cuts (`endpointing_ms=500`, `utterance_end_ms=1500`, `smart_format=true`, `punctuate=true`). Config `keyterms` biases nova-3 toward project jargon; on top of those, each per-speaker clone is auto-seeded (before its WebSocket opens) with the voice channel's current members' proper nouns — display names, usernames, aliases, and per-guild nicknames — so a name one speaker utters transcribes correctly on every stream. The merged set is trimmed, letter-free/emoji-only tokens dropped, case-insensitively deduped, and capped for nova-3's practical keyterm limit. `DEEPGRAM_API_KEY` is the only secret; every other knob lives in TOML — see [Tuning § STT — Deepgram](tuning.md#stt-deepgram).
-- **TTS synthesis** — Azure / Cartesia / Gemini clients behind a uniform `TTSResult` shape. `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through songbird's voice connection. Without a configured TTS client, `LoggingTTSPlayer` is used.
+- **TTS synthesis** — the Cartesia client behind a uniform `TTSResult` shape (the `TtsClient` / `StreamingTtsClient` seam takes further backends). `DiscordVoicePlayer` calls `synthesize(text)` and pushes the mono PCM (after stereo conversion) through songbird's voice connection. Without a configured TTS client, `LoggingTTSPlayer` is used.
 - **OpenRouter LLM client** — one `LLMClient` per call-site slot. The slot config's `tool_calling` flag plumbs into `LLMClient.tool_calling_enabled`; responders gate on it before installing the tool registry and running the agentic loop. `stream_completion(messages, tools=...)` yields `LLMDelta` chunks (content + accumulated tool-call fragments + finish reason) and drives the agentic loop's streaming primitive.
 - **Tool subsystem** — `familiar_connect::tools`. `ToolRegistry` indexes `Tool` definitions (JSON-Schema parameters + async handler). `agentic_loop(...)` runs streaming → tool execution → re-call until the model stops calling tools (capped at 5 iterations, 10s per handler). `AlarmScheduler` owns one `tokio` task per pending alarm sleeping until `scheduled_at`, then marks the row fired and publishes `alarm.fired`. On startup it reloads any rows left pending from the previous process; past-due rows fire immediately. Tools shipped: `set_alarm(when|delay_seconds, reason)`, `cancel_alarm(alarm_id)`, `view_image(image_id)` (text only), `shift_focus(channel_id)` (applies focus shift immediately at tool-call time, both modalities; returns target channel's recent turns so the model sees it in-turn), `silent(reasoning)` (suppress reply for current turn, both modalities), `read_channel(limit?, before_id?, around_id?)` (read-only peek into focused text channel history with paging, text only), `start_activity(activity, note?)` (defers a global absence; registered only when the activities catalog is non-empty — see [Activities](activities.md)). See [Tool calling](#tool-calling).
 - **SQLite history store** — `data/familiars/<id>/history.db` (SQLite via bundled `rusqlite`). Raw `turns` table is the source of truth; `summaries`, `people_dossiers`, `facts`, `fact_embeddings`, `reflections`, and `reflection_watermark` are watermarked side-indices. The attentional stream adds three `turns` columns — `arrived_at` (immutable ingest time), `consumed_at` (`NULL` while staged), and `missed_at` (terminal "she never saw it" state set at promotion when a staged turn falls outside the catch-up window; keeps `consumed_at` `NULL` so every `consumed_at IS NOT NULL` read path excludes it) — plus two small per-familiar tables: `focus_pointers` (text/voice focus channels) and `unread_digest_watermark`. These three columns and `idx_turns_consumed` are declared directly in `SCHEMA` via `CREATE TABLE/INDEX IF NOT EXISTS`; there is no runtime migration (#202). See [Attentional stream](context-pipeline.md#attentional-stream). Full-text search lives outside the DB in tantivy indexes under `data/familiars/<id>/fts/turns/` and `fts/facts/` — tantivy is native Rust and its queries don't queue behind SQL writes, which fixed the original "FTS5 query blocks the Discord heartbeat for 10s" bug. `AsyncHistoryStore` (`history/async_store.rs`) wraps `HistoryStore` in an async facade, dispatching every call onto a `tokio::task::spawn_blocking` thread so the await never blocks a reactor worker. The store itself is a single-owner DB actor (`history/db.rs`): one OS thread owns the `rusqlite::Connection`, and every operation is a whole-operation closure submitted over an `mpsc` channel — so all SQL executes on that one thread and multi-statement operations (supersede, promotions, `append_fact`'s dedup-scan+insert) run in explicit transactions.
@@ -225,18 +225,41 @@ compact `→ name(args)` / `(tool→) ...` summary in the rebuilt prompt.
 2. For each image found, `collect_images` assigns `img_0`, `img_1`, … and injects `[image: img_N (filename)]` placeholders into the message content.
 3. The `img_id → URL` map travels through the bus payload (`images` key) to `TextResponder`.
 4. `TextResponder.handle` passes the map to the per-turn `ToolContext.images`.
-5. The model calls `view_image(image_id="img_0")`. The handler fetches bytes, compresses to JPEG (1024 px longest edge, quality 85, 1 MB ceiling; iterates quality down by 5 until it fits), and calls the description model to get text. The base describe prompt is neutral; a familiar can append persona constraints via `[prompt].image_description_constraints` (e.g. a character not set in the present bans naming specific characters, people, franchises, or brands so it doesn't acquire modern pop-culture knowledge that would break immersion). The constraint string is bound into `view_image` at tool construction, not carried on the per-turn `ToolContext`.
-6. `ImageResult` carries both the JPEG (base64) and the text description. The agentic loop serialises it per the slot's `multimodal` flag: `multimodal=true` sends an `image_url` content block in the tool-result message; `multimodal=false` sends the text description only.
+5. The model calls `view_image(image_id="img_0")`. The handler fetches bytes, compresses to JPEG (1024 px longest edge, quality 85, 1 MB ceiling; iterates quality down by 5 until it fits), and runs **one** describe leg. The base describe prompt is neutral; a familiar can append persona constraints via `[prompt].image_description_constraints` (e.g. a character not set in the present bans naming specific characters, people, franchises, or brands so it doesn't acquire modern pop-culture knowledge that would break immersion). The constraint string is bound into `view_image` at tool construction, not carried on the per-turn `ToolContext`.
+6. `ImageResult` carries both the JPEG (base64) and the text. The agentic loop serialises it per the slot's `multimodal` flag: `multimodal=true` sends an `image_url` content block in the tool-result message; `multimodal=false` sends the text only.
+
+**Two roles, one call.** The describe leg serves two jobs that used to be
+conflated:
+
+- **Substitution** — the calling model cannot see the image, so text stands in
+  for it. Needed only when the slot is not multimodal.
+- **Persistence** — a durable text artifact for long-term memory. Needed
+  *always*, because the image never survives a turn (see History persistence
+  below), which makes this string the only thing the fact extractor, rolling
+  summaries, and people dossiers will ever see of the image.
+
+`view_image` picks the model by role and never runs both legs:
+
+| Calling slot | Model used | What the slot receives |
+|---|---|---|
+| `multimodal` | `[llm].image_caption_model` | the image natively, plus the caption riding along for history |
+| not `multimodal` | `[llm].image_description_model` | the description as text; it doubles as the caption, since the tool result *is* the description |
+
+Either key stands in for a missing other, so a profile that sets only one keeps
+working. Self-captioning by the primary model was considered and rejected: it
+would depend on prompt adherence and would need the caption fished back out of
+conversational prose — too fragile for something feeding fact extraction.
 
 **Configuration:**
-- `[llm].image_description_model` — model name for vision-based description; empty = feature disabled.
+- `[llm].image_description_model` — substitution model; empty = no substitution.
+- `[llm].image_caption_model` — persistence model; empty falls back to `image_description_model`. Both empty = feature disabled.
 - `[prompt].image_description_constraints` — per-familiar text appended to the neutral base describe prompt; empty (default) = base only.
 - `[llm.<slot>].image_tools = true` — registers `view_image` in the text tool registry for that slot (independent of `tool_calling`).
-- `[llm.<slot>].multimodal = true` — sends JPEG content blocks instead of text-only descriptions.
+- `[llm.<slot>].multimodal` — omit to auto-detect from the OpenRouter catalog, or set explicitly to override. See [Configuration model](configuration-model.md#multimodal-is-tri-state).
 
 **Voice exclusion:** `view_image` is never registered in the voice tool registry.
 
-**History persistence:** multimodal tool-result messages (list content) are projected to plain text before writing to history, so no raw image bytes enter the turn store.
+**History persistence:** multimodal tool-result messages (list content) are projected to plain text before writing to history, so no raw image bytes enter the turn store. On replay `turn_to_message_with_context` collapses any `role="tool"` turn to `[tool result] <text>`, so the raw image is never re-sent on a later turn regardless of `multimodal` — which is exactly why the caption has to exist even when the model can see the image perfectly well.
 
 ### Alarm flow
 

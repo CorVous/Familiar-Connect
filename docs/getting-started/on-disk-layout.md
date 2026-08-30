@@ -45,6 +45,17 @@ its bundled copy).
 An optional `activities.toml` carries the activities catalog —
 see [Activities](../architecture/activities.md#configuration).
 
+## What does *not* live under the familiars root
+
+The OpenRouter model catalog is written to the platform per-user **cache**
+directory instead — `~/.cache/familiar-connect/openrouter-models.json` on Linux
+(honours `XDG_CACHE_HOME`), the OS-correct analog elsewhere, falling back to a
+CWD-relative `data/cache/` when no home directory resolves. It is regenerable
+from the network, so it is not state: deleting it costs one background fetch and
+nothing else. Read at boot to auto-detect slot capabilities, refreshed in the
+background. Details at
+[Configuration model](../architecture/configuration-model.md#the-catalog-cache).
+
 ## Example `character.toml`
 
 ```toml
@@ -72,7 +83,7 @@ reasoning    = "medium"
 tool_calling = true
 
 [tts]
-provider          = "cartesia"   # only wired backend
+provider          = "cartesia"   # the only implemented backend
 cartesia_voice_id = "..."
 cartesia_model    = "sonic-3"
 ```

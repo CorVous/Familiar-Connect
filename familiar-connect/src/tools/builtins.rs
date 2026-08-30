@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use crate::tools::alarm::{build_alarm_tool, build_cancel_alarm_tool};
+use crate::tools::image_policy::ImageUrlPolicy;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::scheduler::AlarmScheduler;
 use crate::tools::start_activity::StartActivityEngine;
@@ -45,14 +46,15 @@ pub fn build_voice_registry(scheduler: &AlarmScheduler, with_focus_manager: bool
 /// Text-tier registry.
 ///
 /// `set_alarm` + `cancel_alarm` + `silent`; plus `view_image` (when
-/// `image_tools`), `shift_focus` + `read_channel` (when a focus manager is
-/// present), and `start_activity` (when an activity engine is provided, with
-/// its config-sourced description).
+/// `image_tools`, gated by `image_url_policy`), `shift_focus` + `read_channel`
+/// (when a focus manager is present), and `start_activity` (when an activity
+/// engine is provided, with its config-sourced description).
 #[must_use]
 pub fn build_text_registry(
     scheduler: &AlarmScheduler,
     image_tools: bool,
     describe_constraints: &str,
+    image_url_policy: &ImageUrlPolicy,
     with_focus_manager: bool,
     activity_engine: Option<Arc<dyn StartActivityEngine>>,
     start_activity_description: &str,
@@ -70,10 +72,13 @@ pub fn build_text_registry(
         registry
             .register(crate::tools::image::build_view_image_tool(
                 describe_constraints,
+                Arc::new(crate::tools::image_policy::UrlGuard::production(
+                    image_url_policy.clone(),
+                )),
             ))
             .expect("unique tool");
         #[cfg(not(feature = "images"))]
-        let _ = describe_constraints;
+        let _ = (describe_constraints, image_url_policy);
     }
     if with_focus_manager {
         registry
@@ -132,6 +137,10 @@ mod tests {
         AlarmScheduler::new(store, bus, "fam")
     }
 
+    fn policy() -> ImageUrlPolicy {
+        ImageUrlPolicy::default()
+    }
+
     fn names(reg: &ToolRegistry) -> BTreeSet<String> {
         reg.tools().map(|t| t.name.clone()).collect()
     }
@@ -148,6 +157,7 @@ mod tests {
                 &scheduler(),
                 false,
                 "",
+                &policy(),
                 false,
                 None,
                 ""
@@ -168,6 +178,7 @@ mod tests {
             &scheduler(),
             false,
             "",
+            &policy(),
             true,
             None,
             "",
@@ -178,6 +189,7 @@ mod tests {
             &scheduler(),
             false,
             "",
+            &policy(),
             false,
             None,
             "",
@@ -199,6 +211,7 @@ mod tests {
             &scheduler(),
             false,
             "",
+            &policy(),
             false,
             Some(Arc::new(FakeEngine)),
             "",
@@ -208,6 +221,7 @@ mod tests {
             &scheduler(),
             false,
             "",
+            &policy(),
             false,
             None,
             "",
@@ -223,6 +237,7 @@ mod tests {
             &scheduler(),
             false,
             "",
+            &policy(),
             false,
             Some(Arc::new(FakeEngine)),
             "POLICY_MARKER",
@@ -241,6 +256,7 @@ mod tests {
             &scheduler(),
             true,
             "be brief",
+            &policy(),
             false,
             None,
             "",
@@ -250,6 +266,7 @@ mod tests {
             &scheduler(),
             false,
             "",
+            &policy(),
             false,
             None,
             "",

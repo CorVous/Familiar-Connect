@@ -461,7 +461,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     let known_emb = known_embedders();
 
     // Load merged config first so the client factories see per-slot models.
-    let config = match load_character_config(
+    let mut config = match load_character_config(
         &familiar_root.join("character.toml"),
         &defaults_path,
         &known_proj,
@@ -473,6 +473,16 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             return 1;
         }
     };
+
+    // Resolve tri-state capability flags from the LAST-KNOWN-GOOD catalog on
+    // disk: a local file read, no network, so boot stays offline. Missing or
+    // corrupt cache → every slot keeps its configured value. The background
+    // refresh spawned later in `async_main` only affects the next boot.
+    let catalog_cache_path = crate::model_diagnostics::cache::default_cache_path();
+    crate::model_diagnostics::cache::resolve_capabilities_from_cache(
+        &mut config.llm,
+        &catalog_cache_path,
+    );
 
     let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
@@ -493,19 +503,11 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         };
 
     // Degrade-not-fail: TTS / STT / local turn detector unavailability warns.
-    // An unwired provider is louder — it would otherwise construct fine and
-    // fail on the first synthesis, mid-conversation.
-    let tts_client = if let Some(reason) = crate::tts::unwired_provider_reason(&config.tts.provider)
-    {
-        tracing::error!("{reason}");
-        None
-    } else {
-        match crate::tts::create_tts_client(&config.tts) {
-            Ok(kind) => Some(kind.into_dyn()),
-            Err(err) => {
-                tracing::warn!("TTS client unavailable: {err}");
-                None
-            }
+    let tts_client = match crate::tts::create_tts_client(&config.tts) {
+        Ok(kind) => Some(kind.into_dyn()),
+        Err(err) => {
+            tracing::warn!("TTS client unavailable: {err}");
+            None
         }
     };
     let transcriber = match crate::stt::create_transcriber(&config.stt) {
@@ -534,7 +536,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         }
     };
 
-    let familiar = match Familiar::load_from_disk(
+    let mut familiar = match Familiar::load_from_disk(
         familiar_root,
         llm_clients,
         tts_client,
@@ -550,6 +552,12 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             return 1;
         }
     };
+    // `load_from_disk` re-parses the same TOML, so its copy needs the same
+    // resolution (silently — the lines were already logged above).
+    crate::model_diagnostics::cache::resolve_from_cache_quietly(
+        &mut familiar.config.llm,
+        &catalog_cache_path,
+    );
 
     // `load_opus` is a no-op in the Rust port: songbird statically links libopus,
     // so there is no ctypes-style runtime discovery to perform.
@@ -649,11 +657,14 @@ const DEBUG_TOPICS: [&str; 4] = [
     crate::bus::topics::TOPIC_VOICE_TRANSCRIPT_FINAL,
 ];
 
-/// Spawn the detached OpenRouter capability audit (#218).
+/// Spawn the detached OpenRouter catalog refresh + capability audit (#218,
+/// #204).
 ///
 /// Fire-and-forget like the signal listener: config loading stays offline, and
-/// a slow or unreachable catalog can never gate readiness. Silent without an
-/// API key — `run_inner` has already refused that case.
+/// a slow or unreachable catalog can never gate readiness. The refresh writes
+/// the on-disk cache the *next* boot reads for capability auto-detection — this
+/// process is already wired by then and never waits. Silent without an API key
+/// — `run_inner` has already refused that case.
 #[cfg(feature = "discord")]
 fn spawn_model_capability_audit(config: &crate::config::CharacterConfig) {
     let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
@@ -664,6 +675,7 @@ fn spawn_model_capability_audit(config: &crate::config::CharacterConfig) {
         api_key,
         crate::llm::OPENROUTER_BASE_URL.to_owned(),
         config.llm.clone(),
+        crate::model_diagnostics::cache::default_cache_path(),
     ));
 }
 
@@ -1022,16 +1034,26 @@ async fn async_main(
             let engine: Arc<dyn StartActivityEngine> = engine;
             engine
         });
+    let image_url_policy =
+        crate::tools::image_policy::ImageUrlPolicy::from_tools_config(&familiar.config.tools);
     let text_tool_registry = Arc::new(build_text_registry(
         &alarm_scheduler,
         prose_image_tools,
         &familiar.config.image_description_constraints,
+        &image_url_policy,
         true,
         text_activity_engine,
         &familiar.config.start_activity_description,
     ));
 
     let description_llm = familiar.llm_clients.get("__image_description__").cloned();
+    let caption_llm = familiar.llm_clients.get("__image_caption__").cloned();
+    // The resolved value, straight off the built client — `familiar.config`
+    // records the operator's tri-state, the client records the decision.
+    let prose_multimodal = familiar
+        .llm_clients
+        .get("prose")
+        .is_some_and(|c| c.multimodal());
 
     // Per-turn ToolContext factory.
     let make_factory = |channel_kind: &'static str, with_description: bool| {
@@ -1040,10 +1062,14 @@ async fn async_main(
         let bus = familiar.bus.clone();
         let scheduler = alarm_scheduler.clone();
         let fm = focus_manager.clone();
-        let description = if with_description {
-            description_llm.clone()
+        let (description, caption, multimodal) = if with_description {
+            (
+                description_llm.clone(),
+                caption_llm.clone(),
+                prose_multimodal,
+            )
         } else {
-            None
+            (None, None, false)
         };
         let factory: crate::processors::ToolContextFactory = Arc::new(
             move |channel_id: i64, turn_id: &str, images: HashMap<String, String>| {
@@ -1056,9 +1082,13 @@ async fn async_main(
                         .with_scheduler(scheduler.clone())
                         .with_images(images)
                         .with_focus_manager(focus_control)
-                        .with_store(read_store);
+                        .with_store(read_store)
+                        .with_multimodal(multimodal);
                 if let Some(description) = &description {
                     ctx = ctx.with_description_llm(description.clone());
+                }
+                if let Some(caption) = &caption {
+                    ctx = ctx.with_caption_llm(caption.clone());
                 }
                 ctx
             },

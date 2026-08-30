@@ -10,6 +10,12 @@
 //!   surface has a focus manager wired. Needs no network, so it runs
 //!   unconditionally at composition time.
 //!
+//! The same catalog also *drives* config: [`cache`] persists the last known
+//! good copy so the tri-state `multimodal` flag can auto-detect at boot off a
+//! local file (#204). Fetching stays on the detached task — the read side never
+//! touches the network, so the "never gates readiness" invariant above holds
+//! unchanged.
+//!
 //! Everything except [`fetch_model_catalog`](crate::llm::fetch_model_catalog)
 //! is pure and unit-tested without network.
 
@@ -17,6 +23,8 @@ use std::collections::BTreeMap;
 
 use crate::config::LLMSlotConfig;
 use crate::log_style as ls;
+
+pub mod cache;
 
 /// `supported_parameters` entry that means "this model accepts a tools array".
 const TOOLS_PARAM: &str = "tools";
@@ -28,7 +36,7 @@ const IMAGE_MODALITY: &str = "image";
 // ---------------------------------------------------------------------------
 
 /// One model's capability metadata from `GET /models`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelCapabilities {
     /// OpenRouter model id (`vendor/name`, optionally `:variant`).
     pub id: String,
@@ -117,9 +125,10 @@ pub struct AuditReport {
 
 /// Compare one slot's declared flags against its model's metadata.
 ///
-/// Image input is one fact, so `multimodal` and `image_tools` share a single
-/// advisory (keyed on `multimodal`) when neither is declared — but each is
-/// flagged separately when declared against a text-only model.
+/// `multimodal` is tri-state: only an explicit `true` can contradict a
+/// text-only model, and an unset one needs no advisory because the catalog
+/// already decides it (`cache::apply_detected_multimodal`). What is left to
+/// advise on is `image_tools`, which stays a deliberate opt-in.
 #[must_use]
 pub fn compare_slot(
     slot: &str,
@@ -156,13 +165,22 @@ pub fn compare_slot(
         _ => {}
     }
 
-    if !supports_image {
-        for flag in ["multimodal", "image_tools"] {
-            let declared = if flag == "multimodal" {
-                cfg.multimodal
-            } else {
-                cfg.image_tools
-            };
+    if supports_image {
+        if !cfg.image_tools {
+            push(
+                "image_tools",
+                MismatchKind::SupportedNotDeclared,
+                format!(
+                    "model accepts image input; set [llm.{slot}].image_tools = true \
+                     to register view_image (multimodal auto-detects)"
+                ),
+            );
+        }
+    } else {
+        for (flag, declared) in [
+            ("multimodal", cfg.multimodal == Some(true)),
+            ("image_tools", cfg.image_tools),
+        ] {
             if declared {
                 push(
                     flag,
@@ -174,15 +192,6 @@ pub fn compare_slot(
                 );
             }
         }
-    } else if !cfg.multimodal && !cfg.image_tools {
-        push(
-            "multimodal",
-            MismatchKind::SupportedNotDeclared,
-            format!(
-                "model accepts image input; set [llm.{slot}].multimodal = true \
-                 (and image_tools = true for view_image) to use it"
-            ),
-        );
     }
     out
 }
@@ -324,14 +333,29 @@ pub fn log_audit_skipped(reason: &str) {
 // Driver
 // ---------------------------------------------------------------------------
 
-/// Fetch the catalog and log the audit. Every failure path is one line then
-/// silence — callers detach this, so it can neither block nor fail startup.
+/// Refresh the on-disk catalog cache, then log the audit.
+///
+/// Callers detach this, so it can neither block nor fail startup. A cache still
+/// inside [`cache::CACHE_TTL_HOURS`] short-circuits the network entirely and
+/// audits from disk. What a refresh writes lands on the **next** boot's
+/// capability resolution — never this one.
 #[cfg(feature = "net")]
 pub async fn run_capability_audit(
     api_key: String,
     base_url: String,
     slots: BTreeMap<String, LLMSlotConfig>,
+    cache_path: std::path::PathBuf,
 ) {
+    if let Some(cached) = cache::read_cache(&cache_path)
+        && !cache::is_stale(
+            &cached.fetched_at,
+            chrono::Utc::now(),
+            cache::CACHE_TTL_HOURS,
+        )
+    {
+        log_audit(&audit_slots(&slots, &cached.models));
+        return;
+    }
     let body = match crate::llm::fetch_model_catalog(&api_key, &base_url).await {
         Ok(body) => body,
         Err(err) => {
@@ -343,6 +367,9 @@ pub async fn run_capability_audit(
         log_audit_skipped("model catalog response not understood");
         return;
     };
+    if let Err(err) = cache::write_cache(&cache_path, &catalog, chrono::Utc::now()) {
+        tracing::debug!(target: "familiar_connect.llm", "model catalog cache write failed: {err}");
+    }
     log_audit(&audit_slots(&slots, &catalog));
 }
 

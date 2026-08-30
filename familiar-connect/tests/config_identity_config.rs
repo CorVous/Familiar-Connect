@@ -1348,14 +1348,76 @@ fn llm_slot_parses_image_tools_and_multimodal() {
     let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\nimage_tools = true\nmultimodal = true\n");
     let slot = cfg.llm.get("prose").unwrap();
     assert!(slot.image_tools);
-    assert!(slot.multimodal);
+    assert_eq!(slot.multimodal, Some(true));
 }
 
 #[test]
 fn image_tools_defaults_false() {
     let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
     assert!(!cfg.llm.get("prose").unwrap().image_tools);
-    assert!(!cfg.llm.get("prose").unwrap().multimodal);
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, None);
+}
+
+// --- multimodal tri-state (#204) -------------------------------------------
+
+#[test]
+fn multimodal_unset_is_none_not_false() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
+    let slot = cfg.llm.get("prose").unwrap();
+    assert_eq!(slot.multimodal, None);
+    // Unset with no catalog behaves as the historical `false`.
+    assert!(!slot.resolve_multimodal(None));
+}
+
+#[test]
+fn multimodal_explicit_false_is_distinguishable_from_unset() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = false\n");
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, Some(false));
+}
+
+#[test]
+fn explicit_multimodal_beats_detection_in_both_directions() {
+    let off = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = false\n");
+    let on = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = true\n");
+    // Catalog says the model has vision; the explicit `false` still wins.
+    assert!(!off.llm.get("prose").unwrap().resolve_multimodal(Some(true)));
+    // …and the reverse.
+    assert!(on.llm.get("prose").unwrap().resolve_multimodal(Some(false)));
+}
+
+#[test]
+fn unset_multimodal_follows_the_catalog() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
+    let slot = cfg.llm.get("prose").unwrap();
+    assert!(slot.resolve_multimodal(Some(true)));
+    assert!(!slot.resolve_multimodal(Some(false)));
+}
+
+#[test]
+fn multimodal_non_bool_is_rejected() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"x/y\"\nmultimodal = \"yes\"\n"),
+        "[llm.prose].multimodal must be a bool, got str",
+    );
+}
+
+#[test]
+fn image_caption_model_parsed_at_llm_level() {
+    let cfg = load_ok("[llm]\nimage_caption_model = \"openai/gpt-4o-mini\"\n");
+    assert_eq!(cfg.image_caption_model, "openai/gpt-4o-mini");
+    // must not be treated as an unknown slot
+    assert_eq!(
+        cfg.llm.keys().cloned().collect::<BTreeSet<_>>(),
+        ["background", "fast", "prose"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    );
+}
+
+#[test]
+fn image_caption_model_defaults_empty() {
+    assert!(load_ok("").image_caption_model.is_empty());
 }
 
 #[test]
@@ -1463,6 +1525,70 @@ fn tools_must_be_positive_int() {
 #[test]
 fn tools_unknown_key_rejected() {
     assert_err(load("[tools]\nbogus = 1\n"), "unknown");
+}
+
+#[test]
+fn image_url_policy_defaults_are_deny_by_default() {
+    let cfg = load_missing_target();
+    assert!(!cfg.tools.allow_untrusted_image_urls);
+    for host in [
+        "cdn.discordapp.com",
+        "media.discordapp.net",
+        "*.media.tumblr.com",
+    ] {
+        assert!(
+            cfg.tools.trusted_image_hosts.iter().any(|h| h == host),
+            "shipped profile should trust {host}"
+        );
+    }
+    // The shipped profile and the in-code default must not drift.
+    assert_eq!(
+        cfg.tools.trusted_image_hosts,
+        familiar_connect::tools::image_policy::DEFAULT_TRUSTED_IMAGE_HOSTS
+            .iter()
+            .map(|h| (*h).to_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn image_url_policy_loads_from_toml() {
+    let cfg = load_ok(
+        "[tools]\nallow_untrusted_image_urls = true\ntrusted_image_hosts = [\"Example.COM\", \"*.cdn.example\"]\n",
+    );
+    assert!(cfg.tools.allow_untrusted_image_urls);
+    assert_eq!(
+        cfg.tools.trusted_image_hosts,
+        vec!["example.com".to_owned(), "*.cdn.example".to_owned()]
+    );
+}
+
+#[test]
+fn allow_untrusted_image_urls_must_be_bool() {
+    assert_err_eq(
+        load("[tools]\nallow_untrusted_image_urls = \"yes\"\n"),
+        "[tools].allow_untrusted_image_urls must be a bool, got str",
+    );
+}
+
+#[test]
+fn trusted_image_hosts_must_be_a_list() {
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = \"cdn.discordapp.com\"\n"),
+        "[tools].trusted_image_hosts must be a list of strings, got str",
+    );
+}
+
+#[test]
+fn trusted_image_hosts_rejects_non_hostname_entries() {
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = [\"https://cdn.discordapp.com/x\"]\n"),
+        "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got 'https://cdn.discordapp.com/x'",
+    );
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = [8]\n"),
+        "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got 8",
+    );
 }
 
 // ---------------------------------------------------------------------------

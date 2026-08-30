@@ -575,6 +575,12 @@ fn add_image(
 /// inline image URLs in `content`. Ids assigned `img_0, img_1, …` in discovery
 /// order; deduped by exact URL (first source wins). `[image: img_N (filename)]`
 /// markers are appended one-per-line after the content.
+///
+/// The inline source is attacker-controlled — anyone in the channel picks the
+/// host. Registration is deliberately unfiltered; the scheme / allowlist /
+/// private-address gate lives at the fetch boundary
+/// ([`tools::image_policy`](crate::tools::image_policy)) so every source is
+/// covered by one check.
 #[must_use]
 pub fn collect_images(
     content: &str,
