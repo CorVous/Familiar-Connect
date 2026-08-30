@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated: 2026-08-16**
+**Last updated: 2026-08-20**
 
 Familiar-Connect is a self-hosted, open-source Discord bot. This page
 describes what the software records, where it puts it, and which
@@ -62,6 +62,19 @@ Recorded directly:
   your **profile pronouns and bio**.
 - **Reactions and mentions.** Emoji reaction counts per message, and who
   was mentioned in which turn.
+- **Every prompt sent to the language model, and its reply.** The bot
+  mirrors each model call into an `llm_calls` table: the fully assembled
+  system prompt, the complete message array as sent, the model's reply,
+  any tool calls it made and what those returned, plus which slot and
+  model were used, timings, and token counts. Because the prompt is
+  assembled from recent conversation across channels, summaries,
+  dossiers, facts and reflections, one of these rows can contain a
+  second, denormalised copy of a lot of what other people said —
+  including messages from channels you were not in. It is stored in
+  full, not truncated. This is on by default, capped at the newest 1000
+  rows per familiar (roughly 30 MB), and older rows are pruned as new
+  calls land. An operator can switch it off with
+  `[providers.history].llm_mirror_calls = 0`, or raise the cap.
 
 Derived by feeding the above back through an LLM:
 
@@ -124,14 +137,22 @@ transfers model weights in, never your data out.
 Twitch support is feature-gated, off by default, and its EventSub client
 is not implemented yet.
 
-## Retention: there isn't a policy
+## Retention: essentially no policy
 
-**Nothing expires and nothing is deleted on a schedule.** There is no
-retention window, no TTL, no automatic purge. Conversation turns are
+**Your conversation never expires.** There is no retention window, no
+TTL, no automatic purge on anything you said. Conversation turns are
 append-only and stay in the database for as long as the operator keeps
 the file — which may be forever.
 
-The few things that do get removed are bookkeeping, not deletion:
+The one exception is the `llm_calls` prompt mirror described above,
+which **does** have a retention cap: only the newest
+`[providers.history].llm_mirror_calls` rows are kept (1000 by default)
+and older rows are deleted as new calls arrive. That is a size control,
+not a privacy guarantee — the underlying conversation those prompts were
+built from stays in `turns` forever, and the operator can raise or
+disable the cap.
+
+The few other things that get removed are bookkeeping, not deletion:
 
 - Facts are **superseded**, never deleted. The retired row stays, marked
   with when and by what, so prior beliefs remain reconstructable.
@@ -149,6 +170,10 @@ are `/subscribe-text`, `/unsubscribe-text`, `/subscribe-voice`,
 `/unsubscribe-voice`, and `/diagnostics` — none of them erase anything.
 Unsubscribing stops new recording; it does not remove what was already
 recorded.
+
+Note also that the operator can print any stored prompt and reply back
+out at a terminal with the `familiar-connect prompts` command, which
+reads the `llm_calls` table directly.
 
 To have data removed, ask the operator. They can delete rows or drop
 `history.db` outright with any SQLite client; the derived side-indexes

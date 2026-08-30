@@ -18,6 +18,7 @@ use serde_json::Value;
 use familiar_connect::bus::in_process::InProcessEventBus;
 use familiar_connect::bus::protocols::{BackpressurePolicy, EventBus};
 use familiar_connect::bus::router::TurnRouter;
+use familiar_connect::diagnostics::llm_mirror::{CallContext, current_call_context};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::identity::Author;
 use familiar_connect::llm::{LlmClient, Message};
@@ -121,6 +122,178 @@ async fn full_reply_on_final() {
     assert!(contents.iter().any(|c| c.contains("Hello, world.")));
 }
 
+// ---------------------------------------------------------------------------
+// Speakable-chunk gate
+// ---------------------------------------------------------------------------
+
+/// The live Cartesia 400: a reply ending in a trailing emoji leaves that emoji
+/// alone as the sentence streamer's flush tail. It must never be synthesized,
+/// the sentences before it still play, and the turn persists whole.
+#[tokio::test]
+async fn trailing_emoji_tail_is_not_spoken() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[
+            "Hey, something's broken! ",
+            "I'm being honest here. ",
+            "\u{1f605}",
+        ])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("what broke?", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let spoken: Vec<String> = player.calls().into_iter().map(|c| c.0).collect();
+    assert_eq!(
+        spoken,
+        vec![
+            "Hey, something's broken!".to_owned(),
+            "I'm being honest here.".to_owned(),
+        ],
+    );
+    // The turn still records the whole reply, emoji included.
+    let contents: Vec<String> = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.content)
+        .collect();
+    assert!(contents.iter().any(|c| c.contains('\u{1f605}')));
+}
+
+/// An unspeakable chunk in the *middle* of the stream is dropped without
+/// disturbing the order of the chunks around it.
+#[tokio::test]
+async fn unspeakable_chunk_mid_stream_keeps_order() {
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        store(),
+        // "... " is a complete "sentence" to the splitter: terminator run then
+        // whitespace.
+        Arc::new(ScriptedLlm::new(&["First one. ", "... ", "Third one. "])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("go on", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let spoken: Vec<String> = player.calls().into_iter().map(|c| c.0).collect();
+    assert_eq!(
+        spoken,
+        vec!["First one.".to_owned(), "Third one.".to_owned()],
+    );
+}
+
+/// A reply ending on a boundary leaves an empty flush tail; it is not sent.
+#[tokio::test]
+async fn empty_flush_tail_is_not_spoken() {
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        store(),
+        Arc::new(ScriptedLlm::new(&["All done. "])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("done?", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let spoken: Vec<String> = player.calls().into_iter().map(|c| c.0).collect();
+    assert_eq!(spoken, vec!["All done.".to_owned()]);
+}
+
+/// Records the [`CallContext`] in scope when the responder calls the LLM.
+struct ContextSpyLlm {
+    seen: Arc<std::sync::Mutex<Vec<(CallContext, String)>>>,
+}
+
+#[async_trait]
+impl LlmClient for ContextSpyLlm {
+    async fn chat(&self, _messages: Vec<Message>) -> anyhow::Result<Message> {
+        Ok(Message::new("assistant", "ok"))
+    }
+    async fn stream_completion(
+        &self,
+        messages: Vec<Message>,
+        _tools: Option<Vec<Value>>,
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
+        let system = messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(Message::content_str)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.seen
+            .lock()
+            .expect("spy mutex")
+            .push((current_call_context(), system));
+        Ok(familiar_connect::llm::LlmStream::new(stream::iter(vec![
+            Ok(text_delta("ok")),
+        ])))
+    }
+    fn slot(&self) -> Option<&str> {
+        Some("fast")
+    }
+    fn multimodal(&self) -> bool {
+        false
+    }
+    fn tool_calling_enabled(&self) -> bool {
+        false
+    }
+}
+
+impl familiar_connect::processors::ResponderLlm for ContextSpyLlm {}
+
+#[tokio::test]
+async fn the_voice_turn_scopes_the_call_context_for_the_mirror() {
+    // What lets a mirrored `llm_calls` row name its turn, channel and scope.
+    let s = store();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let llm = Arc::new(ContextSpyLlm {
+        seen: Arc::clone(&seen),
+    });
+    let (r, _) = voice_responder(Arc::clone(&s), llm, Arc::new(MockTTSPlayer::new(5, 5)));
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("who is here?", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+
+    let calls = seen.lock().expect("spy mutex").clone();
+    assert_eq!(calls.len(), 1);
+    let (ctx, system) = &calls[0];
+    assert_eq!(ctx.turn_scope.as_deref(), Some("t-1"));
+    assert_eq!(ctx.channel_id, Some(1));
+    // The anchoring turn is the user turn just appended.
+    let user_turn = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.content.contains("who is here?"))
+        .expect("user turn");
+    assert_eq!(ctx.turn_id, Some(user_turn.id));
+    // And the system prompt the mirror would store is the assembled one.
+    assert!(!system.is_empty());
+}
+
 #[tokio::test]
 async fn trailing_reminder_carries_post_history() {
     let s = store();
@@ -128,7 +301,7 @@ async fn trailing_reminder_carries_post_history() {
     let player = Arc::new(MockTTSPlayer::new(5, 5));
     let r = {
         let (r, _) = voice_responder(Arc::clone(&s), llm.clone(), player);
-        r.with_post_history_instructions("# Etiquette\n\nPrefer <silent>.")
+        r.with_post_history_instructions("# Etiquette\n\nKeep it brief.")
     };
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
         .await
@@ -169,13 +342,41 @@ async fn respond_decision_logged_once() {
     assert!(out.contains("t-1"));
 }
 
+/// The tool-less path's only route to silence: a `silent` call the model leaked
+/// as plain text. There is no text sentinel.
+const SILENT_LEAK: &str = "silent(reasoning=\"not addressed to me\")";
+
+/// `<silent>` used to gate the whole reply. It is ordinary prose now.
 #[tokio::test]
-async fn silent_sentinel_skips_tts_and_assistant_turn() {
+async fn literal_silent_string_is_spoken_like_any_other_text() {
     let s = store();
     let player = Arc::new(MockTTSPlayer::new(5, 5));
     let (r, _) = voice_responder(
         Arc::clone(&s),
         Arc::new(ScriptedLlm::new(&["<silent>"])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert!(
+        player.calls().iter().any(|c| c.0.contains("<silent>")),
+        "{:?}",
+        player.calls()
+    );
+}
+
+#[tokio::test]
+async fn leaked_silent_call_skips_tts_and_assistant_turn() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         player.clone(),
     );
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
@@ -201,7 +402,7 @@ async fn silent_sentinel_skips_tts_and_assistant_turn() {
 async fn silent_decision_notes_silent_abandon_status() {
     let s = store();
     let player = Arc::new(MockTTSPlayer::new(5, 5));
-    let llm = Arc::new(ScriptedLlm::new(&["<silent>"]));
+    let llm = Arc::new(ScriptedLlm::new(&[SILENT_LEAK]));
     let (r, _) = voice_responder(Arc::clone(&s), llm.clone(), player.clone());
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
         .await
@@ -236,7 +437,7 @@ async fn silent_split_across_deltas_gates() {
     let player = Arc::new(MockTTSPlayer::new(1, 5));
     let (r, _) = voice_responder(
         Arc::clone(&s),
-        Arc::new(ScriptedLlm::new(&["<sil", "ent>"])),
+        Arc::new(ScriptedLlm::new(&["sil", "ent(reasoning=x)"])),
         player.clone(),
     );
     r.handle(&activity_start("voice:1", "t-1", None), &bus())
@@ -507,9 +708,9 @@ async fn barge_in_during_stream_prevents_speech() {
     }
 }
 
-/// A stream gated between the two deltas: it yields `<sil` (leaving the silent
-/// detector undecided), signals `d1`, then parks until `release`, then yields
-/// `ent>`. This makes the "cancel lands between deltas" scenario deterministic
+/// A stream gated between the two deltas: it yields `<sil` (an ambiguous
+/// prefix, leaving the stream gate undecided), signals `d1`, then parks until
+/// `release`, then yields `ent>`. This makes the "cancel lands between deltas" scenario deterministic
 /// under any test-runner load (no wall-clock racing).
 struct GatedLlm {
     d1_flag: Arc<AtomicBool>,
@@ -813,7 +1014,7 @@ impl LlmClient for BarrierLlm {
             .await;
         }
         self.active.fetch_sub(1, Ordering::SeqCst);
-        let content = if already { "<silent>" } else { "Sure thing." };
+        let content = if already { SILENT_LEAK } else { "Sure thing." };
         Ok(familiar_connect::llm::LlmStream::new(stream::once(
             async move { Ok(text_delta(content)) },
         )))
@@ -1103,7 +1304,7 @@ async fn silent_log_names_server_and_channel() {
     );
     let (r, _) = voice_responder(
         store(),
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         Arc::new(MockTTSPlayer::new(5, 5)),
     );
     let r = r.with_focus_manager(fm);

@@ -143,7 +143,7 @@ temperature  = 0.7
 reasoning    = "off"        # "off" | "low" | "medium" | "high" | "default" | omit
                             # "default" = model default; overrides a level merged
                             # in from _default/character.toml (TOML has no null)
-tool_calling = false
+tool_calling = true         # default; `false` is refused at load
 
 [llm.prose]
 model                    = "z-ai/glm-5.2"
@@ -151,7 +151,7 @@ temperature              = 0.7
 provider_order           = ["z-ai"]   # optional — pin OpenRouter routing
 provider_allow_fallbacks = true       # optional — default true
 reasoning                = "medium"
-tool_calling             = false
+tool_calling             = true
 
 [llm.background]
 model          = "z-ai/glm-5.2"
@@ -246,20 +246,20 @@ longer needed.
 - **`[channels.<id>].message_rendering = "prefixed"`** — keeps the
   `[HH:MM Display Name]` prefix; timestamp rhythm helps the model
   judge multi-party flow.
-- **`<silent>` sentinel** — already wired (see
+- **Silence** — already wired (see
   [multi-party addressivity](context-pipeline.md#multi-party-addressivity)).
-  Don't override the sentinel instruction in the character prompt.
-  Under tool calling the `silent(reasoning)` tool is the equivalent
-  agentic-path gate.
+  Every tool call is silent unless it passes `silent: false`, and
+  `silent(reasoning)` is the explicit no-op. Don't override the
+  character prompt's silence instruction.
 
 ### Attentional focus
 
 The familiar attends to one text + one voice channel
 at a time; unfocused channels' messages are **staged** (stored, no
 reply) until the model shifts focus. Focus is model-driven through
-the `shift_focus(channel_id)` tool, so deliberate moves need
-[`tool_calling = true`](#tool_calling). On a slot with no tool path at
-all, one fallback keeps her reachable: a message that directly pings
+the `shift_focus(channel_id)` tool (see
+[`tool_calling`](#tool_calling)). On a responder with no tool path
+wired at all, one fallback keeps her reachable: a message that directly pings
 her in an unfocused channel shifts focus there and is answered (issue
 #221). Ambient traffic still stages, and with tools on the fallback is
 off entirely. On startup focus defaults to the first text and
@@ -348,9 +348,8 @@ typing_backoff_max_s     = 30.0
 While generating, the bot surfaces Discord's "Bot is typing…"
 indicator (via `BotHandle.trigger_typing`) so users see the in-flight
 signal — including on regenerated replies after a barge-in cancel.
-The indicator opens lazily, only after `SilentDetector` rules out the
-`<silent>` sentinel, so reasoning resolving to silence never flickers
-it on. Stops cleanly when the streaming context exits.
+The indicator opens lazily, only after `StreamGate` rules out a leaked
+tool call, so a reply resolving to silence never flickers it on. Stops cleanly when the streaming context exits.
 
 ## Activities
 
@@ -454,7 +453,7 @@ idle_close_s            = 30.0
 | `utterance_end_ms` | `1500` | Speech-end grace window. |
 | `smart_format` | `true` | Punctuation, number/date/unit normalization. |
 | `punctuate` | `true` | Explicit punctuation pass. |
-| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. Voice-channel member proper nouns (display names, usernames, aliases, nicknames) are auto-appended per speaker at connect time on top of this list, then deduped and capped — so this field is only for jargon the members' names don't already cover. |
+| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. The call's spoken vocabulary — the familiar's own `aliases`, voice-channel member proper nouns (display names, usernames, aliases, nicknames), and bots present — is auto-appended per speaker at connect time behind this list, then deduped and capped — so this field is only for jargon those names don't already cover. |
 | `replay_buffer_s` | `5.0` | Seconds replayed after WebSocket reconnect. |
 | `keepalive_interval_s` | `3.0` | Keepalive ping cadence. |
 | `reconnect_max_attempts` | `5` | Reconnect attempts before giving up. |
@@ -632,8 +631,8 @@ presence_penalty         = 1.5              # optional, [-2, 2]
 provider_order           = ["z-ai"]         # optional, OpenRouter pin
 provider_allow_fallbacks = true             # optional, default true
 reasoning                = "medium"         # "off"|"none"|"low"|"medium"|"high"|"default"|omit
-think_prepend            = false            # optional, default false
-tool_calling             = false            # optional, default false
+think_prepend            = false            # optional, default false (only false)
+tool_calling             = true             # optional, default true (only true)
 image_tools              = false            # optional, default false
 multimodal               = false            # optional, default false
 ```
@@ -656,7 +655,7 @@ Maps to OpenRouter's `reasoning` parameter:
   models that reason by default, like GLM 5.1).
 - `"none"` → `reasoning.effort = "none"` (disable thinking generation
   entirely — the no-think mode for hybrid-reasoning models like
-  Qwen3.6; pair with `think_prepend`).
+  Qwen3.6).
 - `"low"` / `"medium"` / `"high"` → `reasoning.effort = <level>`.
 - `"default"` → no `reasoning` field; reclaims the model default over
   a level merged in from `_default/character.toml`.
@@ -668,8 +667,24 @@ Maps to OpenRouter's `reasoning` parameter:
 Appends a fake closed think block (`<think>\n\n</think>`) as an
 assistant prefill message on every request from this slot's client.
 Qwen3.6 no-think stabiliser: with `reasoning = "none"` and no prefill,
-the model leaks thinking as plain text. Useless on other models —
-leave `false`.
+the model leaks thinking as plain text.
+
+**Default `false`, and `true` is refused at config load.** A trailing
+assistant message *is* prefix completion, and providers that implement
+prefix mode refuse to pair it with a `tools` array — DeepSeek answers
+`Function call should not be used with prefix`. `tool_calling` is
+mandatory, so every slot sends tools and the prefill has nowhere left
+to work. Writing `think_prepend = true` fails the load with:
+
+```text
+[llm.<slot>].think_prepend = true is unsupported: it appends a trailing
+assistant message, which providers read as prefix completion, and prefix
+completion cannot be combined with the tools array every slot now sends —
+remove the key (it defaults to false) or set [llm.<slot>].think_prepend = false
+```
+
+See
+[`think_prepend` and tools](configuration-model.md#think_prepend-and-tools).
 
 ### `tool_calling`
 
@@ -677,19 +692,32 @@ Runs the slot's agentic loop with the full tool registry:
 `set_alarm` / `cancel_alarm`, `silent`, `shift_focus`, and (text
 only) `read_channel` plus `start_activity` (the latter only when the
 [activities catalog](activities.md#configuration) is non-empty).
-With it `false` the registry never installs, so
-the model can't shift focus or stay silent *via tools* — the
-`<silent>` text sentinel still works on the bare streaming path, but
-focus stays pinned to its startup default. Enable it on `prose` /
-`fast` to make the attentional stream model-driven.
 
-Because a focus manager is always wired to both responders, `false`
-here is flagged at startup with an `ERROR` naming the slot: the
-familiar can never call `shift_focus`, so that surface's channel focus
-is fixed for the session. The same boot pass cross-checks
+**Default `true`, and `false` is refused at config load.** Silence is a
+tool call now — every call is silent unless it passes `silent: false`,
+and `silent(reasoning)` is how the familiar declines to reply at all —
+so a slot without tool calling could never stay quiet. Writing
+`tool_calling = false` fails the load with:
+
+```text
+[llm.<slot>].tool_calling = false is unsupported: silence and every other
+decision the familiar declines to speak for are tool calls, so a slot
+without tool calling can never stay quiet — remove the key (it defaults to
+true) or set [llm.<slot>].tool_calling = true
+```
+
+Remove the key rather than flipping it; the default is the only supported
+value. A config built in-process (not through the loader) still hits a boot
+`ERROR` naming the slot. The same boot pass cross-checks
 `tool_calling` / `multimodal` / `image_tools` against the model's
-OpenRouter metadata — see
+OpenRouter metadata — a model whose `supported_parameters` lack `tools`
+is now a hard mismatch with only one fix, picking a different model. See
 [Startup model diagnostics](configuration-model.md#startup-model-diagnostics).
+
+**Every call is silent by default.** Each tool's schema carries a shared
+`silent` boolean defaulting to `true`, injected by `Tool::new` so a new
+tool cannot forget it. The model passes `silent: false` on a call when it
+also means to speak that turn; the opt-in latches for the whole turn.
 
 The loop's per-turn iteration cap (model call → tool execution →
 re-call) is `[tools].loop_max_iterations` (default `5`, shared by
@@ -708,7 +736,8 @@ queue behind each other.
 
 When `true`, registers the `view_image` tool in the text tool registry
 for this slot. The agentic loop runs when either `tool_calling` or
-`image_tools` is set. `view_image` is never registered in the voice
+`image_tools` is set (in practice always, since `tool_calling` cannot be
+turned off). `view_image` is never registered in the voice
 registry. Requires `[llm].image_description_model` for descriptions.
 The describe prompt is neutral by default; append per-familiar persona
 constraints with `[prompt].image_description_constraints` (see below).

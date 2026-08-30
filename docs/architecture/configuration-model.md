@@ -51,7 +51,12 @@ Surface today:
   drive the reserved `sleep` activity (catalog entry in
   `activities.toml`). Omit the table to leave the schedule disarmed.
   See [Sleep § The window](sleep.md#the-window).
-- `aliases` — names the familiar answers to.
+- `aliases` — names the familiar answers to. Two consumers: the
+  prompt-facing display name (the first alias, else the title-cased
+  id), and STT keyterm biasing — every alias is fed to the voice
+  keyterm list so the familiar's own name transcribes correctly. See
+  [Voice pipeline — Keyterms are vocabulary, not
+  membership](voice-pipeline.md#keyterms-are-vocabulary-not-membership).
 - `[providers.history].voice_window_size` / `.text_window_size` —
   recent-history layer windows, tiered by responder (defaults
   100 / 200). Safety nets behind the token-aware `[budget.<tier>]`
@@ -61,6 +66,21 @@ Surface today:
   gap between them is within this many seconds. Default `45.0`; `0`
   disables. Discord text turns are unaffected (they carry
   `platform_message_id`, which suppresses coalescing).
+- `[providers.history].llm_mirror_calls` — rows the LLM call mirror
+  keeps per familiar in the `llm_calls` table (default `1000`). Every
+  LLM request/response — assembled system prompt, message array,
+  reply, tool calls and results, timings, token counts — is written
+  there for troubleshooting and analytics; the newest N rows survive
+  and older ones are pruned on write. `0` switches mirroring off
+  entirely: no sink is installed and the transport skips capturing
+  prompts, so the feature costs nothing. Negative values are rejected
+  at load (`[providers.history].llm_mirror_calls must be >= 0, got -1`)
+  — an unbounded mirror is deliberately not offered. Budget ~30 KB per
+  row. These rows contain every participant's messages in full; see
+  [Privacy policy](../legal/privacy-policy.md#what-is-stored-on-disk)
+  before raising the cap, and
+  [Memory strategies — `llm_calls`](memory-strategies.md#the-one-table-that-is-not-a-projection-llm_calls)
+  for the schema.
 - `[providers.turn_detection].strategy` — `"deepgram"` (default) or
   `"ten+smart_turn"`. See
   [Tuning — local turn detection](tuning.md#local-turn-detection-v1).
@@ -109,13 +129,17 @@ Surface today:
   `provider_order`, `reasoning`, `think_prepend`, `tool_calling`,
   `image_tools`, `multimodal`). Schema and call-site →
   slot mapping at [Tuning — LLM slots](tuning.md#llm-slots).
-  `tool_calling` is wired end-to-end: when `true`, the responder for
-  that slot installs the in-process `ToolRegistry` (today: `set_alarm`,
-  `cancel_alarm`, and optionally `view_image`) and runs the agentic loop.
-  `image_tools` (default `false`) independently gates `view_image`
-  registration — the loop runs when either flag is set. `multimodal`
+  `tool_calling` is wired end-to-end: the responder for that slot
+  installs the in-process `ToolRegistry` (today: `set_alarm`,
+  `cancel_alarm`, `silent`, and optionally `view_image`) and runs the
+  agentic loop. It defaults to `true` and `false` is refused at load —
+  silence is a tool call, so a tool-less slot could never decline to
+  reply. `image_tools` (default `false`) independently gates
+  `view_image` registration. `multimodal`
   controls whether `ImageResult` tool-result messages include JPEG
   content blocks (`true`) or the text description only (`false`).
+  `think_prepend = true` is refused at load for the same reason — see
+  [`think_prepend` and tools](#think_prepend-and-tools).
   See [Tool calling](overview.md#tool-calling) and
   [Image viewing](overview.md#image-viewing). Both flags are cross-checked
   against the model at startup — see
@@ -175,7 +199,7 @@ to `false`.
   most recency-biased slot, so behavioral nudges land hardest here.
   Rendered verbatim (markdown fine); empty string omits the block.
   The shipped default is a short roleplay-etiquette note nudging the
-  familiar to lean on `<silent>`. See
+  familiar to stay quiet unless it means to speak. See
   [Context pipeline — Final reminder](context-pipeline.md#final-reminder).
 - `[prompt].operating_mode_voice` / `.operating_mode_text` — the per-mode
   operating directive. **One source for two consumers**: the
@@ -185,6 +209,12 @@ to `false`.
 - `[prompt].voice_tool_ack` — voice-tier nudge to speak before calling a
   tool. Rendered only when the voice slot actually has tool calling; blank
   omits it. See [Overview — voice tool ordering](overview.md#tool-calling).
+- `[prompt].shift_focus_coaching` — the clause spliced onto the unread
+  digest after an em dash (`There are new messages in #x (id N) (3) —
+  <this>`). One line, no leading dash; rendered only when the text slot
+  has tool calling, and blank leaves the digest a plain statement of
+  fact. See [Context pipeline — Final
+  reminder](context-pipeline.md#final-reminder).
 - `[prompt].start_activity_description` — the when-to-go policy carried by
   the `start_activity` tool description. Roleplay guidance rather than API
   contract, so it is config; the activity enum and its availability hints
@@ -234,6 +264,26 @@ removed; a profile still naming one fails config validation with a message
 saying the provider is no longer supported. The `TtsClient` /
 `StreamingTtsClient` seam remains the extension point for further backends.
 
+### `think_prepend` and tools
+
+`think_prepend` appends a fake closed think block (`<think>\n\n</think>`)
+as a trailing **assistant** message on every request from that slot — genuine,
+opt-in prefix completion, and a Qwen3.6 no-think stabiliser. Providers that
+implement prefix mode refuse to combine it with a `tools` array (DeepSeek
+answers `Function call should not be used with prefix`). Since `tool_calling`
+is mandatory, every slot sends tools, so `think_prepend` is not merely risky —
+it is unusable. Writing `think_prepend = true` fails the load with:
+
+```text
+[llm.<slot>].think_prepend = true is unsupported: it appends a trailing
+assistant message, which providers read as prefix completion, and prefix
+completion cannot be combined with the tools array every slot now sends —
+remove the key (it defaults to false) or set [llm.<slot>].think_prepend = false
+```
+
+Remove the key rather than flipping it; the default is the only supported
+value.
+
 ### Startup model diagnostics
 
 Capability flags on an LLM slot are free-form assertions about a free-form
@@ -241,11 +291,12 @@ OpenRouter model string, so config loading cannot validate them — and must not
 try, because that would make loading depend on the network. Two checks run
 after loading instead (`src/model_diagnostics.rs`).
 
-**Focus reachability** — immediate, no network. Both responder surfaces get a
-focus manager wired unconditionally, so `tool_calling = false` on `[llm.prose]`
-(text) or `[llm.fast]` (voice) makes `shift_focus` unreachable and pins that
-surface's channel focus for the whole session. Logged at `ERROR` at boot with
-the slot named.
+**Tool-calling reachability** — immediate, no network. Config loading already
+refuses `tool_calling = false`; this boot check is the backstop for a config
+built in process. Both responder surfaces get a focus manager wired
+unconditionally, so a tool-less slot could neither decline to reply nor reach
+`shift_focus`. Logged at `ERROR` at boot with the slot named, phrased as
+unsupported rather than merely limited.
 
 **Capability audit** — detached, best-effort. After the bus starts, a
 fire-and-forget task fetches `GET https://openrouter.ai/api/v1/models` and
@@ -253,8 +304,7 @@ compares each slot's declared flags against the model's metadata:
 
 | Declared | Model metadata | Level |
 |---|---|---|
-| `tool_calling = true` | `supported_parameters` lacks `tools` | `ERROR` |
-| `tool_calling = false` | `supported_parameters` has `tools` | `INFO` (advisory) |
+| `tool_calling = true` (always) | `supported_parameters` lacks `tools` | `ERROR` — the only fix is a different model |
 | `multimodal = true` (explicit) | `architecture.input_modalities` lacks `image` | `ERROR` |
 | `image_tools = true` | `input_modalities` lacks `image` | `ERROR` |
 | `image_tools = false` | `input_modalities` has `image` | `INFO` (advisory) |

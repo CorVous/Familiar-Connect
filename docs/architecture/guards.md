@@ -67,7 +67,7 @@ Where the guard sits determines what it can see and what a drop costs.
 ### Axis 2 — guard shape
 
 - **Sentinel** — inspects a streaming prefix and latches a decision
-  (`SilentDetector` / `StreamGate`).
+  (`StreamGate`).
 - **Normalize-and-compare** — canonicalises then looks for an existing match
   (`append_fact` dedup, `fact_supersede` priors).
 - **Allowlist / id-set filter** — keeps only members of a known-valid set
@@ -118,26 +118,34 @@ Locations verified against the current tree. Paths are under
    de-dupes candidate priors across subjects (`seen_priors`) before asking the
    LLM which to retire. *Prevents:* evaluating the same prior twice and
    redundant supersede work.
-7. **Silent / stream reply gate** — `reply_gate`, sentinel. `silence.rs`
-   `SilentDetector` recognises the leading `<silent>` sentinel inside the text
-   agentic loop (`processors/text_responder.rs`); `StreamGate` widens it on both
-   tool-less stream paths — voice (`processors/voice_responder.rs`) and text
-   (`stream_bare_inner`, #221) — additionally latching `Suppress` on a leaked
-   tool-call prefix (`classify_leading_leak`), logged
-   `decision=leaked_tool_suppressed`. *Prevents:* emitting a deliberate silence
-   as prose, and speaking / posting a leaked `<invoke>` / `silent(` /
-   `<tool_call>` block. The text agentic loop is covered instead by the
-   return-time strip guard in `tools::agentic`.
-8. **Leaked-metadata prefix scrub** — `reply_gate`, rewrite.
+7. **Leaked-tool-call stream gate** — `reply_gate`, sentinel. `silence.rs`
+   `StreamGate` runs on every streaming reply path — voice
+   (`processors/voice_responder.rs`), the tool-less text path
+   (`stream_bare_inner`, #221) and the text agentic loop's delta hook — latching
+   `Suppress` on a leaked tool-call prefix (`classify_leading_leak`), logged
+   `decision=leaked_tool_suppressed`, and `Silent` on a leaked `silent(` call,
+   logged `decision=silent`. *Prevents:* speaking / posting a leaked
+   `<invoke>` / `silent(` / `<tool_call>` block. The agentic loop's finished
+   reply is covered as well by the return-time strip guard in `tools::agentic`.
+   There is no text sentinel for silence: `<silent>` in model output is ordinary
+   prose.
+8. **Turn silence gate** — `reply_gate`, predicate veto. `tools::agentic`
+   suppresses the reply of any turn that called a tool without passing
+   `silent: false` on at least one call (`AgenticResult::is_silent`); the
+   `silent` tool is the explicit no-op. Tool calls are still persisted — only
+   the `silent` call and its private reasoning are withheld. *Prevents:* the
+   familiar narrating every tool use, and (historically) a `shift_focus` that
+   committed globally but left no trace in history.
+9. **Leaked-metadata prefix scrub** — `reply_gate`, rewrite.
    `processors/text_responder.rs` `strip_leaked_metadata_prefix`
    (`LEAKED_META_PREFIX_RE`) strips a leaked `[HH:MMxM]` / `[↩ …]` transcript
    prefix the model sometimes echoes. *Prevents:* the bot parroting its own
    context-framing metadata back into the channel.
-9. **Empty-reply guard** — `reply_gate`, predicate veto.
+10. **Empty-reply guard** — `reply_gate`, predicate veto.
    `processors/text_responder.rs` and `processors/voice_responder.rs` both drop a
    turn whose finished reply is whitespace-only (`reply.trim().is_empty()`).
    *Prevents:* sending an empty message / speaking silence.
-10. **Wake shift-or-silent gate** — `reply_gate`, predicate veto.
+11. **Wake shift-or-silent gate** — `reply_gate`, predicate veto.
    `processors/text_responder.rs` suppresses a wake turn that produced prose but
    did not `shift_focus` this turn (`is_wake && shifted_to.is_none()`), logging
    `guard=wake_shift_or_silent action=suppress` (#170). *Prevents:* a nudge-driven
