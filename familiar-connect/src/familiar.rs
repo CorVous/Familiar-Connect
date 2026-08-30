@@ -166,9 +166,9 @@ fn title_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Familiar, title_case};
-    use crate::llm::{LlmClient, LlmDelta, Message};
+    use crate::llm::{LlmClient, Message};
     use async_trait::async_trait;
-    use futures::stream::{self, BoxStream};
+    use futures::stream;
     use serde_json::Value;
     use std::collections::{BTreeSet, HashMap};
     use std::path::{Path, PathBuf};
@@ -186,8 +186,8 @@ mod tests {
             &self,
             _messages: Vec<Message>,
             _tools: Option<Vec<Value>>,
-        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-            Ok(Box::pin(stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(stream::empty()))
         }
         fn slot(&self) -> Option<&str> {
             Some(&self.0)

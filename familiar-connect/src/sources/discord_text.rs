@@ -125,6 +125,7 @@ impl DiscordTextSource {
                 images: params.images,
                 pings_bot: params.pings_bot,
                 wake: false,
+                alarm: false,
             }),
         };
         self.bus.publish(event.clone()).await;

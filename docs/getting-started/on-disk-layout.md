@@ -72,8 +72,9 @@ reasoning    = "medium"
 tool_calling = true
 
 [tts]
-provider    = "azure"
-azure_voice = "en-US-AmberNeural"
+provider          = "cartesia"   # only wired backend
+cartesia_voice_id = "..."
+cartesia_model    = "sonic-3"
 ```
 
 See the [Configuration model](../architecture/configuration-model.md)

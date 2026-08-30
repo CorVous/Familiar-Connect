@@ -21,3 +21,8 @@ that file to reset.
 Discord threads and forum posts are their own channels: running
 `/subscribe-text` inside a thread subscribes the familiar to that
 thread only.
+
+Both subscribe commands also record the channel and server display
+names, so a channel created after the bot logged in still shows up by
+name in presence, logs, and the model's own prompt rather than as a raw
+channel id.

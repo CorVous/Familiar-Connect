@@ -8,6 +8,9 @@
 //! `include_time=false`; tail copy with the clock, mode instruction, post-history
 //! and guild name).
 //!
+//! Tool-referencing prose is gated on `tools_enabled`: a slot with tool calling
+//! off is never told to call `shift_focus` (#221).
+//!
 //! The block grammar is a byte-exact prompt-format contract.
 
 use std::collections::HashMap;
@@ -15,7 +18,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
-use crate::focus::PRIVATE_MESSAGE_GUILD_NAME;
+use crate::focus::{PRIVATE_MESSAGE_GUILD_NAME, UNNAMED_CHANNEL_PREFIX};
 
 /// Per-mode operating directive. Intentionally duplicates the strings
 /// `OperatingModeLayer` is configured with — keep in sync.
@@ -50,24 +53,35 @@ fn unread_suffix(unread: i64, pings: i64) -> String {
     }
 }
 
-/// Render `now` as `YYYY-MM-DD H:MMpm TZ` in `display_tz` (no leading zero on the
-/// hour; `%Z` timezone abbreviation).
+/// Render `now` as `YYYY-MM-DD H:MMpm TZ (±HH:MM)` in `display_tz` (no leading
+/// zero on the hour; `%Z` abbreviation, then the numeric offset).
+///
+/// This line is the system's only clock anchor: every other model-facing time
+/// (recent-history `HH:MM` prefixes, schedule windows) is local to the same
+/// zone and carries no offset of its own. The parenthetical is what makes an
+/// RFC-3339 `when` for `set_alarm` constructible — an abbreviation alone leaves
+/// the model guessing "PDT → -07:00".
 fn fmt_when(now: DateTime<Utc>, display_tz: &str) -> String {
     let tz: Tz = display_tz.parse().unwrap_or(Tz::UTC);
     let aware = now.with_timezone(&tz);
     let clock = aware.format("%I:%M%p").to_string();
     let clock = clock.trim_start_matches('0');
     format!(
-        "{} {clock} {}",
+        "{} {clock} {} ({})",
         aware.format("%Y-%m-%d"),
-        aware.format("%Z")
+        aware.format("%Z"),
+        aware.format("%:z")
     )
 }
 
+/// Focus-line label. An unnamed channel says so — `#<snowflake>` would tell the
+/// model the channel is *named* after its id (#222) — and keeps the id, which
+/// `shift_focus` needs.
 fn channel_label(names: &HashMap<i64, String>, cid: i64) -> String {
-    names
-        .get(&cid)
-        .map_or_else(|| format!("#{cid}"), |name| format!("#{name}"))
+    names.get(&cid).map_or_else(
+        || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
+        |name| format!("#{name}"),
+    )
 }
 
 /// Unread-list item label: named channels **must** carry the numeric id so the
@@ -156,7 +170,8 @@ impl FinalReminder {
         self.include_mode_instruction = include;
         self
     }
-    /// Toggle the voice tool nudge (voice mode only).
+    /// Whether the slot can actually call tools. Gates the voice tool nudge
+    /// (voice mode) and the `shift_focus` clause on the unread digest (#221).
     #[must_use]
     pub const fn tools_enabled(mut self, enabled: bool) -> Self {
         self.tools_enabled = enabled;
@@ -275,10 +290,17 @@ impl FinalReminder {
                 } else {
                     "new messages"
                 };
-                format!(
-                    "There {verb} {noun} in {ch_list} \
-                     \u{2014} use shift_focus if it pulls your attention."
-                )
+                // Coach `shift_focus` only where it can actually be called —
+                // a tool-less slot told to use it just leaks the literal
+                // call syntax into the channel (#221).
+                if self.tools_enabled {
+                    format!(
+                        "There {verb} {noun} in {ch_list} \
+                         \u{2014} use shift_focus if it pulls your attention."
+                    )
+                } else {
+                    format!("There {verb} {noun} in {ch_list}.")
+                }
             };
 
             let block = [focus_part, unread_part]
@@ -355,6 +377,41 @@ mod tests {
             .display_tz("America/Los_Angeles")
             .render();
         assert!(out.contains("It is now: 2026-05-04 2:30PM PDT"), "{out}");
+    }
+
+    #[test]
+    fn display_tz_clock_carries_numeric_offset() {
+        // Abbreviation alone ("PDT") leaves the model guessing the offset it
+        // must put in `set_alarm`'s `when`.
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 21, 30))
+            .display_tz("America/Los_Angeles")
+            .render();
+        assert!(
+            out.contains("It is now: 2026-05-04 2:30PM PDT (-07:00)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn shown_offset_splices_into_an_rfc3339_the_alarm_tool_accepts() {
+        let now = at(2026, 5, 4, 21, 30);
+        let out = FinalReminder::new("voice")
+            .now(now)
+            .display_tz("America/Los_Angeles")
+            .render();
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("It is now: "))
+            .expect("clock line");
+        let offset = line
+            .rsplit_once('(')
+            .and_then(|(_, tail)| tail.strip_suffix(')'))
+            .expect("offset parenthetical");
+        // What the model does to fill `when`: shown local clock + shown offset.
+        let stamp = format!("2026-05-04T14:30:00{offset}");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&stamp).expect("rfc3339");
+        assert_eq!(parsed.with_timezone(&Utc), now);
     }
 
     #[test]
@@ -488,7 +545,7 @@ mod tests {
             .render();
         let expected = "---\n\
              \n\
-             It is now: 2026-05-04 2:30PM UTC\n\
+             It is now: 2026-05-04 2:30PM UTC (+00:00)\n\
              \n\
              Special input:\n\
              \n\
@@ -608,9 +665,25 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(42)
+            .channel_names(names(&[(42, "general")]))
             .render();
-        assert!(out.contains("attention is currently on #42"));
+        assert!(out.contains("attention is currently on #general"));
         assert!(!out.contains("shift_focus"));
+    }
+
+    // An unnamed focus channel used to render as `#<snowflake>`, telling the
+    // model the channel is *named* after its id (#222).
+    #[test]
+    fn unnamed_focus_channel_announces_the_missing_name() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .focus_channel_id(1_221_605_022_102_458_421)
+            .render();
+        assert!(
+            out.contains("attention is currently on unnamed channel (id 1221605022102458421)."),
+            "{out}"
+        );
+        assert!(!out.contains("#1221605022102458421"), "{out}");
     }
 
     #[test]
@@ -627,9 +700,13 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(7)
+            .channel_names(names(&[(7, "general")]))
             .post_history_instructions("ETIQUETTE")
             .render();
-        assert!(out.find("attention is currently on #7").unwrap() < out.find("ETIQUETTE").unwrap());
+        assert!(
+            out.find("attention is currently on #general").unwrap()
+                < out.find("ETIQUETTE").unwrap()
+        );
     }
 
     // --- unread digest ------------------------------------------------------
@@ -638,12 +715,38 @@ mod tests {
     fn unread_digest_rendered() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(10, (3, 0)), (20, (1, 0))])
             .render();
         assert!(out.contains("new message"));
         assert!(out.contains("#10"));
         assert!(out.contains("#20"));
         assert!(out.contains("shift_focus"));
+    }
+
+    #[test]
+    fn unread_digest_omits_shift_focus_coaching_without_tools() {
+        // #221: a tool-less slot cannot call `shift_focus`; coaching it to only
+        // invites a leaked literal call.
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(out.contains("There are new messages in #10 (3)."), "{out}");
+        assert!(!out.contains("shift_focus"), "{out}");
+    }
+
+    #[test]
+    fn unread_digest_keeps_shift_focus_coaching_with_tools() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(
+            out.contains("#10 (3) \u{2014} use shift_focus if it pulls your attention."),
+            "{out}"
+        );
     }
 
     #[test]
@@ -682,9 +785,10 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(3)
+            .channel_names(names(&[(3, "general")]))
             .unread_digest(vec![(10, (4, 0))])
             .render();
-        assert!(out.contains("attention is currently on #3"));
+        assert!(out.contains("attention is currently on #general"));
         assert!(out.contains("#10 (4)"));
     }
 
@@ -692,6 +796,7 @@ mod tests {
     fn ping_subset_with_higher_unread_count() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(10, (3, 1))])
             .render();
         assert!(out.contains("#10 (3, 1 ping)"));
@@ -729,6 +834,7 @@ mod tests {
     fn single_unread_no_ping_has_no_suffix() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(10, (1, 0))])
             .render();
         assert!(out.contains("#10 \u{2014}"));
@@ -739,6 +845,7 @@ mod tests {
     fn named_unread_channel_surfaces_numeric_id() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
             .unread_digest(vec![(422_137_955_130_408_970, (2, 0))])
             .channel_names(names(&[(422_137_955_130_408_970, "the-annex")]))
             .render();

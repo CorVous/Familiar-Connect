@@ -404,22 +404,43 @@ fn format_channel_marker(
     }
 }
 
-/// Interleave channel markers when the surviving window spans more than one
-/// channel; single-channel windows pass through byte-for-byte.
-fn insert_channel_markers(
+/// Interleave day + channel markers into the rendered window.
+///
+/// A `{date}:` marker (the RAG renderer's date-header shape) precedes each
+/// local calendar day, and a `{server}/{channel}` marker each channel change —
+/// but **only** when the window actually spans more than one day / channel, so
+/// the common single-day single-channel window passes through byte-for-byte at
+/// zero token cost. Per-turn prefixes stay bare `HH:MM`: dating every line
+/// would cost far more than one marker per day boundary.
+fn insert_window_markers(
     turns: &[HistoryTurn],
     rendered: Vec<Message>,
+    tz: Tz,
     channel_resolver: Option<&ChannelResolver>,
     guild_resolver: Option<&ChannelResolver>,
 ) -> Vec<Message> {
-    let distinct: HashSet<i64> = turns.iter().map(|t| t.channel_id).collect();
-    if distinct.len() <= 1 {
+    let channels: HashSet<i64> = turns.iter().map(|t| t.channel_id).collect();
+    let dates: HashSet<String> = turns
+        .iter()
+        .map(|t| format_date_iso(t.timestamp, tz))
+        .collect();
+    let mark_channels = channels.len() > 1;
+    let mark_days = dates.len() > 1;
+    if !mark_channels && !mark_days {
         return rendered;
     }
-    let mut out: Vec<Message> = Vec::with_capacity(rendered.len() + distinct.len());
+    let mut out: Vec<Message> = Vec::with_capacity(rendered.len() + channels.len() + dates.len());
     let mut prev_channel: Option<i64> = None;
+    let mut prev_date: Option<String> = None;
     for (turn, msg) in turns.iter().zip(rendered) {
-        if Some(turn.channel_id) != prev_channel {
+        if mark_days {
+            let date = format_date_iso(turn.timestamp, tz);
+            if prev_date.as_ref() != Some(&date) {
+                out.push(Message::new("user", format!("{date}:")));
+                prev_date = Some(date);
+            }
+        }
+        if mark_channels && Some(turn.channel_id) != prev_channel {
             out.push(Message::new(
                 "user",
                 format_channel_marker(turn.channel_id, channel_resolver, guild_resolver),
@@ -632,9 +653,10 @@ impl RecentHistoryLayer {
             turns = turns.split_off(drop);
         }
 
-        insert_channel_markers(
+        insert_window_markers(
             &turns,
             rendered,
+            self.tz,
             self.channel_name_resolver.as_ref(),
             self.guild_name_resolver.as_ref(),
         )

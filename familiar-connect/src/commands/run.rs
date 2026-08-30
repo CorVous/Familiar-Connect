@@ -492,11 +492,19 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         };
 
     // Degrade-not-fail: TTS / STT / local turn detector unavailability warns.
-    let tts_client = match crate::tts::create_tts_client(&config.tts) {
-        Ok(kind) => Some(kind.into_dyn()),
-        Err(err) => {
-            tracing::warn!("TTS client unavailable: {err}");
-            None
+    // An unwired provider is louder — it would otherwise construct fine and
+    // fail on the first synthesis, mid-conversation.
+    let tts_client = if let Some(reason) = crate::tts::unwired_provider_reason(&config.tts.provider)
+    {
+        tracing::error!("{reason}");
+        None
+    } else {
+        match crate::tts::create_tts_client(&config.tts) {
+            Ok(kind) => Some(kind.into_dyn()),
+            Err(err) => {
+                tracing::warn!("TTS client unavailable: {err}");
+                None
+            }
         }
     };
     let transcriber = match crate::stt::create_transcriber(&config.stt) {
@@ -597,8 +605,7 @@ impl crate::llm::LlmClient for ResponderLlmAdapter {
         &self,
         messages: Vec<crate::llm::Message>,
         tools: Option<Vec<serde_json::Value>>,
-    ) -> anyhow::Result<futures::stream::BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-    {
+    ) -> anyhow::Result<crate::llm::LlmStream> {
         self.inner.stream_completion(messages, tools).await
     }
     fn slot(&self) -> Option<&str> {
@@ -635,6 +642,45 @@ const DEBUG_TOPICS: [&str; 4] = [
     crate::bus::topics::TOPIC_VOICE_ACTIVITY_START,
     crate::bus::topics::TOPIC_VOICE_TRANSCRIPT_FINAL,
 ];
+
+/// Spawn the detached OpenRouter capability audit (#218).
+///
+/// Fire-and-forget like the signal listener: config loading stays offline, and
+/// a slow or unreachable catalog can never gate readiness. Silent without an
+/// API key — `run_inner` has already refused that case.
+#[cfg(feature = "discord")]
+fn spawn_model_capability_audit(config: &crate::config::CharacterConfig) {
+    let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return;
+    }
+    tokio::spawn(crate::model_diagnostics::run_capability_audit(
+        api_key,
+        crate::llm::OPENROUTER_BASE_URL.to_owned(),
+        config.llm.clone(),
+    ));
+}
+
+/// Boot check for #221: both responder surfaces get a focus manager
+/// unconditionally, so a slot with `tool_calling = false` can never reach
+/// `shift_focus`. Needs no network — immediate and unconditional.
+#[cfg(feature = "discord")]
+fn check_focus_tool_calling(config: &crate::config::CharacterConfig) {
+    // Text can still follow a direct ping without a tool; voice cannot.
+    for (surface, slot_name, ping_fallback) in [("text", "prose", true), ("voice", "fast", false)] {
+        let Some(slot) = config.llm.get(slot_name) else {
+            continue;
+        };
+        if let Some(msg) = crate::model_diagnostics::focus_unreachable_message(
+            surface,
+            slot_name,
+            slot,
+            ping_fallback,
+        ) {
+            tracing::error!(target: "familiar_connect.llm", "{msg}");
+        }
+    }
+}
 
 /// Spawn the two-stage SIGINT/SIGTERM listener.
 #[cfg(all(feature = "discord", unix))]
@@ -706,8 +752,10 @@ const DM_PEER_AUTHOR_LIMIT: i64 = 5;
 /// Mirrors what `register_dm_channel` records live: the sentinel guild name (DM
 /// detection keys off it) and the peer's display name, recovered from history
 /// via the author row matching the subscription's `dm_user_id`. When history
-/// has no such author, `channel_names` stays unset and the digest falls back to
-/// `DM (id <cid>)`. Guild rows (`dm_user_id` is `None`) are untouched.
+/// has no such author (freshly-allowlisted peer), the name falls back to
+/// `user <dm_user_id>` — an unset entry would leave presence rendering the raw
+/// channel snowflake (#222). The first DM overwrites it with the real name.
+/// Guild rows (`dm_user_id` is `None`) are untouched.
 #[cfg(feature = "discord")]
 async fn rehydrate_dm_naming(
     focus_manager: &FocusManager,
@@ -726,19 +774,16 @@ async fn rehydrate_dm_naming(
         let authors = store
             .recent_distinct_authors(familiar_id.to_owned(), channel_id, DM_PEER_AUTHOR_LIMIT)
             .await?;
-        let Some(peer) = authors
+        let name = authors
             .into_iter()
             .find(|a| a.user_id == dm_user_id.to_string())
-        else {
-            continue;
-        };
-        let name = peer
-            .display_name
-            .filter(|s| !s.is_empty())
-            .or_else(|| peer.username.filter(|s| !s.is_empty()));
-        if let Some(name) = name {
-            focus_manager.set_channel_name(channel_id, name);
-        }
+            .and_then(|peer| {
+                peer.display_name
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| peer.username.filter(|s| !s.is_empty()))
+            })
+            .unwrap_or_else(|| format!("user {dm_user_id}"));
+        focus_manager.set_channel_name(channel_id, name);
     }
     Ok(())
 }
@@ -824,6 +869,9 @@ async fn async_main(
 
     familiar.bus.start().await;
 
+    // Model-configuration diagnostics (#218) — detached, never gates readiness.
+    spawn_model_capability_audit(&familiar.config);
+
     // Subscriptions: ONE shared-mutable registry (`Arc<Mutex<…>>`) consumed
     // by both the bot (which mutates it on `/subscribe*`) and the focus manager
     // (which reads it through the `SubscriptionView` seam).
@@ -840,6 +888,10 @@ async fn async_main(
         .with_nudge_debounce_seconds(familiar.config.focus.nudge_debounce_seconds)
         .with_catch_up_limit(usize::try_from(familiar.config.focus.catch_up_limit).unwrap_or(20)),
     );
+
+    // Both responders below take this focus manager, so #221's trap is live
+    // from here on.
+    check_focus_tool_calling(&familiar.config);
 
     // Boot DM validation + naming + default-focus seeding, in one ordered unit:
     // prune de-allowlisted DM rows, initialize focus, rehydrate DM naming, then
@@ -1088,6 +1140,7 @@ async fn async_main(
     projector_context.memory = familiar.config.memory_providers.clone();
     projector_context.familiar_display_name = Some(familiar.display_name());
     projector_context.dream_extraction_clause = familiar.config.dream_extraction_clause.clone();
+    projector_context.display_tz = familiar.config.display_tz.clone();
     let projectors = create_projectors(
         &familiar.config.memory_providers.projectors,
         &projector_context,
@@ -1443,7 +1496,7 @@ mod tests {
 
     fn fake_clients() -> std::collections::HashMap<String, Arc<dyn crate::llm::LlmClient>> {
         use async_trait::async_trait;
-        use futures::stream::{self, BoxStream};
+        use futures::stream;
         use serde_json::Value;
 
         struct FakeLlm(String);
@@ -1459,9 +1512,8 @@ mod tests {
                 &self,
                 _messages: Vec<crate::llm::Message>,
                 _tools: Option<Vec<Value>>,
-            ) -> anyhow::Result<BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-            {
-                Ok(Box::pin(stream::empty()))
+            ) -> anyhow::Result<crate::llm::LlmStream> {
+                Ok(crate::llm::LlmStream::new(stream::empty()))
             }
             fn slot(&self) -> Option<&str> {
                 Some(&self.0)
@@ -1799,8 +1851,11 @@ mod tests {
             );
         }
 
+        // A freshly-allowlisted peer has no history to mine, so the peer id is
+        // the only name available — better than leaving the entry unset and
+        // letting presence render the raw channel snowflake (#222).
         #[tokio::test]
-        async fn rehydrate_dm_row_without_history_sets_guild_only() {
+        async fn rehydrate_dm_row_without_history_falls_back_to_peer_id() {
             let (_dir, _path, mut reg) = registry();
             reg.add(555, SubscriptionKind::Text, None, Some(123))
                 .unwrap();
@@ -1813,7 +1868,28 @@ mod tests {
                 fm.guild_name_for(Some(555)).as_deref(),
                 Some(PRIVATE_MESSAGE_GUILD_NAME)
             );
-            assert!(!fm.channel_names().contains_key(&555));
+            assert_eq!(
+                fm.channel_names().get(&555).map(String::as_str),
+                Some("user 123")
+            );
+        }
+
+        #[tokio::test]
+        async fn historyless_dm_digest_names_the_peer_id() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(123))
+                .unwrap();
+            let store = store();
+            let (view, fm) = focus_manager(reg, &store);
+            rehydrate_dm_naming(fm.as_ref(), view.as_ref(), store.as_ref(), "fam")
+                .await
+                .unwrap();
+            let out = FinalReminder::new("text")
+                .unread_digest(vec![(555, (1, 0))])
+                .channel_names(fm.channel_names())
+                .guild_names(fm.guild_names())
+                .render();
+            assert!(out.contains("DM from user 123 (id 555)"), "{out}");
         }
 
         #[tokio::test]

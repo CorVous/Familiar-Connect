@@ -1029,13 +1029,42 @@ impl BotEvents {
         }
     }
 
+    /// Record display names for a channel the `on_ready` snapshot missed —
+    /// created (or first subscribed) after boot. Without this the focus caches
+    /// stay empty for that channel and every label degrades to its raw id
+    /// (#222). Empty / absent names leave the cache untouched.
+    fn record_channel_naming(
+        &self,
+        channel_id: i64,
+        channel_name: Option<&str>,
+        guild_name: Option<&str>,
+    ) {
+        let Some(fm) = &self.handle.focus_manager else {
+            return;
+        };
+        if let Some(name) = channel_name.filter(|n| !n.is_empty()) {
+            fm.set_channel_name(channel_id, name);
+        }
+        if let Some(name) = guild_name.filter(|n| !n.is_empty()) {
+            fm.set_guild_name(channel_id, name);
+        }
+    }
+
     /// `/subscribe-text` registry mutation, returning the ack to reply with.
+    /// `channel_name` / `guild_name` come from the interaction + gateway cache
+    /// and seed the focus name caches.
     ///
     /// Refuses inside a DM (`guild_id` is `None`): the command is global, so it
     /// is invocable in a DM, where `add()` would replace the persisted DM row
     /// and wipe its `dm_user_id`. DM subscriptions are managed by the allowlist
     /// alone.
-    pub fn on_subscribe_text(&self, channel_id: i64, guild_id: Option<i64>) -> &'static str {
+    pub fn on_subscribe_text(
+        &self,
+        channel_id: i64,
+        guild_id: Option<i64>,
+        channel_name: Option<&str>,
+        guild_name: Option<&str>,
+    ) -> &'static str {
         if guild_id.is_none() {
             return "DM subscriptions are managed automatically via the DM \
                     allowlist — no need to subscribe here.";
@@ -1053,6 +1082,7 @@ impl BotEvents {
                 guild_id.and_then(|g| u64::try_from(g).ok()),
                 None,
             );
+        self.record_channel_naming(channel_id, channel_name, guild_name);
         "Listening in this channel."
     }
 
@@ -1060,11 +1090,18 @@ impl BotEvents {
     /// songbird join + intake pipeline is layered on by the `discord-voice` glue
     /// in [`create_bot`]'s dispatcher).
     ///
-    /// Registers a persisted voice subscription and marks the channel active in
-    /// the `voice_channels` proxy the activity engine's `voice_active_fn`
-    /// reads. The focus manager sees the new subscription immediately through
-    /// the shared registry (no restart).
-    pub fn on_subscribe_voice(&self, channel_id: i64, guild_id: Option<i64>) {
+    /// Registers a persisted voice subscription, records its display names, and
+    /// marks the channel active in the `voice_channels` proxy the activity
+    /// engine's `voice_active_fn` reads. The focus manager sees the new
+    /// subscription immediately through the shared registry (no restart).
+    pub fn on_subscribe_voice(
+        &self,
+        channel_id: i64,
+        guild_id: Option<i64>,
+        channel_name: Option<&str>,
+        guild_name: Option<&str>,
+    ) {
+        self.record_channel_naming(channel_id, channel_name, guild_name);
         if let Ok(cid) = u64::try_from(channel_id) {
             let _ = self
                 .subscriptions
@@ -1719,6 +1756,17 @@ mod serenity_glue {
             let name = command.data.name.clone();
             let guild_id = command.guild_id.map(|g| g.get() as i64);
             let channel_id = command.channel_id.get() as i64;
+            // Naming for a channel `on_ready` never saw (created post-boot):
+            // the interaction carries the channel object, the gateway cache the
+            // server name — neither costs a REST call.
+            let channel_name = command
+                .channel
+                .as_ref()
+                .and_then(|ch| ch.name.clone())
+                .filter(|n| !n.is_empty());
+            let guild_name = command
+                .guild_id
+                .and_then(|gid| ctx.cache.guild(gid).map(|g| g.name.clone()));
             let ack = SlashCtx {
                 command,
                 http: ctx.http.clone(),
@@ -1726,7 +1774,16 @@ mod serenity_glue {
             match name.as_str() {
                 "subscribe-text" => {
                     defer_interaction(&ack).await;
-                    reply(&ack, self.events.on_subscribe_text(channel_id, guild_id)).await;
+                    reply(
+                        &ack,
+                        self.events.on_subscribe_text(
+                            channel_id,
+                            guild_id,
+                            channel_name.as_deref(),
+                            guild_name.as_deref(),
+                        ),
+                    )
+                    .await;
                 }
                 "unsubscribe-text" => {
                     defer_interaction(&ack).await;
@@ -1790,6 +1847,25 @@ mod serenity_glue {
             line
         }
 
+        /// The caller's live voice channel as `(id, channel name, server name)`,
+        /// read from the gateway cache (GUILD_VOICE_STATES). The dashmap ref is
+        /// dropped before any await.
+        #[cfg(feature = "discord-voice")]
+        fn resolve_voice_target(
+            ctx: &Context,
+            gid: serenity::all::GuildId,
+            user_id: serenity::all::UserId,
+        ) -> Option<(u64, Option<String>, String)> {
+            ctx.cache.guild(gid).and_then(|guild| {
+                let cid = guild
+                    .voice_states
+                    .get(&user_id)
+                    .and_then(|vs| vs.channel_id)?;
+                let name = guild.channels.get(&cid).map(|ch| ch.name.clone());
+                Some((cid.get(), name, guild.name.clone()))
+            })
+        }
+
         /// `/subscribe-voice`: join the caller's voice channel via songbird
         /// (songbird owns the DAVE/MLS handshake), wire the [`RecordingSink`] +
         /// per-speaker intake pipeline, populate the `voice_runtime` map, and
@@ -1808,23 +1884,26 @@ mod serenity_glue {
             };
             let guild_id_u64 = gid.get();
             let guild_id = guild_id_u64 as i64;
-            let user_id = ack.command.user.id;
-            // Resolve the caller's current voice channel from the gateway cache
-            // (GUILD_VOICE_STATES). The dashmap ref is dropped before any await.
-            let resolved: Option<(u64, Option<String>)> = ctx.cache.guild(gid).and_then(|guild| {
-                let cid = guild
-                    .voice_states
-                    .get(&user_id)
-                    .and_then(|vs| vs.channel_id)?;
-                let name = guild.channels.get(&cid).map(|ch| ch.name.clone());
-                Some((cid.get(), name))
-            });
-            let Some((channel_id_u64, channel_name)) = resolved else {
+            let Some((channel_id_u64, channel_name, guild_name)) =
+                Self::resolve_voice_target(ctx, gid, ack.command.user.id)
+            else {
                 reply(ack, "You must be in a voice channel.").await;
                 return;
             };
             let channel_id = channel_id_u64 as i64;
-            let display = channel_name.unwrap_or_else(|| format!("#{channel_id}"));
+            let display = channel_name
+                .clone()
+                .unwrap_or_else(|| format!("#{channel_id}"));
+            // Every exit that keeps the subscription registers it with the
+            // names resolved above (#222).
+            let subscribe = || {
+                self.events.on_subscribe_voice(
+                    channel_id,
+                    Some(guild_id),
+                    channel_name.as_deref(),
+                    Some(&guild_name),
+                );
+            };
 
             // Idempotent: a second subscribe for the same live channel re-affirms.
             if self
@@ -1835,7 +1914,7 @@ mod serenity_glue {
                 .expect("voice_runtime mutex poisoned")
                 .contains_key(&channel_id)
             {
-                self.events.on_subscribe_voice(channel_id, Some(guild_id));
+                subscribe();
                 reply(ack, &format!("Already listening in {display}.")).await;
                 return;
             }
@@ -1901,11 +1980,11 @@ mod serenity_glue {
                 // Loser of the race: stop only our intake tasks. Do NOT leave
                 // the songbird call — it is shared per-guild with the winner.
                 stop_voice_intake(orphan).await;
-                self.events.on_subscribe_voice(channel_id, Some(guild_id));
+                subscribe();
                 reply(ack, &format!("Already listening in {display}.")).await;
                 return;
             }
-            self.events.on_subscribe_voice(channel_id, Some(guild_id));
+            subscribe();
 
             let suffix = if has_transcriber {
                 ""
@@ -2816,14 +2895,50 @@ pub mod voice_intake {
         }
     }
 
+    /// Register the `VoiceTick` + `SpeakingStateUpdate` handlers on `call`.
+    ///
+    /// **Must run before the connect resolves.** `add_global_event` only
+    /// enqueues an `AddEvent` control message; songbird's events task drains
+    /// control and fired events in strict arrival order and never replays for
+    /// late registrants. `SpeakingStateUpdate` (op-5) is effectively one-shot
+    /// per user per session, so any Speaking event that fires during the
+    /// WS+UDP+crypto handshake reaches zero handlers and is lost permanently —
+    /// leaving every SSRC unmapped and every transcript anonymous (#199, #205).
+    /// Needs no live connection: the driver's tasks start with the `Call`.
+    ///
+    /// Clears prior global handlers first — the `Call` is per-guild and
+    /// outlives a channel hop, so a rejoin would otherwise stack receivers
+    /// feeding dead audio channels. Track events (`TrackEvent::End`) are
+    /// per-track and unaffected.
+    pub fn register_receivers(
+        call: &mut songbird::Call,
+        sink: &Arc<RecordingSink>,
+        ssrc_map: &Arc<SsrcMap>,
+    ) {
+        call.remove_all_global_events();
+        call.add_global_event(
+            songbird::CoreEvent::VoiceTick.into(),
+            TickReceiver::new(sink.clone(), ssrc_map.clone()),
+        );
+        call.add_global_event(
+            songbird::CoreEvent::SpeakingStateUpdate.into(),
+            TickReceiver::new(sink.clone(), ssrc_map.clone()),
+        );
+    }
+
     /// Join `channel_id` in `guild_id` via songbird (songbird owns the DAVE/MLS
     /// handshake) and wire the [`RecordingSink`] to its `VoiceTick` stream.
+    ///
+    /// Uses songbird's two-stage join rather than `Songbird::join` so
+    /// [`register_receivers`] runs before stage 1 sends the gateway request —
+    /// `Songbird::join` only hands back the `Call` once the handshake has
+    /// completed, by which point Speaking events are already lost.
     ///
     /// Returns the live voice client (for TTS playback) and the sink's audio
     /// channel receiver — the caller passes both to [`start_voice_intake`].
     ///
     /// # Errors
-    /// Propagates a songbird join failure.
+    /// Propagates a songbird join failure from either stage.
     pub async fn join_voice(
         manager: &songbird::Songbird,
         guild_id: u64,
@@ -2836,21 +2951,18 @@ pub mod voice_intake {
         let cid = songbird::id::ChannelId(
             std::num::NonZeroU64::new(channel_id).unwrap_or(std::num::NonZeroU64::MIN),
         );
-        let call_lock = manager.join(gid, cid).await?;
         let (audio_tx, audio_rx) = unbounded_channel();
         let sink = Arc::new(RecordingSink::new(audio_tx));
         let ssrc_map = Arc::new(SsrcMap::default());
-        {
+        let call_lock = manager.get_or_insert(gid);
+        let stage_2 = {
             let mut call = call_lock.lock().await;
-            call.add_global_event(
-                songbird::CoreEvent::VoiceTick.into(),
-                TickReceiver::new(sink.clone(), ssrc_map.clone()),
-            );
-            call.add_global_event(
-                songbird::CoreEvent::SpeakingStateUpdate.into(),
-                TickReceiver::new(sink, ssrc_map),
-            );
-        }
+            register_receivers(&mut call, &sink, &ssrc_map);
+            call.join(cid).await?
+        };
+        // Stage 2 awaits the driver's connection attempt and must not hold the
+        // `Call` mutex — songbird deadlocks otherwise.
+        stage_2.await?;
         let voice_client: Arc<dyn VoiceClientLike> = Arc::new(SongbirdVoiceClient::new(call_lock));
         Ok((voice_client, audio_rx))
     }
@@ -3030,6 +3142,60 @@ pub mod voice_intake {
         }
         fn byte_len(&self) -> Option<u64> {
             None
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{RecordingSink, SsrcMap, SsrcResolver, TickReceiver, register_receivers};
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        fn speaking(ssrc: u32, user_id: u64) -> songbird::model::payload::Speaking {
+            songbird::model::payload::Speaking {
+                delay: Some(0),
+                speaking: songbird::model::SpeakingState::MICROPHONE,
+                ssrc,
+                user_id: Some(songbird::model::id::UserId(user_id)),
+            }
+        }
+
+        /// A Speaking event arriving before any tick must be recorded — that is
+        /// the whole point of registering handlers pre-connect (#199).
+        #[tokio::test]
+        async fn speaking_before_any_tick_is_recorded() {
+            use songbird::EventHandler as _;
+
+            let (audio_tx, _audio_rx) = unbounded_channel();
+            let sink = Arc::new(RecordingSink::new(audio_tx));
+            let ssrc_map = Arc::new(SsrcMap::default());
+            let receiver = TickReceiver::new(sink, ssrc_map.clone());
+
+            assert_eq!(ssrc_map.user_id(4242), None);
+            receiver
+                .act(&songbird::EventContext::SpeakingStateUpdate(speaking(
+                    4242, 99,
+                )))
+                .await;
+            assert_eq!(ssrc_map.user_id(4242), Some(99));
+        }
+
+        /// Handler registration must not need a live connection: `join_voice`
+        /// registers on a freshly inserted `Call` before stage 1 runs.
+        #[tokio::test]
+        async fn receivers_register_without_a_connection() {
+            let mut call = songbird::Call::standalone(
+                songbird::id::GuildId(std::num::NonZeroU64::new(1).expect("nonzero")),
+                songbird::id::UserId(std::num::NonZeroU64::new(2).expect("nonzero")),
+            );
+            assert!(call.current_connection().is_none());
+
+            let (audio_tx, _audio_rx) = unbounded_channel();
+            let sink = Arc::new(RecordingSink::new(audio_tx));
+            let ssrc_map = Arc::new(SsrcMap::default());
+            register_receivers(&mut call, &sink, &ssrc_map);
+
+            assert!(call.current_connection().is_none());
         }
     }
 }
@@ -3992,7 +4158,7 @@ mod tests {
     fn subscribe_text_in_dm_refuses_and_leaves_registry_untouched() {
         let fx = dm_fixture(vec![]);
         // Global command, so invocable in a DM (guild_id None).
-        let msg = fx.events.on_subscribe_text(555, None);
+        let msg = fx.events.on_subscribe_text(555, None, None, None);
         assert!(msg.contains("allowlist"));
         assert!(
             fx.subs
@@ -4015,7 +4181,7 @@ mod tests {
             .unwrap()
             .add(555, SubscriptionKind::Text, None, Some(123))
             .unwrap();
-        let _ = fx.events.on_subscribe_text(555, None);
+        let _ = fx.events.on_subscribe_text(555, None, None, None);
         let reloaded = SubscriptionRegistry::new(&fx.subs_path).unwrap();
         let sub = reloaded.get(555, SubscriptionKind::Text).unwrap();
         assert_eq!(sub.dm_user_id, Some(123));
@@ -4024,7 +4190,7 @@ mod tests {
     #[test]
     fn subscribe_text_in_guild_adds_row() {
         let fx = dm_fixture(vec![]);
-        let msg = fx.events.on_subscribe_text(888, Some(7));
+        let msg = fx.events.on_subscribe_text(888, Some(7), None, None);
         assert_eq!(msg, "Listening in this channel.");
         let sub = fx
             .subs
@@ -4033,6 +4199,53 @@ mod tests {
             .get(888, SubscriptionKind::Text)
             .unwrap();
         assert_eq!(sub.guild_id, Some(7));
+    }
+
+    // --- /subscribe-text runtime naming (#222) -----------------------------
+
+    #[test]
+    fn subscribe_text_records_channel_and_guild_names() {
+        // A channel created after boot is absent from the `on_ready` snapshot;
+        // the interaction's own names are the only chance to label it.
+        let fx = dm_fixture(vec![]);
+        let _ = fx
+            .events
+            .on_subscribe_text(888, Some(7), Some("the-annex"), Some("Aetheria"));
+        assert_eq!(fx.fm.channel_label(Some(888)), "#the-annex(888)");
+        assert_eq!(fx.fm.guild_name_for(Some(888)).as_deref(), Some("Aetheria"));
+    }
+
+    #[test]
+    fn subscribe_text_presence_never_shows_a_bare_snowflake() {
+        let fx = dm_fixture(vec![]);
+        let _ = fx.events.on_subscribe_text(
+            1_221_605_022_102_458_421,
+            Some(7),
+            Some("the-annex"),
+            Some("Aetheria"),
+        );
+        fx.fm
+            .set_focus_immediately(1_221_605_022_102_458_421, "text");
+        assert_eq!(fx.fm.presence_text().as_deref(), Some("#the-annex"));
+    }
+
+    #[test]
+    fn subscribe_text_without_names_leaves_caches_unset() {
+        let fx = dm_fixture(vec![]);
+        let _ = fx.events.on_subscribe_text(888, Some(7), None, Some(""));
+        assert!(fx.fm.channel_names().is_empty());
+        assert!(fx.fm.guild_names().is_empty());
+    }
+
+    #[test]
+    fn subscribe_text_in_dm_records_no_naming() {
+        // The DM refusal path never touches the registry — nor the caches.
+        let fx = dm_fixture(vec![]);
+        let _ = fx
+            .events
+            .on_subscribe_text(555, None, Some("nope"), Some("nope"));
+        assert!(fx.fm.channel_names().is_empty());
+        assert!(fx.fm.guild_names().is_empty());
     }
 
     #[tokio::test]
@@ -4381,7 +4594,7 @@ mod tests {
         let events = wiring_events(subs, handle);
 
         assert!(!fm.is_subscribed(555));
-        events.on_subscribe_voice(555, Some(7));
+        events.on_subscribe_voice(555, Some(7), None, None);
         assert!(fm.is_subscribed(555));
     }
 
@@ -4393,10 +4606,29 @@ mod tests {
         let handle = wiring_handle();
         let events = wiring_events(subs.clone(), handle.clone());
 
-        events.on_subscribe_voice(555, Some(7));
+        events.on_subscribe_voice(555, Some(7), None, None);
         let row = subs.lock().unwrap().get(555, SubscriptionKind::Voice);
         assert_eq!(row.map(|s| s.guild_id), Some(Some(7)));
         assert!(handle.voice_channels.lock().unwrap().contains(&555));
+    }
+
+    // `/subscribe-voice` names the channel it just joined (#222) — a voice
+    // channel created after boot is missing from the `on_ready` snapshot.
+    #[test]
+    fn subscribe_voice_records_channel_and_guild_names() {
+        let subs = empty_subs_mut();
+        let subs_view: Arc<dyn crate::subscriptions::SubscriptionView> = subs.clone();
+        let fm = Arc::new(FocusManager::new(
+            "fam",
+            Arc::new(NullFocusStore),
+            subs_view,
+        ));
+        let handle = Arc::new(wiring_handle_inner().with_focus_manager(fm.clone()));
+        let events = wiring_events(subs, handle);
+
+        events.on_subscribe_voice(555, Some(7), Some("Lounge"), Some("Aetheria"));
+        assert_eq!(fm.channel_label(Some(555)), "#Lounge(555)");
+        assert_eq!(fm.guild_name_for(Some(555)).as_deref(), Some("Aetheria"));
     }
 
     // `/unsubscribe-voice` finds the guild's voice sub, removes it,
@@ -4407,7 +4639,7 @@ mod tests {
         let handle = wiring_handle();
         let events = wiring_events(subs.clone(), handle.clone());
 
-        events.on_subscribe_voice(555, Some(7));
+        events.on_subscribe_voice(555, Some(7), None, None);
         assert_eq!(events.on_unsubscribe_voice(7), Some(555));
         assert!(
             subs.lock()

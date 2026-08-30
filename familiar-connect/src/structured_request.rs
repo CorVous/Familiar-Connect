@@ -400,7 +400,6 @@ mod tests {
     };
     use crate::llm::{LlmClient, Message};
     use async_trait::async_trait;
-    use futures::stream::BoxStream;
     use serde_json::{Value, json};
     use std::sync::Mutex;
 
@@ -442,8 +441,8 @@ mod tests {
             &self,
             _messages: Vec<Message>,
             _tools: Option<Vec<Value>>,
-        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>> {
-            Ok(Box::pin(futures::stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(futures::stream::empty()))
         }
 
         fn slot(&self) -> Option<&str> {
@@ -469,8 +468,8 @@ mod tests {
             &self,
             _messages: Vec<Message>,
             _tools: Option<Vec<Value>>,
-        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>> {
-            Ok(Box::pin(futures::stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(futures::stream::empty()))
         }
         fn slot(&self) -> Option<&str> {
             Some("boom")

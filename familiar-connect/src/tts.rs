@@ -1358,6 +1358,26 @@ impl TtsClientKind {
     }
 }
 
+/// Providers config accepts but no backend implements.
+///
+/// Both are stubs that error at *synthesis* time, so composition must refuse
+/// them at boot instead (see `create_tts_client`'s caller) — kept as valid
+/// config values because they are placeholders for real work.
+pub const UNWIRED_TTS_PROVIDERS: [&str; 2] = ["azure", "gemini"];
+
+/// `Some(message)` when `provider` parses but has no wired backend.
+#[must_use]
+pub fn unwired_provider_reason(provider: &str) -> Option<String> {
+    UNWIRED_TTS_PROVIDERS.contains(&provider).then(|| {
+        format!(
+            "TTS provider '{provider}' has no wired backend — every synthesis \
+             would fail mid-conversation, so TTS is disabled for this session; \
+             set [tts].provider = \"cartesia\" in character.toml (the only \
+             implemented backend) and set CARTESIA_API_KEY"
+        )
+    })
+}
+
 /// Instantiate the TTS client for `[tts].provider`, reading secrets from the
 /// process environment.
 ///

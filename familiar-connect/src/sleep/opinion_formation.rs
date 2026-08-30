@@ -672,10 +672,9 @@ mod tests {
     };
     use crate::history::store::HistoryTurn;
     use crate::identity::Author;
-    use crate::llm::{LlmClient, LlmDelta, Message};
+    use crate::llm::{LlmClient, Message};
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
-    use futures::stream::BoxStream;
     use serde_json::{Value, json};
     use std::sync::Mutex;
 
@@ -702,8 +701,8 @@ mod tests {
             &self,
             _messages: Vec<Message>,
             _tools: Option<Vec<Value>>,
-        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-            Ok(Box::pin(futures::stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(futures::stream::empty()))
         }
         fn slot(&self) -> Option<&str> {
             None

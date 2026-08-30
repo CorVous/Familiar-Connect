@@ -441,6 +441,61 @@ async fn silence_gap_at_last_position_keeps_only_newest() {
 }
 
 // ---------------------------------------------------------------------------
+// Day markers
+// ---------------------------------------------------------------------------
+
+/// Two turns 10h apart, straddling local midnight in `America/Los_Angeles`
+/// (both land on 2026-05-05 in UTC — the bug is invisible under `display_tz =
+/// "UTC"`).
+fn store_across_local_midnight() -> Arc<familiar_connect::history::async_store::AsyncHistoryStore> {
+    let store = store();
+    let alice = author("1", "Alice");
+    let first = store
+        .sync()
+        .append_turn(AppendTurn::new("fam", 10, "user", "late one").author(alice.clone()))
+        .unwrap();
+    let second = store
+        .sync()
+        .append_turn(AppendTurn::new("fam", 10, "user", "morning").author(alice))
+        .unwrap();
+    set_ts(
+        &store,
+        first.id,
+        Utc.with_ymd_and_hms(2026, 5, 5, 6, 0, 0).unwrap(),
+    );
+    set_ts(
+        &store,
+        second.id,
+        Utc.with_ymd_and_hms(2026, 5, 5, 16, 0, 0).unwrap(),
+    );
+    store
+}
+
+#[tokio::test]
+async fn recent_marks_the_day_change_in_display_tz() {
+    let layer = RecentHistoryLayer::builder(store_across_local_midnight())
+        .window_size(20)
+        .display_tz("America/Los_Angeles")
+        .build();
+    let all = contents(&layer.recent_messages(&vctx(10)).await);
+    assert_eq!(all[0], "2026-05-04:", "{all:?}");
+    assert!(all[1].starts_with("[23:00 Alice #10]"), "{all:?}");
+    assert_eq!(all[2], "2026-05-05:", "{all:?}");
+    assert!(all[3].starts_with("[09:00 Alice #10]"), "{all:?}");
+}
+
+#[tokio::test]
+async fn recent_single_local_day_carries_no_day_marker() {
+    // Same two turns under UTC are one calendar day — no marker, no token cost.
+    let layer = RecentHistoryLayer::builder(store_across_local_midnight())
+        .window_size(20)
+        .build();
+    let all = contents(&layer.recent_messages(&vctx(10)).await);
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert!(all[0].starts_with("[06:00 Alice #10]"), "{all:?}");
+}
+
+// ---------------------------------------------------------------------------
 // Guild-aware names
 // ---------------------------------------------------------------------------
 

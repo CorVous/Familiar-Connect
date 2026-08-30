@@ -454,6 +454,9 @@ impl VoiceInner {
             if !gate_open {
                 match gate.feed(&delta.content) {
                     StreamDecision::Silent => {
+                        // Deliberate abandon, not a barge-in — say so before the
+                        // stream drops (issue #220).
+                        stream.note_abandon_status("silent");
                         self.log_silent(&scope.turn_id, channel_id);
                         return None;
                     }
@@ -461,6 +464,7 @@ impl VoiceInner {
                         // A leaked tool-call block must never reach TTS or the
                         // persisted turn (issue #109); drop the buffered
                         // sentences and abandon the turn as empty.
+                        stream.note_abandon_status("suppressed");
                         self.log_leak(&scope.turn_id, channel_id);
                         return None;
                     }

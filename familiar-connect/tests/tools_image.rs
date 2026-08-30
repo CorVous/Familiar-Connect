@@ -6,10 +6,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use serde_json::Value;
 
-use familiar_connect::llm::{Content, LlmClient, LlmDelta, Message};
+use familiar_connect::llm::{Content, LlmClient, Message};
 use familiar_connect::tools::image::{ImageFetcher, build_view_image_tool_with_fetcher};
 use familiar_connect::tools::image_describe::{DESCRIBE_PROMPT, describe_image};
 use familiar_connect::tools::registry::{ToolContext, ToolOutput};
@@ -42,7 +41,7 @@ impl LlmClient for CaptureLlm {
         &self,
         _messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
         anyhow::bail!("stream not used")
     }
     fn slot(&self) -> Option<&str> {

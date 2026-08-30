@@ -73,4 +73,7 @@ nav:
       - architecture/guards.md
       - architecture/decisions.md
       - architecture/roadmap.md
+  - Legal:
+      - legal/privacy-policy.md
+      - legal/terms-of-use.md
   - Contributing: contributing.md

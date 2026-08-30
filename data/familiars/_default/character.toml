@@ -185,6 +185,16 @@ batch_size       = 10   # turns per extraction batch (also the trigger threshold
 tick_interval_s  = 15.0
 participants_max = 30   # cap on participant manifest rows in the prompt
 
+# Post-extraction filter dropping self-capability "facts" ("I cannot
+# remember names", "the assistant has no internet access") before they
+# reach the store. Set the flag false to keep every extracted fact.
+# self_capability_pattern replaces the built-in matcher when non-empty
+# (empty = built-in); it is compiled at startup, so a bad pattern fails
+# the load instead of the extractor's first tick. The pattern is matched
+# against the start of the fact text.
+self_capability_filter  = true
+self_capability_pattern = ""
+
 [providers.memory.people_dossier]
 tick_interval_s = 20.0
 
@@ -222,8 +232,11 @@ priors_max      = 20    # prior facts shown to the LLM per subject
 #   2. add ``"fact_embedding"`` to [providers.memory].projectors
 #   3. raise [memory.retrieval].embedding_weight above 0
 #
-# ``dim`` is the vector size for backends that accept one (``hash``).
-# Real backends with a fixed model dim ignore this knob.
+# ``dim`` is the vector size for backends that accept one (``hash``);
+# unset it defaults to 256. Deliberately not set here: under
+# ``backend = "fastembed"`` the model fixes the dim, so an unset ``dim``
+# resolves to the model's native dim and a ``dim`` that contradicts
+# ``fastembed_model`` is rejected at load rather than ignored.
 #
 # ``fastembed_model`` selects the FastEmbed model. Known good options:
 #   BAAI/bge-small-en-v1.5     (default; 384 dim, ~130 MB)
@@ -236,7 +249,6 @@ priors_max      = 20    # prior facts shown to the LLM per subject
 
 [providers.embedding]
 backend          = "off"
-dim              = 256
 fastembed_model  = "BAAI/bge-small-en-v1.5"
 
 # --- Turn detection --------------------------------------------------------
@@ -321,14 +333,16 @@ idle_close_s = 30.0
 
 # --- Text-to-speech --------------------------------------------------------
 #
-# provider: "azure" (default), "cartesia", or "gemini"
+# provider: "cartesia" (default), "azure", or "gemini"
 #
-# Azure:    set AZURE_SPEECH_KEY + AZURE_SPEECH_REGION env vars.
-# Cartesia: set CARTESIA_API_KEY env var.
-# Gemini:   set GOOGLE_API_KEY env var.
+# Cartesia: set CARTESIA_API_KEY env var. The only wired backend.
+# Azure:    NOT YET WIRED — config accepted, refused at startup.
+#           Will need AZURE_SPEECH_KEY + AZURE_SPEECH_REGION.
+# Gemini:   NOT YET WIRED — config accepted, refused at startup.
+#           Will need GOOGLE_API_KEY.
 
 [tts]
-provider          = "azure"
+provider          = "cartesia"
 azure_voice       = "en-US-AmberNeural"
 cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"
