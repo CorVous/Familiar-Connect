@@ -34,12 +34,15 @@ pub struct PublishText {
     pub message_id: Option<String>,
     /// The message this one replies to, when threaded.
     pub reply_to_message_id: Option<String>,
-    /// Non-bot user mentions, resolved to [`Author`]s.
+    /// Mentioned users, resolved to [`Author`]s (bots included; never the
+    /// familiar's own account).
     pub mentions: Vec<Author>,
     /// `img_N` → URL map, empty when no images were detected.
     pub images: HashMap<String, String>,
     /// Whether the incoming message pinged the bot (mention or reply-ping).
     pub pings_bot: bool,
+    /// Whether the platform reports the author as a bot.
+    pub author_is_bot: bool,
 }
 
 impl PublishText {
@@ -62,6 +65,7 @@ impl PublishText {
             mentions: Vec::new(),
             images: HashMap::new(),
             pings_bot: false,
+            author_is_bot: false,
         }
     }
 }
@@ -124,6 +128,7 @@ impl DiscordTextSource {
                 mentions: params.mentions,
                 images: params.images,
                 pings_bot: params.pings_bot,
+                author_is_bot: params.author_is_bot,
                 wake: false,
                 alarm: false,
             }),
@@ -277,6 +282,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn carries_author_is_bot_flag() {
+        let (bus, source) = setup().await;
+        let mut sub = bus.subscribe(&[TOPIC_DISCORD_TEXT], BackpressurePolicy::Unbounded, 0);
+        let mut params = PublishText::new(111, Some(222), author("42", "Relay"), "beep boop");
+        params.author_is_bot = true;
+        source.publish_text(params).await;
+        let ev = timeout(Duration::from_secs(1), sub.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        bus.shutdown().await;
+        assert!(
+            ev.payload
+                .downcast_ref::<DiscordTextPayload>()
+                .unwrap()
+                .author_is_bot
+        );
+    }
+
+    #[tokio::test]
     async fn message_id_reply_and_mentions_default() {
         let (bus, source) = setup().await;
         let mut sub = bus.subscribe(&[TOPIC_DISCORD_TEXT], BackpressurePolicy::Unbounded, 0);
@@ -298,6 +323,7 @@ mod tests {
         assert!(p.reply_to_message_id.is_none());
         assert!(p.mentions.is_empty());
         assert!(!p.pings_bot);
+        assert!(!p.author_is_bot);
         assert_eq!(p.images, HashMap::new());
     }
 

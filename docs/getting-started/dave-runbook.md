@@ -92,8 +92,10 @@ logs a warning and the text path keeps working.
   `MESSAGE_CONTENT | GUILD_VOICE_STATES | GUILD_MESSAGE_TYPING` plus
   non-privileged (`bot.rs` L1917-1920). Without Message Content the bot logs in
   but sees no message text.
-- **`GUILD_MEMBERS` is deliberately NOT requested.** Member resolution is
-  cache-only (see Known Sharp Edges).
+- **`GUILD_MEMBERS` is deliberately NOT requested.** The intent gates *gateway*
+  member delivery, not REST. Audio-path member resolution stays cache-only;
+  `/subscribe-voice` fills join-time cache misses with one REST member lookup
+  each (see Known Sharp Edges).
 - Invite scopes: `bot` + `applications.commands`; permissions: Send Messages,
   Read Message History, Add Reactions, Connect, Speak.
 
@@ -286,11 +288,19 @@ and open an upstream issue; there were no open DAVE issues at 0.6.0 release.
   op-5 event fired during the handshake — was a real bug, fixed by the two-stage
   join in `join_voice`; see
   [Voice pipeline](../architecture/voice-pipeline.md#songbird-join-order-and-ssrc-attribution).
-- **Cache-only member resolution (`resolve_member` = `|| voice_member_cached`).**
-  No `GUILD_MEMBERS` intent + no REST fetch on the audio path, so a voice-only
-  joiner who hasn't typed or triggered a voice-state update resolves to `None` →
-  **anonymous voice turns** until they type or their state updates. Expected; not
-  data loss.
+- **Cache-only member resolution on the audio path (`resolve_member` =
+  `|| voice_member_cached`).** No `GUILD_MEMBERS` intent + no REST fetch per
+  frame. The join-time snapshot is the one exception: `/subscribe-voice` reads
+  the channel's occupants from the gateway cache and then spends **one REST
+  `GET /guilds/{guild}/members/{user}` per occupant the cache cannot name**
+  (at most 4 in flight, 2 s total), because a participant who stays quiet is
+  otherwise nameless. That is a join-time path bounded by channel headcount —
+  it is not the per-frame rule being relaxed, so do not "fix" it back to
+  cache-only. Voice-state updates maintain the roster from there. The remaining
+  gap is an occupant whose REST lookup also fails or runs out of budget: they
+  transcribe under their bare numeric id (still a distinct speaker, still in
+  the roster) until they type or their state updates. Expected; not data loss.
+  See [Voice pipeline](../architecture/voice-pipeline.md#voice-member-roster).
 - **Local turn detection silently degrades.** With `strategy="ten+smart_turn"`,
   `create_local_turn_detector` downloads Smart Turn weights and builds the
   detector, but the per-user `make_endpointer` call fails (`TenVad::new` →

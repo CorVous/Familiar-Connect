@@ -1,7 +1,7 @@
 //! Prompt assembly: layered system prompt, recent history, final reminder
 //! (subsystem 05).
 //!
-//! Re-exports the assembler, the eight concrete layers, and the final-reminder
+//! Re-exports the assembler, the nine concrete layers, and the final-reminder
 //! builder at the module root.
 
 pub mod assembler;
@@ -13,5 +13,5 @@ pub use final_reminder::FinalReminder;
 pub use layers::{
     ChannelResolver, CharacterCardLayer, ConversationSummaryLayer, Layer, LorebookEntry,
     LorebookLayer, OperatingModeLayer, PeopleDossierLayer, RagContextLayer, RecentHistoryLayer,
-    ReflectionLayer,
+    ReflectionLayer, VoiceRosterLayer,
 };
