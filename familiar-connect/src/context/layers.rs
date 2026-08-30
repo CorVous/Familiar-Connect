@@ -8,6 +8,12 @@
 //! Store access goes through the async facade (`build` and `invalidation_key` are
 //! both `async` so neither blocks the reactor). All truncation caps
 //! count Unicode scalars via a `limit-1 + "…"` helper; chars-per-token is 4.
+//!
+//! Trimming keys [`AssemblyContext::model`] into the calibration store, so a
+//! model known to bill above the heuristic trims earlier (#183). An empty model
+//! misses the store, leaving the raw estimate. The model is fixed for an
+//! assembler's lifetime (one client per responder), so no invalidation key
+//! carries it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -23,7 +29,9 @@ use chrono_tz::Tz;
 use regex::Regex;
 
 use super::assembler::AssemblyContext;
-use crate::budget::{estimate_message_tokens, estimate_tokens};
+use crate::budget::{
+    char_cap_for_tokens, estimate_message_tokens_calibrated, estimate_tokens_calibrated,
+};
 use crate::embedding::protocol::Embedder;
 use crate::history::FOCUS_STREAM_CHANNEL_ID;
 use crate::history::async_store::AsyncHistoryStore;
@@ -110,16 +118,15 @@ fn truncate_cap(text: &str, limit: usize) -> String {
     out
 }
 
-/// Truncate so the estimated token count fits `max_tokens` (char/4 heuristic).
-fn truncate_to_tokens(text: &str, max_tokens: i64) -> String {
+/// Truncate so `model`'s calibrated token count fits `max_tokens`.
+fn truncate_to_tokens(text: &str, max_tokens: i64, model: &str) -> String {
     if max_tokens <= 0 {
         return String::new();
     }
-    if estimate_tokens(text) <= max_tokens {
+    if estimate_tokens_calibrated(text, model) <= max_tokens {
         return text.to_owned();
     }
-    let char_cap = usize::try_from(max_tokens.saturating_mul(4)).unwrap_or(usize::MAX);
-    truncate_cap(text, char_cap)
+    truncate_cap(text, char_cap_for_tokens(max_tokens, model))
 }
 
 /// `[reactions: 👍 x3 ❤️ x1]`; empty input → empty string.
@@ -366,14 +373,18 @@ fn silence_fold_index(turns: &[HistoryTurn], min_gap_seconds: f64) -> usize {
 
 /// Drop oldest messages until the total estimated tokens fit, always keeping the
 /// newest message even if it alone exceeds the cap.
-fn trim_messages_to_token_cap(messages: Vec<Message>, max_tokens: i64) -> Vec<Message> {
+fn trim_messages_to_token_cap(
+    messages: Vec<Message>,
+    max_tokens: i64,
+    model: &str,
+) -> Vec<Message> {
     if messages.is_empty() {
         return messages;
     }
     let mut kept_rev: Vec<Message> = Vec::new();
     let mut used: i64 = 0;
     for msg in messages.into_iter().rev() {
-        let cost = estimate_message_tokens(&msg);
+        let cost = estimate_message_tokens_calibrated(&msg, model);
         if used + cost > max_tokens && !kept_rev.is_empty() {
             break;
         }
@@ -638,7 +649,7 @@ impl RecentHistoryLayer {
         }
 
         if let Some(max_tokens) = self.max_tokens {
-            rendered = trim_messages_to_token_cap(rendered, max_tokens);
+            rendered = trim_messages_to_token_cap(rendered, max_tokens, &ctx.model);
             let keep = rendered.len();
             let drop = turns.len().saturating_sub(keep);
             if drop > 0 {
@@ -798,7 +809,7 @@ impl Layer for ConversationSummaryLayer {
         }
         let body = self.max_tokens.map_or_else(
             || body.to_owned(),
-            |max_tokens| truncate_to_tokens(body, max_tokens),
+            |max_tokens| truncate_to_tokens(body, max_tokens, &ctx.model),
         );
         format!("## Conversation so far\n\n{body}")
     }
@@ -988,12 +999,12 @@ impl Layer for PeopleDossierLayer {
             };
             let mut section = format!("{header}\n\n{}", entry.dossier_text.trim());
             if let Some(rem) = remaining {
-                let cost = estimate_tokens(&section);
+                let cost = estimate_tokens_calibrated(&section, &ctx.model);
                 if cost > rem && !sections.is_empty() {
                     break;
                 }
-                section = truncate_to_tokens(&section, rem);
-                remaining = Some(rem - estimate_tokens(&section));
+                section = truncate_to_tokens(&section, rem, &ctx.model);
+                remaining = Some(rem - estimate_tokens_calibrated(&section, &ctx.model));
             }
             sections.push(section);
         }
@@ -1247,11 +1258,12 @@ fn trim_rag_lines_to_tokens(
     fact_lines: Vec<String>,
     turn_lines: Vec<String>,
     max_tokens: i64,
+    model: &str,
 ) -> (Vec<String>, Vec<String>) {
     let mut used: i64 = 0;
     let mut kept_facts: Vec<String> = Vec::new();
     for line in fact_lines {
-        let cost = estimate_tokens(&line);
+        let cost = estimate_tokens_calibrated(&line, model);
         if used + cost > max_tokens && !kept_facts.is_empty() {
             break;
         }
@@ -1260,7 +1272,7 @@ fn trim_rag_lines_to_tokens(
     }
     let mut kept_turns: Vec<String> = Vec::new();
     for line in turn_lines {
-        let cost = estimate_tokens(&line);
+        let cost = estimate_tokens_calibrated(&line, model);
         if used + cost > max_tokens && (!kept_turns.is_empty() || !kept_facts.is_empty()) {
             break;
         }
@@ -1532,7 +1544,8 @@ impl Layer for RagContextLayer {
         let mut turn_lines = self.render_turn_lines(ctx, &turn_results, max_id).await;
 
         if let Some(max_tokens) = self.max_tokens {
-            let (facts, turns) = trim_rag_lines_to_tokens(fact_lines, turn_lines, max_tokens);
+            let (facts, turns) =
+                trim_rag_lines_to_tokens(fact_lines, turn_lines, max_tokens, &ctx.model);
             fact_lines = facts;
             turn_lines = turns;
         }
@@ -1802,12 +1815,12 @@ impl Layer for ReflectionLayer {
             };
             let mut line = format!("- {}{cite_block}{stale_block}", row.text.trim());
             if let Some(rem) = remaining {
-                let cost = estimate_tokens(&line);
+                let cost = estimate_tokens_calibrated(&line, &ctx.model);
                 if cost > rem && !sections.is_empty() {
                     break;
                 }
-                line = truncate_to_tokens(&line, rem);
-                remaining = Some(rem - estimate_tokens(&line));
+                line = truncate_to_tokens(&line, rem, &ctx.model);
+                remaining = Some(rem - estimate_tokens_calibrated(&line, &ctx.model));
             }
             sections.push(line);
         }
@@ -2016,12 +2029,12 @@ impl Layer for LorebookLayer {
         for &i in &idxs {
             let mut section = entries[i].content.clone();
             if let Some(rem) = remaining {
-                let cost = estimate_tokens(&section);
+                let cost = estimate_tokens_calibrated(&section, &ctx.model);
                 if cost > rem && !sections.is_empty() {
                     break;
                 }
-                section = truncate_to_tokens(&section, rem);
-                remaining = Some(rem - estimate_tokens(&section));
+                section = truncate_to_tokens(&section, rem, &ctx.model);
+                remaining = Some(rem - estimate_tokens_calibrated(&section, &ctx.model));
             }
             sections.push(section);
         }
@@ -2154,5 +2167,97 @@ mod tests {
         );
         // No resolvers -> `#<id>`.
         assert_eq!(format_channel_marker(42, None, None), "#42");
+    }
+}
+
+/// Calibrated trimming (#183). The calibration store is a process-wide
+/// singleton, so every test here holds the shared guard and resets first.
+#[cfg(test)]
+mod calibration_tests {
+    use std::sync::MutexGuard;
+
+    use super::{trim_messages_to_token_cap, trim_rag_lines_to_tokens, truncate_to_tokens};
+    use crate::budget::{
+        estimate_tokens, estimate_tokens_calibrated, get_token_calibration, reset_token_calibration,
+    };
+    use crate::diagnostics::testutil::singleton_guard;
+    use crate::llm::Message;
+
+    // Serialize + reset, as the diagnostics singleton tests do.
+    fn isolated() -> MutexGuard<'static, ()> {
+        let g = singleton_guard();
+        reset_token_calibration();
+        g
+    }
+
+    /// `n` user messages of `chars` scalars each.
+    fn messages(n: usize, chars: usize) -> Vec<Message> {
+        (0..n)
+            .map(|_| Message::new("user", "a".repeat(chars)))
+            .collect()
+    }
+
+    /// A model billing twice the heuristic.
+    fn seed_dense() {
+        get_token_calibration().record("dense", 100, 200);
+    }
+
+    #[test]
+    fn message_trim_drops_more_under_calibration() {
+        let _g = isolated();
+        seed_dense();
+        // 40 scalars -> 10 raw + 4 framing = 14; calibrated 20 + 4 = 24.
+        let cap = 60;
+        let plain = trim_messages_to_token_cap(messages(10, 40), cap, "unseen-model");
+        let dense = trim_messages_to_token_cap(messages(10, 40), cap, "dense");
+        assert_eq!(plain.len(), 4);
+        assert_eq!(dense.len(), 2);
+    }
+
+    #[test]
+    fn message_trim_with_empty_model_matches_raw() {
+        let _g = isolated();
+        seed_dense();
+        let cap = 60;
+        let empty = trim_messages_to_token_cap(messages(10, 40), cap, "");
+        let unseen = trim_messages_to_token_cap(messages(10, 40), cap, "unseen-model");
+        assert_eq!(empty, unseen);
+        assert_eq!(empty.len(), 4);
+    }
+
+    #[test]
+    fn rag_line_trim_drops_more_under_calibration() {
+        let _g = isolated();
+        seed_dense();
+        // 40 scalars -> 10 raw tokens per line; calibrated 20.
+        let facts: Vec<String> = (0..5).map(|_| "f".repeat(40)).collect();
+        let turns: Vec<String> = (0..5).map(|_| "t".repeat(40)).collect();
+        let cap = 60;
+        let (pf, pt) = trim_rag_lines_to_tokens(facts.clone(), turns.clone(), cap, "unseen-model");
+        let (df, dt) = trim_rag_lines_to_tokens(facts, turns, cap, "dense");
+        assert_eq!((pf.len(), pt.len()), (5, 1));
+        assert_eq!((df.len(), dt.len()), (3, 0));
+    }
+
+    #[test]
+    fn truncation_respects_the_calibrated_cap() {
+        let _g = isolated();
+        seed_dense();
+        let text = "z".repeat(1000);
+        let out = truncate_to_tokens(&text, 50, "dense");
+        // 50 tokens at twice the heuristic rate buys 100 scalars, not 200.
+        assert_eq!(out.chars().count(), 100);
+        assert!(estimate_tokens_calibrated(&out, "dense") <= 50);
+    }
+
+    #[test]
+    fn truncation_with_empty_model_matches_raw() {
+        let _g = isolated();
+        seed_dense();
+        let text = "z".repeat(1000);
+        let out = truncate_to_tokens(&text, 50, "");
+        assert_eq!(out.chars().count(), 200);
+        assert_eq!(estimate_tokens(&out), 50);
+        assert_eq!(out, truncate_to_tokens(&text, 50, "unseen-model"));
     }
 }

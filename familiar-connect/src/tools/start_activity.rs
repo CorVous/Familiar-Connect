@@ -5,7 +5,8 @@
 //! `shift_focus` deferral precedent). The activity enum is built from the
 //! engine's catalog at registry-build time, so each familiar's sidecar shapes
 //! the schema. The description carries the entire when-to-go policy — zero
-//! character-card growth by design.
+//! character-card growth by design — and is config-sourced
+//! (`[prompt].start_activity_description`).
 //!
 //! The engine itself is Layer 3 (subsystem 11). This module defines only the
 //! narrow [`StartActivityEngine`] seam and [`ActivityCatalogEntry`] the tool
@@ -23,13 +24,6 @@ use crate::tools::silent::SILENT_RESULT;
 
 /// Weekday index (Mon=0 .. Sun=6) → abbreviation for availability hints.
 const WEEKDAY_ABBR: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-const DESCRIPTION: &str = "Head out and do something away from the screen for a \
-    while. Use when the current scene has wrapped up or the channel has gone \
-    quiet. You'll be away and may miss messages while out. You leave when this \
-    reply sends: with people around, say your in-character goodbye in this same \
-    message; from a quiet channel, call silent() too and slip away unannounced. \
-    Don't start one in the middle of a conversation you have a stake in.";
 
 /// One catalog entry the tool needs to render its enum + availability hints.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,8 +121,13 @@ fn start_activity_handler(
 }
 
 /// Build the `start_activity` tool bound to `engine`.
+///
+/// `description` is the when-to-go policy from
+/// `[prompt].start_activity_description` — roleplay guidance, not API contract,
+/// so it lives in config (#151). The `activity` enum and its availability hints
+/// stay code-built from the catalog.
 #[must_use]
-pub fn build_start_activity_tool(engine: Arc<dyn StartActivityEngine>) -> Tool {
+pub fn build_start_activity_tool(engine: Arc<dyn StartActivityEngine>, description: &str) -> Tool {
     let catalog = engine.catalog();
     let enum_ids: Vec<Value> = catalog.iter().map(|e| json!(e.id)).collect();
     // One zone statement for the whole list rather than a suffix per entry —
@@ -149,7 +148,7 @@ pub fn build_start_activity_tool(engine: Arc<dyn StartActivityEngine>) -> Tool {
 
     Tool::new(
         "start_activity",
-        DESCRIPTION,
+        description,
         json!({
             "type": "object",
             "properties": {
@@ -178,13 +177,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn description_within_budget_and_carries_policy() {
-        assert!(DESCRIPTION.chars().count() <= 450);
-        let lower = DESCRIPTION.to_lowercase();
-        assert!(lower.contains("quiet"));
-        assert!(lower.contains("goodbye"));
-        assert!(lower.contains("miss"));
-        assert!(DESCRIPTION.contains("in-character goodbye"));
+    fn config_description_reaches_the_tool_schema() {
+        let engine = Arc::new(FakeEngine {
+            entries: vec![unscheduled_entry()],
+            tz: Tz::UTC,
+        });
+        let tool = build_start_activity_tool(engine, "GO_OUTSIDE_MARKER");
+        assert_eq!(tool.description, "GO_OUTSIDE_MARKER");
+    }
+
+    #[test]
+    fn unconfigured_description_is_empty_not_a_code_copy() {
+        let engine = Arc::new(FakeEngine {
+            entries: vec![unscheduled_entry()],
+            tz: Tz::UTC,
+        });
+        assert!(build_start_activity_tool(engine, "").description.is_empty());
     }
 
     #[test]
@@ -258,7 +266,7 @@ mod tests {
             entries,
             tz: tz.parse().unwrap(),
         });
-        build_start_activity_tool(engine).parameters["properties"]["activity"]["description"]
+        build_start_activity_tool(engine, "").parameters["properties"]["activity"]["description"]
             .as_str()
             .unwrap()
             .to_owned()

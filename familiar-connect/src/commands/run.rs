@@ -167,22 +167,21 @@ fn resolve_embedder(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>
     crate::embedding::create_embedder(config)
 }
 
-/// The two hardcoded operating-mode strings (byte-exact).
-fn operating_modes() -> HashMap<String, String> {
-    let mut modes = HashMap::new();
-    modes.insert(
-        "voice".to_owned(),
-        "You are speaking aloud. Keep replies short (one or two sentences). \
-         Avoid markdown."
-            .to_owned(),
-    );
-    modes.insert(
-        "text".to_owned(),
-        "You are chatting in a text channel. Markdown and multi-line replies \
-         are fine."
-            .to_owned(),
-    );
-    modes
+/// The per-mode operating directives, keyed by viewer mode.
+///
+/// The single source for both consumers — `OperatingModeLayer` (system prompt)
+/// and `FinalReminder` (trailing reminder). Text lives in
+/// `[prompt].operating_mode_voice` / `.operating_mode_text`; a blank one drops
+/// the mode from the map, so nothing renders (#151).
+fn operating_modes(config: &crate::config::CharacterConfig) -> HashMap<String, String> {
+    [
+        ("voice", config.operating_mode_voice.as_str()),
+        ("text", config.operating_mode_text.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, text)| !text.trim().is_empty())
+    .map(|(mode, text)| (mode.to_owned(), text.to_owned()))
+    .collect()
 }
 
 /// Build the full layer stack with token-aware per-section caps.
@@ -245,7 +244,9 @@ pub fn default_assembler(
         .layer(Arc::new(CharacterCardLayer::new(
             familiar.root.join("character.md"),
         )))
-        .layer(Arc::new(OperatingModeLayer::new(operating_modes())))
+        .layer(Arc::new(OperatingModeLayer::new(operating_modes(
+            &familiar.config,
+        ))))
         .layer(Arc::new(
             LorebookLayer::builder(store.clone(), familiar.root.join("lorebook.toml"))
                 .recent_window(window_size)
@@ -610,6 +611,11 @@ impl crate::llm::LlmClient for ResponderLlmAdapter {
     }
     fn slot(&self) -> Option<&str> {
         self.inner.slot()
+    }
+    // Forwarded, not defaulted: the trait's `""` would silently disable #183
+    // calibration for every responder.
+    fn model(&self) -> &str {
+        self.inner.model()
     }
     fn multimodal(&self) -> bool {
         self.inner.multimodal()
@@ -1022,6 +1028,7 @@ async fn async_main(
         &familiar.config.image_description_constraints,
         true,
         text_activity_engine,
+        &familiar.config.start_activity_description,
     ));
 
     let description_llm = familiar.llm_clients.get("__image_description__").cloned();
@@ -1098,6 +1105,8 @@ async fn async_main(
     // Filler phrases disabled 2026-06-25 (too chatty in voice).
     .with_tool_filler_phrases(Vec::new())
     .with_post_history_instructions(familiar.config.post_history_instructions.clone())
+    .with_mode_instructions(operating_modes(&familiar.config))
+    .with_voice_tool_ack(familiar.config.voice_tool_ack.clone())
     .with_display_tz(familiar.config.display_tz.clone())
     .with_focus_manager(focus_manager.clone() as Arc<dyn FocusManagerApi>)
     .with_loop_max_iterations(loop_max);
@@ -1115,6 +1124,7 @@ async fn async_main(
     )
     .with_tools(text_tool_registry, text_factory)
     .with_post_history_instructions(familiar.config.post_history_instructions.clone())
+    .with_mode_instructions(operating_modes(&familiar.config))
     .with_display_tz(familiar.config.display_tz.clone())
     .with_focus_manager(focus_manager.clone() as Arc<dyn FocusManagerApi>)
     .with_loop_max_iterations(loop_max);
@@ -1140,6 +1150,10 @@ async fn async_main(
     projector_context.memory = familiar.config.memory_providers.clone();
     projector_context.familiar_display_name = Some(familiar.display_name());
     projector_context.dream_extraction_clause = familiar.config.dream_extraction_clause.clone();
+    projector_context.rolling_summary_system = familiar.config.rolling_summary_system.clone();
+    projector_context.reflection_system = familiar.config.reflection_system.clone();
+    projector_context.dossier_self_system = familiar.config.dossier_self_system.clone();
+    projector_context.dossier_other_system = familiar.config.dossier_other_system.clone();
     projector_context.display_tz = familiar.config.display_tz.clone();
     let projectors = create_projectors(
         &familiar.config.memory_providers.projectors,
@@ -1331,8 +1345,8 @@ async fn async_main(
 mod tests {
     use super::{
         ShutdownController, ShutdownStage, build_activity_engine, default_assembler,
-        home_familiars_root, resolve_defaults_root, resolve_embedder, resolve_familiar_root,
-        resolve_familiars_root,
+        home_familiars_root, operating_modes, resolve_defaults_root, resolve_embedder,
+        resolve_familiar_root, resolve_familiars_root,
     };
     use crate::activities::engine::ActivityEngine;
     use crate::bot::{BotHandle, Presence, PresenceSink};
@@ -1347,6 +1361,69 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    // --- operating modes: one source for both consumers (#151) ---
+
+    /// The layer copy and the final-reminder copy must both come from
+    /// `[prompt].operating_mode_*` — no in-code string to drift against.
+    #[test]
+    fn operating_mode_override_reaches_layer_and_reminder() {
+        let config = crate::config::CharacterConfig {
+            operating_mode_voice: "SPEAK_MARKER".to_owned(),
+            operating_mode_text: "TYPE_MARKER".to_owned(),
+            ..crate::config::CharacterConfig::default()
+        };
+        let modes = operating_modes(&config);
+        // Consumer 1: the system-prompt layer.
+        assert_eq!(modes.get("voice").map(String::as_str), Some("SPEAK_MARKER"));
+        assert_eq!(modes.get("text").map(String::as_str), Some("TYPE_MARKER"));
+        // Consumer 2: the trailing reminder, fed the same map.
+        let reminder = crate::context::final_reminder::FinalReminder::new("voice")
+            .include_mode_instruction(true)
+            .mode_instructions(modes)
+            .render();
+        assert!(reminder.contains("SPEAK_MARKER"), "{reminder}");
+    }
+
+    /// Blank config drops the mode entirely — nothing renders anywhere.
+    #[test]
+    fn blank_operating_mode_yields_no_entry() {
+        let modes = operating_modes(&crate::config::CharacterConfig::default());
+        assert!(modes.is_empty());
+    }
+
+    /// The shipped `_default` profile supplies both directives.
+    #[test]
+    fn default_profile_supplies_both_operating_modes() {
+        let profile =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml");
+        let known: BTreeSet<String> = crate::processors::projectors::DEFAULT_PROJECTORS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .chain(std::iter::once("fact_embedding".to_owned()))
+            .collect();
+        let embedders: BTreeSet<String> = ["off", "hash", "fastembed"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let config =
+            crate::config::load_character_config(&profile, &profile, &known, &embedders).unwrap();
+        let modes = operating_modes(&config);
+        assert_eq!(
+            modes.get("voice").map(String::as_str),
+            Some(
+                "You are speaking aloud. Keep replies short (one or two sentences). \
+                 Avoid markdown."
+            )
+        );
+        assert_eq!(
+            modes.get("text").map(String::as_str),
+            Some(
+                "You are chatting in a text channel. Markdown and multi-line replies \
+                 are fine."
+            )
+        );
+    }
 
     // --- resolve_embedder (composition-root fail-fast) ---
 

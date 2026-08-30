@@ -30,10 +30,13 @@ pub struct AssemblyContext {
     pub viewer_mode: String,
     /// Discord guild scoping per-guild nicknames; `None` for DMs / non-Discord.
     pub guild_id: Option<i64>,
+    /// Target model id, keying the #183 token calibration during layer
+    /// trimming; `""` when the client has none (raw estimate then).
+    pub model: String,
 }
 
 impl AssemblyContext {
-    /// New context with `viewer_mode = "text"` and no guild.
+    /// New context with `viewer_mode = "text"`, no guild, no model.
     #[must_use]
     pub fn new(familiar_id: impl Into<String>, channel_id: Option<i64>) -> Self {
         Self {
@@ -41,6 +44,7 @@ impl AssemblyContext {
             channel_id,
             viewer_mode: "text".to_owned(),
             guild_id: None,
+            model: String::new(),
         }
     }
 
@@ -48,6 +52,13 @@ impl AssemblyContext {
     #[must_use]
     pub fn with_viewer_mode(mut self, viewer_mode: impl Into<String>) -> Self {
         self.viewer_mode = viewer_mode.into();
+        self
+    }
+
+    /// Builder: set the target model (calibration key).
+    #[must_use]
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
         self
     }
 
@@ -188,5 +199,27 @@ impl AssemblerBuilder {
             rag: self.rag,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssemblyContext;
+
+    // An absent model must key nothing in the calibration store (#183).
+    #[test]
+    fn model_defaults_to_empty() {
+        assert_eq!(AssemblyContext::new("fam", Some(1)).model, "");
+    }
+
+    #[test]
+    fn with_model_sets_the_calibration_key() {
+        let ctx = AssemblyContext::new("fam", Some(1)).with_model("vendor/model-x");
+        assert_eq!(ctx.model, "vendor/model-x");
+        // Other builders compose unaffected.
+        let ctx = ctx.with_viewer_mode("voice").with_guild_id(7);
+        assert_eq!(ctx.model, "vendor/model-x");
+        assert_eq!(ctx.viewer_mode, "voice");
+        assert_eq!(ctx.guild_id, Some(7));
     }
 }
