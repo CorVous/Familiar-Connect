@@ -564,6 +564,7 @@ impl RecentHistoryLayer {
     /// the system prompt.
     #[allow(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "mirrors the layer build contract; the slot opts out of the system prompt"
     )]
     pub async fn build(&self, _ctx: &AssemblyContext) -> String {

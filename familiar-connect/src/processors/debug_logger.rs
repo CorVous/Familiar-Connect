@@ -45,7 +45,11 @@ impl DebugLoggerProcessor {
     /// # Errors
     /// Never fails (returns `Ok` unconditionally) — signature matches the
     /// processor contract.
-    #[allow(clippy::unused_async, reason = "processor contract is async")]
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "processor contract is async"
+    )]
     pub async fn handle(&self, event: &Event, _bus: &dyn EventBus) -> anyhow::Result<()> {
         tracing::info!(
             "{} {} {} {} {} {} {}",

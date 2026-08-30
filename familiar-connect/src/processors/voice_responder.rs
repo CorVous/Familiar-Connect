@@ -196,7 +196,11 @@ impl VoiceResponder {
     ///
     /// # Errors
     /// Never fails at dispatch (spawned work handles its own errors).
-    #[allow(clippy::unused_async, reason = "processor contract is async")]
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "processor contract is async"
+    )]
     pub async fn handle(&self, event: &Event, _bus: &dyn EventBus) -> anyhow::Result<()> {
         if event.topic == TOPIC_VOICE_ACTIVITY_START {
             self.inner.on_activity_start(event);
