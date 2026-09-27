@@ -58,9 +58,9 @@ Set in `.env` or the host environment. Never log them.
 
 | Var | Provider |
 |---|---|
-| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure (default). |
-| `CARTESIA_API_KEY` | Cartesia. |
-| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | Gemini. |
+| `CARTESIA_API_KEY` | Cartesia (default; the only wired backend). |
+| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure — **backend not wired**, refused at startup. |
+| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | Gemini — **backend not wired**, refused at startup. |
 
 ### Optional path overrides
 
@@ -130,7 +130,7 @@ endpointing_ms  = 500
 keyterms        = []     # see § STT — Deepgram for the full set
 
 [tts]
-provider          = "azure"      # "azure" | "cartesia" | "gemini"
+provider          = "cartesia"   # "cartesia" (only wired backend) | "azure" | "gemini"
 azure_voice       = "en-US-AmberNeural"
 cartesia_voice_id = "..."
 cartesia_model    = "sonic-3"
@@ -256,9 +256,12 @@ longer needed.
 The familiar attends to one text + one voice channel
 at a time; unfocused channels' messages are **staged** (stored, no
 reply) until the model shifts focus. Focus is model-driven through
-the `shift_focus(channel_id)` tool, so it only moves on slots with
-[`tool_calling = true`](#tool_calling) — otherwise focus stays on its
-startup default. On startup focus defaults to the first text and
+the `shift_focus(channel_id)` tool, so deliberate moves need
+[`tool_calling = true`](#tool_calling). On a slot with no tool path at
+all, one fallback keeps her reachable: a message that directly pings
+her in an unfocused channel shifts focus there and is answered (issue
+#221). Ambient traffic still stages, and with tools on the fallback is
+off entirely. On startup focus defaults to the first text and
 first voice subscription; thereafter it persists in the
 `focus_pointers` table across restarts. The
 `read_channel(limit?, before_id?, around_id?)` tool lets the familiar
@@ -568,9 +571,13 @@ selected.
 
 | Provider | Voice field | Model field | Extras |
 |---|---|---|---|
-| `azure` (default) | `azure_voice` | (built-in) | — |
-| `cartesia` | `cartesia_voice_id` | `cartesia_model` | — |
-| `gemini` | `gemini_voice` | `gemini_model` | `gemini_style`, `gemini_scene`, `gemini_pace`, `gemini_accent`, `gemini_context`, `gemini_audio_profile` |
+| `cartesia` (default) | `cartesia_voice_id` | `cartesia_model` | — |
+| `azure` (not wired) | `azure_voice` | (built-in) | — |
+| `gemini` (not wired) | `gemini_voice` | `gemini_model` | `gemini_style`, `gemini_scene`, `gemini_pace`, `gemini_accent`, `gemini_context`, `gemini_audio_profile` |
+
+`azure` and `gemini` have no implemented backend: the config value is accepted
+but startup logs an `ERROR` and runs without TTS. See
+[Configuration model — TTS providers](configuration-model.md#tts-providers).
 
 `greetings = ["..."]` pre-synthesises greeting audio at startup so
 first speech doesn't pay TTS cold-start.
@@ -655,6 +662,14 @@ the model can't shift focus or stay silent *via tools* — the
 `<silent>` text sentinel still works on the bare streaming path, but
 focus stays pinned to its startup default. Enable it on `prose` /
 `fast` to make the attentional stream model-driven.
+
+Because a focus manager is always wired to both responders, `false`
+here is flagged at startup with an `ERROR` naming the slot: the
+familiar can never call `shift_focus`, so that surface's channel focus
+is fixed for the session. The same boot pass cross-checks
+`tool_calling` / `multimodal` / `image_tools` against the model's
+OpenRouter metadata — see
+[Startup model diagnostics](configuration-model.md#startup-model-diagnostics).
 
 The loop's per-turn iteration cap (model call → tool execution →
 re-call) is `[tools].loop_max_iterations` (default `5`, shared by
@@ -838,7 +853,7 @@ the store side; non-numeric input drops to NULL.
 ```toml
 [providers.embedding]
 backend          = "off"   # "off" | "hash" | "fastembed"
-dim              = 256     # hash only — vector size
+# dim            = 256     # hash only — vector size; unset defaults to 256
 fastembed_model  = "BAAI/bge-small-en-v1.5"
 fastembed_cache_dir = ""   # blank = ./.fastembed_cache (CWD-relative!)
 ```
@@ -897,6 +912,29 @@ embed.)
 | `BAAI/bge-small-en-v1.5` | 384 | ~130 MB | Default. Best speed/quality tradeoff. |
 | `BAAI/bge-base-en-v1.5` | 768 | ~440 MB | Higher quality, ~2× slower. |
 | `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB | Smallest; older but well-tested. |
+
+### `dim` under `fastembed`
+
+The model fixes the vector width, so `dim` is not a free knob here.
+Config load cross-checks the two against a static model → native-dim
+table (no download, no ONNX — the table compiles without
+`local-embed`):
+
+- **`dim` unset** — resolves to the model's native dim (384 for the
+  BGE-small default), so `EmbeddingConfig.dim` never advertises a
+  width the model cannot produce.
+- **`dim` set and matching** — accepted unchanged.
+- **`dim` set and contradicting** — rejected at load:
+
+  ```text
+  [providers.embedding].dim = 256 contradicts fastembed_model
+  'BAAI/bge-small-en-v1.5' (native dim 384); remove `dim` or set it to 384.
+  ```
+
+- **Model not in the table** — the check is skipped; the true dim is
+  only knowable once the first real vector probes it at runtime.
+
+Other backends are unaffected: `hash` owns its `dim` outright.
 
 Vectors tag with the embedder's `name` (`fastembed:<model>`), so
 upgrading from BGE-small to BGE-base accumulates new vectors beside

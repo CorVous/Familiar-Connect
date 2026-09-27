@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use regex::Regex;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -92,31 +93,51 @@ static FACT_SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
     ])
 });
 
-/// Prefix pattern marking first-person / generic self-capability "facts".
-///
-/// Anchored at the start by the leading `^\s*`. Note
-/// `can(?:not|'t|\s+not)?` makes the suffix optional — a
-/// bare "I can …" matches too.
-static SELF_CAPABILITY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)^\s*(?:i\s+(?:can(?:not|'t|\s+not)?|do(?:n't|\s+not)|am\s+(?:not|unable))|i'm\s+(?:not|unable)|i\s+have\s+no\b|as\s+(?:an?\s+)?(?:ai|assistant|language\s+model|llm)\b|the\s+(?:assistant|ai|familiar|model|bot)\b)",
-    )
-    .expect("valid self-capability regex")
-});
-
 /// Inability tail following a third-person self-name. Narrow + word-bounded on
 /// purpose: copula/dynamic negation ("is not fond"), positive ability ("can
 /// sing"), and word-prefix collisions ("cancelled" ⊃ "can") are narrative and
 /// must NOT match.
 const NAME_CAPABILITY_TAIL: &str = r"\s+(?:cannot\b|can't\b|can\s+not\b|is\s+unable\b|has\s+no\b)";
 
-/// Heuristic prefix-match for self-capability "facts". `name_re` (optional) is
-/// the pre-compiled display-name inability matcher.
-fn is_self_capability(text: &str, name_re: Option<&Regex>) -> bool {
-    if SELF_CAPABILITY_RE.is_match(text) {
-        return true;
-    }
-    name_re.is_some_and(|re| re.is_match(text))
+/// Inability tail following a generic AI noun ("the assistant", "the bot").
+/// Same shape as [`NAME_CAPABILITY_TAIL`], widened by the auxiliary-negation
+/// forms a disclaimer reaches for ("does not have access", "is not able to").
+const AI_CAPABILITY_TAIL: &str = r"\s+(?:cannot\b|can't\b|can\s+not\b|is\s+(?:unable|not\s+able)\b|isn't\s+able\b|does\s+not\s+have\b|doesn't\s+have\b|has\s+no\b|lacks\b)";
+
+/// Object a first-person "I have no …" disclaimer takes. Bare `no` swallowed
+/// ordinary prose ("I have no siblings", "I have no idea what she meant"), so
+/// the object is enumerated instead (issue #153).
+const HAVE_NO_OBJECT: &str = r"(?:access|memory|way\s+to|ability\s+to|knowledge\s+of|record\s+of|internet|real-?time|personal\s+(?:preferences|opinions|feelings|experiences))";
+
+/// Prefix pattern marking first-person / generic self-capability "facts".
+///
+/// Anchored at the start by the leading `^\s*`, but every alternative also
+/// carries a negation or inability tail: an opener alone ("The familiar …",
+/// "I can …", "As an AI researcher …") is prose, not a disclaimer.
+static SELF_CAPABILITY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // `x` (extended) mode: layout whitespace below is ignored, so every literal
+    // space in the pattern is written `\s+`.
+    Regex::new(&format!(
+        r"(?ix)
+        ^\s*(?:
+            i\s+can(?:not|'t|\s+not)\b
+          | i\s+do(?:n't|\s+not)\s+have\b
+          | i\s+am\s+(?:unable|not\s+(?:able|capable))\b
+          | i'm\s+(?:unable|not\s+(?:able|capable))\b
+          | i\s+have\s+no\s+{HAVE_NO_OBJECT}\b
+          | as\s+(?:an?\s+)?(?:ai\s+)?(?:language\s+model|assistant|llm|ai)\s*,?\s+(?:i|my)\b
+          | the\s+(?:assistant|ai|familiar|model|bot){AI_CAPABILITY_TAIL}
+        )"
+    ))
+    .expect("valid self-capability regex")
+});
+
+/// Heuristic prefix-match for self-capability "facts". Both matchers are
+/// optional: `generic_re` is the (operator-overridable) shared pattern,
+/// `name_re` the pre-compiled display-name inability matcher. `None` for both
+/// means the filter is off.
+fn is_self_capability(text: &str, generic_re: Option<&Regex>, name_re: Option<&Regex>) -> bool {
+    generic_re.is_some_and(|re| re.is_match(text)) || name_re.is_some_and(|re| re.is_match(text))
 }
 
 /// Distils facts from new turns; forever loop via [`FactExtractor::run`].
@@ -126,6 +147,10 @@ pub struct FactExtractor {
     familiar_id: String,
     familiar_display_name: Option<String>,
     dream_extraction_clause: String,
+    /// IANA zone a date-only `valid_from` is anchored to (defaults `"UTC"`).
+    display_tz: String,
+    /// Generic self-capability matcher; `None` disables the filter outright.
+    self_capability_re: Option<Regex>,
     batch_size: i64,
     participants_max: i64,
     tick_interval: Duration,
@@ -147,6 +172,8 @@ impl FactExtractor {
             familiar_id: familiar_id.into(),
             familiar_display_name: None,
             dream_extraction_clause: String::new(),
+            display_tz: "UTC".to_owned(),
+            self_capability_re: Some(SELF_CAPABILITY_RE.clone()),
             batch_size: 10,
             participants_max: 30,
             tick_interval: Duration::from_secs_f64(15.0),
@@ -166,6 +193,36 @@ impl FactExtractor {
     pub fn dream_extraction_clause(mut self, clause: impl Into<String>) -> Self {
         self.dream_extraction_clause = clause.into();
         self
+    }
+
+    /// IANA display timezone. A date-only `valid_from` the model emits means
+    /// "that calendar day *here*", so it anchors to midnight in this zone.
+    #[must_use]
+    pub fn display_tz(mut self, tz: impl Into<String>) -> Self {
+        self.display_tz = tz.into();
+        self
+    }
+
+    /// Self-capability filter override (`[providers.memory.rich_note]`).
+    /// `enabled = false` drops the whole filter — generic AND display-name
+    /// matcher. A non-empty `pattern` replaces the built-in generic matcher;
+    /// config load rejects an uncompilable one, so a failure here (direct
+    /// construction) keeps the built-in.
+    #[must_use]
+    pub fn self_capability_filter(mut self, enabled: bool, pattern: &str) -> Self {
+        self.self_capability_re = if !enabled {
+            None
+        } else if pattern.is_empty() {
+            Some(SELF_CAPABILITY_RE.clone())
+        } else {
+            Some(Regex::new(pattern).unwrap_or_else(|_| SELF_CAPABILITY_RE.clone()))
+        };
+        self
+    }
+
+    /// Resolved display timezone (unparseable falls back to UTC).
+    fn tz(&self) -> Tz {
+        self.display_tz.parse().unwrap_or(Tz::UTC)
     }
 
     /// Trigger threshold AND per-tick cap (clamped to `>= 1`).
@@ -303,7 +360,9 @@ impl FactExtractor {
         let ts_by_id: HashMap<i64, DateTime<Utc>> =
             batch.iter().map(|t| (t.id, t.timestamp)).collect();
 
-        let name_re = self.self_name_capability_re();
+        let generic_re = self.self_capability_re.as_ref();
+        // Filter off ⇒ the display-name rail goes with it.
+        let name_re = generic_re.map(|_| self.self_name_capability_re());
         let mut dropped_self_cap = 0_i64;
         for fact in &facts {
             let mut source_ids: Vec<i64> = fact
@@ -333,7 +392,7 @@ impl FactExtractor {
             if text.is_empty() {
                 continue;
             }
-            if is_self_capability(&text, Some(&name_re)) {
+            if is_self_capability(&text, generic_re, name_re.as_ref()) {
                 dropped_self_cap += 1;
                 // Pipeline guard (issue #132): self-capability claims are dropped
                 // at the post-parse extraction filter. Shared audit convention —
@@ -362,9 +421,10 @@ impl FactExtractor {
                     text = format!("{self_name} dreamed that {text}");
                 }
             }
-            let valid_from = parse_iso_dt(fact.valid_from.as_ref())
+            let tz = self.tz();
+            let valid_from = parse_iso_dt(fact.valid_from.as_ref(), tz)
                 .or_else(|| ts_by_id.get(&source_ids[0]).copied());
-            let valid_to = parse_iso_dt(fact.valid_to.as_ref());
+            let valid_to = parse_iso_dt(fact.valid_to.as_ref(), tz);
             let importance = parse_importance(fact.importance.as_ref());
 
             let mut append = AppendFact::new(
@@ -720,9 +780,10 @@ fn parse_importance(raw: Option<&Value>) -> Option<i64> {
 }
 
 /// Permissive ISO-8601 → UTC datetime; `None` for non-strings / bad input.
-/// Accepts date-only (`2024-01-15`) via a midnight-UTC fallback; naive values
-/// are assumed UTC.
-fn parse_iso_dt(raw: Option<&Value>) -> Option<DateTime<Utc>> {
+/// Naive (offset-less) datetimes are assumed UTC, but a date-only
+/// (`2024-01-15`) value means that calendar day in `tz` — the model is writing
+/// about the familiar's local day, not 00:00 UTC.
+fn parse_iso_dt(raw: Option<&Value>, tz: Tz) -> Option<DateTime<Utc>> {
     let s = raw?.as_str()?.trim();
     if s.is_empty() {
         return None;
@@ -732,8 +793,21 @@ fn parse_iso_dt(raw: Option<&Value>) -> Option<DateTime<Utc>> {
     }
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|ndt| ndt.and_utc())
+        .map(|d| midnight_in_tz(d, tz))
+}
+
+/// Start of `date` in `tz`, as UTC. A midnight that DST skips (Chile, parts of
+/// Brazil) falls forward to the first hour that exists that day.
+fn midnight_in_tz(date: NaiveDate, tz: Tz) -> DateTime<Utc> {
+    for hour in 0..24 {
+        let Some(naive) = date.and_hms_opt(hour, 0, 0) else {
+            continue;
+        };
+        if let Some(local) = tz.from_local_datetime(&naive).earliest() {
+            return local.with_timezone(&Utc);
+        }
+    }
+    date.and_time(NaiveTime::MIN).and_utc()
 }
 
 /// Resolve the self-subject display name from an optional explicit override,
@@ -780,12 +854,18 @@ fn json_value_str(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        NAME_CAPABILITY_TAIL, is_self_capability, normalize_fact_items, parse_importance,
-        parse_iso_dt, resolve_display_name, resolve_subjects, title_case,
+        NAME_CAPABILITY_TAIL, SELF_CAPABILITY_RE, is_self_capability, normalize_fact_items,
+        parse_importance, parse_iso_dt, resolve_display_name, resolve_subjects, title_case,
     };
     use chrono::{TimeZone, Utc};
+    use chrono_tz::Tz;
     use regex::Regex;
     use serde_json::json;
+
+    /// The shipped generic matcher (what an operator gets without an override).
+    fn builtin() -> &'static Regex {
+        &SELF_CAPABILITY_RE
+    }
 
     fn name_re(display: &str) -> Regex {
         Regex::new(&format!(
@@ -804,14 +884,75 @@ mod tests {
             "I'm not able to browse.",
             "I have no memory of that.",
         ] {
-            assert!(is_self_capability(t, None), "should match: {t}");
+            assert!(
+                is_self_capability(t, Some(builtin()), None),
+                "should match: {t}"
+            );
         }
     }
 
     #[test]
     fn ordinary_world_facts_survive() {
-        assert!(!is_self_capability("Aria likes strawberries.", None));
-        assert!(!is_self_capability("Boris works nights.", None));
+        assert!(!is_self_capability(
+            "Aria likes strawberries.",
+            Some(builtin()),
+            None
+        ));
+        assert!(!is_self_capability(
+            "Boris works nights.",
+            Some(builtin()),
+            None
+        ));
+    }
+
+    // Issue #153: the prefix match used to fire on opening words alone.
+    #[test]
+    fn prose_openers_survive_without_a_capability_tail() {
+        for t in [
+            // Third-person AI nouns need an inability tail — "the familiar" is
+            // this product's own word for a character.
+            "The familiar loves rainy days.",
+            "The bot pinged Cor about the meeting.",
+            "The model wore couture on the runway.",
+            "The assistant brought coffee to the standup.",
+            // Positive ability, plain possession, preference, self-description.
+            "I can juggle.",
+            "I have no siblings.",
+            "I have no idea what she meant.",
+            "I don't like Mondays.",
+            "I do not drink coffee.",
+            "I'm not a morning person.",
+            // Occupation, not the "as an AI…" disclaimer opener.
+            "As an AI researcher, Cor works on alignment.",
+            "As an assistant manager, Boris closes on Fridays.",
+        ] {
+            assert!(
+                !is_self_capability(t, Some(builtin()), None),
+                "should keep: {t}"
+            );
+        }
+    }
+
+    // The disclaimer shapes the filter exists for still drop.
+    #[test]
+    fn narrowed_pattern_still_drops_real_disclaimers() {
+        for t in [
+            "The assistant cannot browse the web.",
+            "The familiar has no internet access.",
+            "The AI does not have access to real-time data.",
+            "The bot doesn't have a memory of prior sessions.",
+            "As an AI language model, I cannot access the internet.",
+            "As a language model, my knowledge has a cutoff.",
+            "I don't have access to the internet.",
+            "I do not have real-time information.",
+            "I am not able to browse.",
+            "I have no way to check the weather.",
+        ] {
+            assert!(
+                is_self_capability(t, Some(builtin()), None),
+                "should drop: {t}"
+            );
+        }
     }
 
     #[test]
@@ -822,7 +963,10 @@ mod tests {
             "Sapphire cannot remember names.",
             "Sapphire has no internet access.",
         ] {
-            assert!(is_self_capability(t, Some(&re)), "should drop: {t}");
+            assert!(
+                is_self_capability(t, Some(builtin()), Some(&re)),
+                "should drop: {t}"
+            );
         }
         // Word-prefix collisions, copula/dynamic negation, and positive ability
         // are narrative and must survive.
@@ -834,7 +978,10 @@ mod tests {
             "Sapphire can sing surprisingly well.",
             "Sapphire chose to walk away.",
         ] {
-            assert!(!is_self_capability(t, Some(&re)), "should keep: {t}");
+            assert!(
+                !is_self_capability(t, Some(builtin()), Some(&re)),
+                "should keep: {t}"
+            );
         }
     }
 
@@ -873,16 +1020,47 @@ mod tests {
 
     #[test]
     fn parse_iso_dt_accepts_full_and_date_only() {
-        let dt = parse_iso_dt(Some(&json!("2024-01-15T00:00:00+00:00"))).unwrap();
+        let dt = parse_iso_dt(Some(&json!("2024-01-15T00:00:00+00:00")), Tz::UTC).unwrap();
         assert_eq!(dt, Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap());
-        let date_only = parse_iso_dt(Some(&json!("2024-01-15"))).unwrap();
+        let date_only = parse_iso_dt(Some(&json!("2024-01-15")), Tz::UTC).unwrap();
         assert_eq!(
             date_only,
             Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap()
         );
-        assert_eq!(parse_iso_dt(Some(&json!("garbage"))), None);
-        assert_eq!(parse_iso_dt(Some(&json!(5))), None);
-        assert_eq!(parse_iso_dt(None), None);
+        assert_eq!(parse_iso_dt(Some(&json!("garbage")), Tz::UTC), None);
+        assert_eq!(parse_iso_dt(Some(&json!(5)), Tz::UTC), None);
+        assert_eq!(parse_iso_dt(None, Tz::UTC), None);
+    }
+
+    #[test]
+    fn date_only_anchors_to_midnight_in_display_tz() {
+        // "2026-08-16" from the model means that calendar day where the
+        // familiar lives, not 00:00 UTC (which is 2026-08-15 17:00 there).
+        let la: Tz = "America/Los_Angeles".parse().unwrap();
+        let dt = parse_iso_dt(Some(&json!("2026-08-16")), la).unwrap();
+        assert_eq!(dt, Utc.with_ymd_and_hms(2026, 8, 16, 7, 0, 0).unwrap());
+        assert_eq!(dt.with_timezone(&la).date_naive().to_string(), "2026-08-16");
+    }
+
+    #[test]
+    fn date_only_survives_a_dst_gap_midnight() {
+        // Chile springs forward at 00:00 local — that midnight does not exist.
+        let scl: Tz = "America/Santiago".parse().unwrap();
+        let dt = parse_iso_dt(Some(&json!("2026-09-06")), scl).unwrap();
+        assert_eq!(
+            dt.with_timezone(&scl).date_naive().to_string(),
+            "2026-09-06"
+        );
+    }
+
+    #[test]
+    fn offset_bearing_values_ignore_display_tz() {
+        // Only the date-only fallback is tz-anchored; explicit offsets win.
+        let la: Tz = "America/Los_Angeles".parse().unwrap();
+        assert_eq!(
+            parse_iso_dt(Some(&json!("2026-08-16T00:00:00+00:00")), la),
+            Some(Utc.with_ymd_and_hms(2026, 8, 16, 0, 0, 0).unwrap())
+        );
     }
 
     #[test]

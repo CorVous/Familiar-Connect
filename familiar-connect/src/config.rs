@@ -12,7 +12,9 @@
 //!
 //! The two registry lookups (`known_projectors`,
 //! `known_embedders`) are injected as `&BTreeSet<String>` parameters, keeping
-//! this a near-leaf module.
+//! this a near-leaf module. The fastembed model → native-dim table
+//! ([`FastembedNativeDim`]) is injected the same way through the parse layer;
+//! only [`load_character_config`] names the concrete table.
 
 use crate::budget::{ModelBudgetCurve, TierBudget};
 use chrono::NaiveTime;
@@ -24,6 +26,11 @@ use toml::{Table, Value};
 // ---------------------------------------------------------------------------
 // Error type + constants
 // ---------------------------------------------------------------------------
+
+/// Injected lookup: fastembed model name → native output dim, `None` when the
+/// name is unmapped (dim knowable only after the runtime probe). Keeps the
+/// model table out of this module.
+pub type FastembedNativeDim = fn(&str) -> Option<usize>;
 
 /// Malformed config file or unknown value reference. The single error type for
 /// every config problem; callers match on message substrings (byte-stable).
@@ -317,7 +324,8 @@ impl Default for STTConfig {
 /// Text-to-speech config from `[tts]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TTSConfig {
-    /// `"azure"` | `"cartesia"` | `"gemini"`.
+    /// `"azure"` | `"cartesia"` (default) | `"gemini"`. Only `cartesia` has a
+    /// wired backend — see `tts::UNWIRED_TTS_PROVIDERS`.
     pub provider: String,
     /// Cartesia voice id.
     pub cartesia_voice_id: Option<String>,
@@ -348,7 +356,7 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
-            provider: "azure".to_owned(),
+            provider: "cartesia".to_owned(),
             cartesia_voice_id: None,
             cartesia_model: None,
             azure_voice: DEFAULT_AZURE_TTS_VOICE.to_owned(),
@@ -437,6 +445,11 @@ pub struct RichNoteConfig {
     pub tick_interval_s: f64,
     /// Cap on participant manifest rows.
     pub participants_max: i64,
+    /// Self-capability post-filter on/off. `false` keeps every extracted fact.
+    pub self_capability_filter: bool,
+    /// Regex replacing the built-in self-capability matcher; empty keeps the
+    /// built-in. Validated at load — an uncompilable pattern fails startup.
+    pub self_capability_pattern: String,
 }
 
 impl Default for RichNoteConfig {
@@ -445,6 +458,8 @@ impl Default for RichNoteConfig {
             batch_size: 10,
             tick_interval_s: 15.0,
             participants_max: 30,
+            self_capability_filter: true,
+            self_capability_pattern: String::new(),
         }
     }
 }
@@ -583,7 +598,9 @@ impl Default for ToolsConfig {
 pub struct EmbeddingConfig {
     /// Backend name (registered); `"off"` disables the seam.
     pub backend: String,
-    /// Dimensionality hint for backends that accept one.
+    /// Dimensionality for backends that accept one (`hash`). Under
+    /// `fastembed` the model owns it: parsing resolves an unset `dim` to the
+    /// model's native dim and rejects one that contradicts it.
     pub dim: i64,
     /// FastEmbed model name.
     pub fastembed_model: String,
@@ -804,6 +821,10 @@ pub fn load_character_config(
     known_projectors: &BTreeSet<String>,
     known_embedders: &BTreeSet<String>,
 ) -> Result<CharacterConfig, ConfigError> {
+    // The one lookup this entry point resolves itself: the fastembed
+    // model → native-dim table is static metadata, and adding a fifth
+    // parameter would churn every caller. Parsing below stays injection-only.
+    let fastembed_native_dim: FastembedNativeDim = crate::embedding::fastembed_native_dim;
     let Some(defaults_data) = read_toml(defaults_path)? else {
         return Err(ConfigError(format!(
             "default character profile not found at {}. This file is a required repo asset — check your install.",
@@ -812,7 +833,12 @@ pub fn load_character_config(
     };
     let target_data = read_toml(path)?.unwrap_or_default();
     let merged = deep_merge(&defaults_data, &target_data);
-    parse_character_config(&merged, known_projectors, known_embedders)
+    parse_character_config(
+        &merged,
+        known_projectors,
+        known_embedders,
+        fastembed_native_dim,
+    )
 }
 
 fn read_toml(path: &Path) -> Result<Option<Table>, ConfigError> {
@@ -861,6 +887,7 @@ fn parse_character_config(
     data: &Table,
     known_projectors: &BTreeSet<String>,
     known_embedders: &BTreeSet<String>,
+    fastembed_native_dim: FastembedNativeDim,
 ) -> Result<CharacterConfig, ConfigError> {
     let providers = expect_table(data.get("providers"), "[providers]")?;
     let history_section = expect_table(providers.get("history"), "[providers.history]")?;
@@ -938,6 +965,7 @@ fn parse_character_config(
     let embedding = parse_embedding_config(
         expect_table(providers.get("embedding"), "[providers.embedding]")?,
         known_embedders,
+        fastembed_native_dim,
     )?;
 
     let budget_raw = expect_table(data.get("budget"), "[budget]")?;
@@ -1542,7 +1570,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
 
 fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
     let provider = match raw.get("provider") {
-        None => "azure".to_owned(),
+        None => "cartesia".to_owned(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => {
             return Err(ConfigError(format!(
@@ -1864,6 +1892,29 @@ fn mem_pos_float(section: &Table, name: &str, key: &str, default: f64) -> Result
     }
 }
 
+/// Read + compile-check `self_capability_pattern`. Empty means "keep the
+/// built-in matcher"; anything else must compile here so a typo fails startup
+/// rather than the extractor's first tick.
+fn self_capability_pattern(section: &Table, prefix: &str) -> Result<String, ConfigError> {
+    let key = "self_capability_pattern";
+    let pattern = match section.get(key) {
+        None => return Ok(String::new()),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(ConfigError(format!(
+                "{prefix}.{key} must be a string, got {}",
+                value_type_name(other)
+            )));
+        }
+    };
+    if !pattern.is_empty() && regex::Regex::new(&pattern).is_err() {
+        return Err(ConfigError(format!(
+            "{prefix}.{key} must be a valid regex, got '{pattern}'"
+        )));
+    }
+    Ok(pattern)
+}
+
 fn worker_section<'a>(raw: &'a Table, name: &str) -> Result<&'a Table, ConfigError> {
     match raw.get(name) {
         None => Ok(empty_table()),
@@ -1921,10 +1972,17 @@ fn parse_memory_providers(
     let rn = worker_section(raw, "rich_note")?;
     check_unknown_keys(
         rn,
-        &["batch_size", "tick_interval_s", "participants_max"],
+        &[
+            "batch_size",
+            "tick_interval_s",
+            "participants_max",
+            "self_capability_filter",
+            "self_capability_pattern",
+        ],
         "[providers.memory.rich_note]",
     )?;
     let rich_defaults = RichNoteConfig::default();
+    let rich_prefix = "[providers.memory.rich_note]";
     let rich_note = RichNoteConfig {
         batch_size: mem_pos_int(rn, "rich_note", "batch_size", rich_defaults.batch_size)?,
         tick_interval_s: mem_pos_float(
@@ -1939,6 +1997,13 @@ fn parse_memory_providers(
             "participants_max",
             rich_defaults.participants_max,
         )?,
+        self_capability_filter: field_bool(
+            rn,
+            rich_prefix,
+            "self_capability_filter",
+            rich_defaults.self_capability_filter,
+        )?,
+        self_capability_pattern: self_capability_pattern(rn, rich_prefix)?,
     };
 
     let pd = worker_section(raw, "people_dossier")?;
@@ -2069,6 +2134,7 @@ fn parse_memory_providers(
 fn parse_embedding_config(
     raw: &Table,
     known_embedders: &BTreeSet<String>,
+    fastembed_native_dim: FastembedNativeDim,
 ) -> Result<EmbeddingConfig, ConfigError> {
     check_unknown_keys(
         raw,
@@ -2092,9 +2158,39 @@ fn parse_embedding_config(
             valid_or_none(known_embedders)
         )));
     }
+    let fastembed_model = match raw.get("fastembed_model") {
+        None => d.fastembed_model.clone(),
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(other) => {
+            return Err(ConfigError(format!(
+                "[providers.embedding].fastembed_model must be a non-empty string, got {}",
+                value_type_name(other)
+            )));
+        }
+    };
+    // The selected model's native dim, when knowable without a runtime probe.
+    // Only `fastembed` is model-bound; `hash` owns its `dim` outright, and an
+    // unmapped model name stays unchecked (dim known only after the probe).
+    let native_dim: Option<i64> = if backend == "fastembed" {
+        fastembed_native_dim(&fastembed_model).and_then(|n| i64::try_from(n).ok())
+    } else {
+        None
+    };
     let dim = match raw.get("dim") {
-        None => d.dim,
-        Some(Value::Integer(n)) if *n > 0 => *n,
+        // Unset: adopt the model's native dim so the struct never advertises a
+        // width that is wrong for the selected model.
+        None => native_dim.unwrap_or(d.dim),
+        Some(Value::Integer(n)) if *n > 0 => {
+            if let Some(native) = native_dim
+                && *n != native
+            {
+                return Err(ConfigError(format!(
+                    "[providers.embedding].dim = {n} contradicts fastembed_model \
+                     '{fastembed_model}' (native dim {native}); remove `dim` or set it to {native}."
+                )));
+            }
+            *n
+        }
         Some(Value::Integer(n)) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be > 0, got {n}"
@@ -2103,16 +2199,6 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be a positive integer, got {}",
-                value_type_name(other)
-            )));
-        }
-    };
-    let fastembed_model = match raw.get("fastembed_model") {
-        None => d.fastembed_model.clone(),
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(other) => {
-            return Err(ConfigError(format!(
-                "[providers.embedding].fastembed_model must be a non-empty string, got {}",
                 value_type_name(other)
             )));
         }
@@ -2412,10 +2498,12 @@ mod tests {
         BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DeepgramSTTConfig, DiscordTextConfig,
         EmbeddingConfig, FactSupersedeConfig, FocusConfig, LLM_SLOT_NAMES, MemoryProvidersConfig,
         MemoryRetrievalConfig, PeopleDossierConfig, ReflectionConfig, RichNoteConfig,
-        RollingSummaryConfig, STTConfig, ToolsConfig, TurnDetectionConfig, default_projectors,
+        RollingSummaryConfig, STTConfig, TTSConfig, ToolsConfig, TurnDetectionConfig,
+        default_projectors, parse_tts_config,
     };
     use crate::budget::TierBudget;
     use std::collections::BTreeSet;
+    use toml::Table;
 
     #[test]
     fn tiered_slots() {
@@ -2434,6 +2522,18 @@ mod tests {
         assert!(cfg.llm.is_empty());
         assert!(cfg.sleep_window.is_none());
         assert_eq!(cfg.sleep_grace_minutes, 30);
+    }
+
+    #[test]
+    fn tts_defaults_to_the_only_wired_provider() {
+        // #N1: the default must be synthesizable, not a stub backend.
+        assert_eq!(TTSConfig::default().provider, "cartesia");
+        assert_eq!(
+            parse_tts_config(&Table::new())
+                .expect("empty [tts] parses")
+                .provider,
+            "cartesia"
+        );
     }
 
     #[test]
@@ -2479,7 +2579,9 @@ mod tests {
             RichNoteConfig {
                 batch_size: 10,
                 tick_interval_s: 15.0,
-                participants_max: 30
+                participants_max: 30,
+                self_capability_filter: true,
+                self_capability_pattern: String::new(),
             }
         );
         assert_eq!(

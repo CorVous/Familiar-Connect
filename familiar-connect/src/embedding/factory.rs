@@ -144,6 +144,10 @@ fn fastembed_factory(
 /// re-registration in [`EmbedderRegistry::with_builtins`]. An empty configured
 /// model falls back to the default (BGE-small).
 #[cfg(feature = "local-embed")]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature parity with the `fastembed_factory` stub it replaces — both register as the same fn pointer"
+)]
 fn real_fastembed_factory(
     config: &EmbeddingConfig,
 ) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
@@ -182,6 +186,8 @@ pub fn create_embedder(
 mod tests {
     use super::{EmbedderRegistry, create_embedder, known_embedders};
     use crate::config::EmbeddingConfig;
+    // Only the no-extra load-failure test names the error type.
+    #[cfg(not(feature = "local-embed"))]
     use crate::embedding::EmbeddingError;
 
     fn config(backend: &str, dim: i64) -> EmbeddingConfig {

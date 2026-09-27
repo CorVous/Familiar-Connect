@@ -215,6 +215,117 @@ async fn self_capability_drop_emits_guard_audit_line() {
     assert!(out.contains("self_capability_claim"), "{out}");
 }
 
+// Issue #153: the post-filter matched on opening words alone, so ordinary
+// prose about "the familiar" / "the bot" — and plain first-person preferences —
+// never reached the store.
+#[tokio::test]
+async fn prose_openers_are_not_self_capability_claims() {
+    let keep = [
+        "The familiar loves rainy days.",
+        "The bot pinged Cor about the meeting.",
+        "I can juggle.",
+        "I have no siblings.",
+        "I don't like Mondays.",
+        "I'm not a morning person.",
+        "As an AI researcher, Cor works on alignment.",
+    ];
+    let store = store();
+    seed_turns(&store, 10, 1);
+    let items: Vec<Value> = keep
+        .iter()
+        .map(|t| json!({"text": t, "source_turn_ids": [1]}))
+        .collect();
+    let llm = ScriptedLlm::new([facts_json(json!(items))], "[]");
+    extractor(&store, &llm, 10).tick().await.unwrap();
+
+    let texts: BTreeSet<String> = store
+        .sync()
+        .recent_facts("fam", 20, false, None)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.text)
+        .collect();
+    assert_eq!(texts, keep.iter().map(|s| (*s).to_string()).collect());
+}
+
+// `self_capability_filter = false` keeps every extracted fact — including the
+// display-name rail, which goes with it.
+#[tokio::test]
+async fn self_capability_filter_can_be_disabled() {
+    let store = store();
+    seed_turns(&store, 10, 1);
+    let llm = ScriptedLlm::new(
+        [facts_json(json!([
+            {"text": "I cannot remember names.", "source_turn_ids": [1]},
+            {"text": "Sapphire cannot remember names.", "source_turn_ids": [2]},
+        ]))],
+        "[]",
+    );
+    self_extractor(&store, &llm)
+        .self_capability_filter(false, "")
+        .tick()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fact_texts(&store),
+        BTreeSet::from([
+            "I cannot remember names.".to_string(),
+            "Sapphire cannot remember names.".to_string(),
+        ])
+    );
+}
+
+// A non-empty pattern REPLACES the built-in matcher.
+#[tokio::test]
+async fn self_capability_pattern_overrides_the_builtin() {
+    let store = store();
+    seed_turns(&store, 10, 1);
+    let llm = ScriptedLlm::new(
+        [facts_json(json!([
+            {"text": "I cannot remember names.", "source_turn_ids": [1]},
+            {"text": "Beep boop, no facts here.", "source_turn_ids": [2]},
+        ]))],
+        "[]",
+    );
+    extractor(&store, &llm, 10)
+        .self_capability_filter(true, r"(?i)^beep\s+boop")
+        .tick()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fact_texts(&store),
+        BTreeSet::from(["I cannot remember names.".to_string()])
+    );
+}
+
+// Config load rejects an uncompilable pattern, so the builder never sees one;
+// if it somehow does, the built-in stays in force rather than the filter
+// vanishing silently.
+#[tokio::test]
+async fn uncompilable_pattern_falls_back_to_the_builtin() {
+    let store = store();
+    seed_turns(&store, 10, 1);
+    let llm = ScriptedLlm::new(
+        [facts_json(json!([
+            {"text": "I cannot remember names.", "source_turn_ids": [1]},
+            {"text": "Aria likes strawberries.", "source_turn_ids": [2]},
+        ]))],
+        "[]",
+    );
+    extractor(&store, &llm, 10)
+        .self_capability_filter(true, "(unclosed")
+        .tick()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fact_texts(&store),
+        BTreeSet::from(["Aria likes strawberries.".to_string()])
+    );
+}
+
 #[tokio::test]
 async fn extract_prompt_warns_off_self_capability() {
     let store = store();

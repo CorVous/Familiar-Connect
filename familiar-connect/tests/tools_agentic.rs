@@ -5,7 +5,6 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use serde_json::{Value, json};
 
 use familiar_connect::llm::{Content, LlmClient, LlmDelta, Message};
@@ -52,11 +51,13 @@ impl LlmClient for ScriptedLlm {
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
         self.calls.lock().unwrap().push(messages);
         self.tool_payloads.lock().unwrap().push(tools);
         let deltas = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
-        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+        Ok(familiar_connect::llm::LlmStream::new(
+            futures::stream::iter(deltas.into_iter().map(Ok)),
+        ))
     }
     fn slot(&self) -> Option<&str> {
         None

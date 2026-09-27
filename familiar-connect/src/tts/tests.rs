@@ -23,7 +23,7 @@ use super::{
     TTSResult, TtsClient, TtsClientKind, TtsError, WordTimestamp, azure_stream,
     azure_synthesize_with, build_azure_result, build_tts_client, cartesia_stream_from_state,
     compose_gemini_style_prompt, estimate_word_timestamps, gemini_synthesize_with,
-    get_cached_greeting_audio_in, upsample_s16le_2x,
+    get_cached_greeting_audio_in, unwired_provider_reason, upsample_s16le_2x,
 };
 use crate::config::TTSConfig;
 
@@ -1101,6 +1101,30 @@ fn factory_creates_cartesia_from_config() {
         }
         _ => panic!("expected cartesia"),
     }
+}
+
+#[test]
+fn unwired_providers_are_named_at_boot() {
+    for provider in ["azure", "gemini"] {
+        let msg = unwired_provider_reason(provider).expect("flagged");
+        assert!(msg.contains(&format!("'{provider}'")), "{msg}");
+        assert!(msg.contains("no wired backend"), "{msg}");
+        assert!(msg.contains(r#"[tts].provider = "cartesia""#), "{msg}");
+    }
+}
+
+#[test]
+fn cartesia_is_not_flagged_as_unwired() {
+    assert_eq!(unwired_provider_reason("cartesia"), None);
+}
+
+#[test]
+fn the_shipped_default_provider_is_wired() {
+    // Guards the #N1 regression: the shipped default must be synthesizable.
+    assert_eq!(
+        unwired_provider_reason(&TTSConfig::default().provider),
+        None
+    );
 }
 
 #[test]

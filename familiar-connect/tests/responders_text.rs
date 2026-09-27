@@ -8,7 +8,7 @@ mod support;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use serde_json::Value;
 
 use familiar_connect::bus::in_process::InProcessEventBus;
@@ -245,18 +245,20 @@ impl LlmClient for ObservingLlm {
         &self,
         _m: Vec<Message>,
         _t: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
         let turns = self.store.sync().recent("fam", 42, 10, None, None).unwrap();
         let mut seen = self.seen.lock().unwrap();
         for t in turns.iter().filter(|t| t.role == "user") {
             seen.push(t.content.clone());
         }
-        Ok(Box::pin(stream::once(async move {
-            Ok(LlmDelta {
-                content: "ack".to_owned(),
-                ..Default::default()
-            })
-        })))
+        Ok(familiar_connect::llm::LlmStream::new(stream::once(
+            async move {
+                Ok(LlmDelta {
+                    content: "ack".to_owned(),
+                    ..Default::default()
+                })
+            },
+        )))
     }
     fn slot(&self) -> Option<&str> {
         None
@@ -317,12 +319,66 @@ async fn silent_sentinel_skips_send_and_assistant_turn() {
     );
 }
 
+/// Issue #220: the silent decision abandons the stream, but the transport must
+/// hear `silent`, not the default `cancelled` (barge-in).
+#[tokio::test]
+async fn silent_sentinel_notes_silent_abandon_status() {
+    let s = store();
+    let send = Arc::new(CapturingSend::new());
+    let llm = Arc::new(ScriptedLlm::new(&["<silent>"]));
+    let (r, _) = responder(Arc::clone(&s), llm.clone(), send.clone());
+    r.handle(
+        &discord_text_event(text_payload(42, "hi nobody"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(llm.abandon_status(), "silent");
+}
+
 #[tokio::test]
 async fn silent_sentinel_with_leading_whitespace() {
     let send = Arc::new(CapturingSend::new());
     let (r, _) = responder(
         store(),
         Arc::new(ScriptedLlm::new(&["  ", "<silent>"])),
+        send.clone(),
+    );
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert!(send.calls().is_empty());
+}
+
+/// Issue #221: the tool-less text path runs the same leaked-tool-call guard the
+/// voice path does, so an imitated call never reaches Discord.
+#[tokio::test]
+async fn leaked_tool_call_suppressed_on_bare_text_path() {
+    let s = store();
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&["shift_focus(", "channel_id=200)"])),
+        send.clone(),
+    );
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert!(send.calls().is_empty());
+    let turns = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert!(turns.iter().all(|t| t.role != "assistant"));
+}
+
+#[tokio::test]
+async fn leaked_invoke_block_suppressed_on_bare_text_path() {
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        store(),
+        Arc::new(ScriptedLlm::new(&[
+            "<in",
+            "voke name=\"shift_focus\">",
+            "<parameter name=\"channel_id\">200</parameter></invoke>",
+        ])),
         send.clone(),
     );
     r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())

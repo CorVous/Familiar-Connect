@@ -37,20 +37,14 @@ use crate::embedding::protocol::Embedder;
 /// Default model name (BGE-small; 384-dim).
 pub const DEFAULT_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 
-/// Known model dimensionalities, so `dim` can be advertised before the first
-/// embed lands. A model not listed here reports `dim == 0` until the first
-/// embed probes a real vector.
+/// Known model dimensionality, so `dim` can be advertised before the first
+/// embed lands. Delegates to the always-compiled
+/// [`crate::embedding::FASTEMBED_NATIVE_DIMS`] table (shared with config
+/// validation). An unmapped model reports `0` until the first embed probes a
+/// real vector.
 #[must_use]
 fn known_dim(model_name: &str) -> usize {
-    match model_name {
-        "BAAI/bge-small-en-v1.5"
-        | "sentence-transformers/all-MiniLM-L6-v2"
-        | "intfloat/e5-small-v2"
-        | "intfloat/multilingual-e5-small" => 384,
-        "BAAI/bge-base-en-v1.5" => 768,
-        "BAAI/bge-large-en-v1.5" => 1024,
-        _ => 0,
-    }
+    crate::embedding::fastembed_native_dim(model_name).unwrap_or(0)
 }
 
 /// Seam: a loaded text-embedding model, callable synchronously (CPU-bound).
@@ -130,11 +124,12 @@ impl FastEmbedEmbedder {
         let loader = self.loader.clone();
         let model_name = self.model_name.clone();
         let cache_dir = self.cache_dir.clone();
-        let loaded =
+        let built =
             tokio::task::spawn_blocking(move || loader.load(&model_name, cache_dir.as_deref()))
                 .await??;
-        let model: Arc<dyn TextModel> = Arc::from(loaded);
+        let model: Arc<dyn TextModel> = Arc::from(built);
         *guard = Some(model.clone());
+        drop(guard);
         Ok(model)
     }
 }
@@ -233,11 +228,13 @@ struct FastembedModel {
 
 impl TextModel for FastembedModel {
     fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-        let mut model = self
-            .model
-            .lock()
-            .map_err(|_| anyhow::anyhow!("fastembed model mutex poisoned"))?;
-        let vectors = model.embed(texts, None)?;
+        let vectors = {
+            let mut model = self
+                .model
+                .lock()
+                .map_err(|_| anyhow::anyhow!("fastembed model mutex poisoned"))?;
+            model.embed(texts, None)?
+        };
         Ok(vectors)
     }
 }
@@ -301,6 +298,11 @@ mod tests {
     /// Records the loader kwargs (pins cache-dir threading).
     struct CapturingLoader {
         seen_model: Arc<std::sync::Mutex<Option<String>>>,
+        // Outer `None` = never loaded; inner `None` = loaded with no cache dir.
+        #[allow(
+            clippy::option_option,
+            reason = "distinguishes not-called from called-with-None"
+        )]
         seen_cache: Arc<std::sync::Mutex<Option<Option<String>>>>,
     }
 
@@ -346,6 +348,24 @@ mod tests {
             FastEmbedEmbedder::new("BAAI/bge-base-en-v1.5", None).dim(),
             768
         );
+    }
+
+    /// Drift guard: every table entry the loader can actually resolve must
+    /// carry the dim the `fastembed` crate itself reports. `get_model_info` is
+    /// a static registry lookup — no download, no ONNX session.
+    #[test]
+    fn native_dim_table_matches_fastembed_metadata() {
+        use crate::embedding::FASTEMBED_NATIVE_DIMS;
+        use fastembed::TextEmbedding;
+
+        for (name, dim) in FASTEMBED_NATIVE_DIMS {
+            let Ok(model) = super::resolve_model(name) else {
+                continue; // Unmapped names have no crate metadata to compare
+            };
+            let info = TextEmbedding::get_model_info(&model)
+                .unwrap_or_else(|e| panic!("model info for {name}: {e}"));
+            assert_eq!(info.dim, *dim, "native dim drift for {name}");
+        }
     }
 
     #[test]

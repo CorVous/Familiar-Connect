@@ -35,6 +35,13 @@ const DEFAULT_CATCH_UP_LIMIT: usize = 20;
 /// `guild_names` / `guild_name_for`, so the constant lives here.
 pub const PRIVATE_MESSAGE_GUILD_NAME: &str = "Private Message";
 
+/// Stand-in for a channel missing from `channel_names`.
+///
+/// Always followed by `(id <cid>)`. Says "name unknown" where a bare id would
+/// read as the name (#222). Shared with the final-reminder block so both
+/// surfaces agree.
+pub const UNNAMED_CHANNEL_PREFIX: &str = "unnamed channel";
+
 /// Injectable monotonic clock returning seconds.
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
@@ -365,17 +372,20 @@ impl FocusManager {
     )]
     pub async fn end_turn(&self) {}
 
-    /// Format a channel id as `#name(id)` or `#id` (`"none"` for `None`).
+    /// Format a channel id as `#name(id)`, or `#unnamed(id)` when the name
+    /// cache never learned it (`"none"` for `None`). The `unnamed` marker keeps
+    /// a bare snowflake from reading as the channel's name in logs (#222);
+    /// space-free so the label stays one log token.
     #[must_use]
     pub fn channel_label(&self, channel_id: Option<i64>) -> String {
         channel_id.map_or_else(
             || "none".to_owned(),
             |cid| {
                 let state = self.state.lock().expect("focus state mutex");
-                state
-                    .channel_names
-                    .get(&cid)
-                    .map_or_else(|| format!("#{cid}"), |name| format!("#{name}({cid})"))
+                state.channel_names.get(&cid).map_or_else(
+                    || format!("#unnamed({cid})"),
+                    |name| format!("#{name}({cid})"),
+                )
             },
         )
     }
@@ -400,18 +410,21 @@ impl FocusManager {
         state.guild_names.get(&cid).cloned()
     }
 
-    /// `#channel-name` (or `#<id>`) for the current text focus; `None` when unset.
+    /// `#channel-name` for the current text focus; `None` when unset.
+    ///
+    /// An unknown name renders as [`UNNAMED_CHANNEL_PREFIX`] plus `(id <cid>)`
+    /// rather than a bare snowflake dressed up as a name (#222) — kept short
+    /// because Discord truncates the presence line.
     #[must_use]
     pub fn presence_text(&self) -> Option<String> {
         let state = self.state.lock().expect("focus state mutex");
         let cid = state.text_focus?;
-        let name = state
-            .channel_names
-            .get(&cid)
-            .cloned()
-            .unwrap_or_else(|| cid.to_string());
+        let name = state.channel_names.get(&cid).cloned();
         drop(state);
-        Some(format!("#{name}"))
+        Some(name.map_or_else(
+            || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
+            |name| format!("#{name}"),
+        ))
     }
 
     /// Seed a focus pointer without deferral, promotion, or persistence (startup).

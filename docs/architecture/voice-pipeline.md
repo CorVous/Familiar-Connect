@@ -56,6 +56,41 @@ Discord Opus  →  RecordingSink  →  per-user PCM
 Bracketed stages are pluggable. Unbracketed (recording sink, bus,
 responder, assembler) are project glue.
 
+### Songbird join order and SSRC attribution
+
+Discord identifies a speaker by RTP SSRC, not by user id. The SSRC → user
+binding arrives only in the gateway's op-5 `Speaking` payload, surfaced by
+songbird as a `SpeakingStateUpdate` core event. That event is effectively
+**one-shot per user per session**: it fires when a user first speaks or
+changes capabilities, and songbird's event task never replays it for
+handlers registered later. `SsrcMap` (`bot::voice_intake`) is the only
+consumer, and `RecordingSink::on_tick` is its only reader.
+
+Registration order is therefore load-bearing. `join_voice` uses songbird's
+**two-stage** join instead of the convenience `Songbird::join`:
+
+1. `manager.get_or_insert(guild_id)` — creates the `Call` (and starts its
+   driver tasks) without contacting the gateway.
+2. `register_receivers(&mut call, …)` — adds the `VoiceTick` and
+   `SpeakingStateUpdate` global handlers while the call is still offline.
+3. `call.join(channel_id).await` — stage 1, sends the gateway request.
+4. Await the returned stage-2 future **after** dropping the `Call` lock;
+   holding it across stage 2 deadlocks songbird.
+
+`Songbird::join` collapses steps 1, 3 and 4 and only hands back the `Call`
+once the WS + UDP + DAVE handshake has completed. Registering handlers after
+that returns loses every `Speaking` event that fired during the handshake —
+which in practice was all of them, leaving `unmapped_frames` equal to
+`speaking_frames` for the whole session (issues #199, #205).
+
+The provisional-id fallback in `RecordingSink::on_tick` stays: songbird
+still fires op-5 inconsistently upstream (songbird PR #291) and DAVE
+decryption is MLS-sender-identified, so decoded audio can legitimately
+arrive before any binding. Unattributed frames get a provisional user id
+equal to the raw SSRC (always < 2^32, so it can never collide with a
+Discord snowflake) rather than being dropped; the turn transcribes
+anonymously.
+
 ## Turn detection
 
 **Today:** Deepgram's hosted endpointer. One WebSocket per speaker,
@@ -404,6 +439,22 @@ surfaced when the underlying provider supports it). `voice.stt_to_ttft`
 covers the full STT-to-LLM-first-token gap; `llm.ttft.<slot>` is the
 LLM-only slice plus headers. Comparing the two isolates assembler /
 network from raw model latency.
+
+It also carries `status`, the call's outcome:
+
+| `status=` | Meaning |
+|---|---|
+| `ok` | Stream ran to its terminal event. |
+| `error` | Transport or HTTP fault (the request never opened, or the body broke mid-stream). |
+| `cancelled` | Consumer dropped the stream early — a barge-in. |
+| `silent` | Consumer dropped the stream early because the reply latched the `<silent>` sentinel. |
+| `suppressed` | Consumer dropped the stream early because the reply leaked a tool call as plain content. |
+
+The transport can only ever infer `cancelled` for an early drop, so the
+responders call `LlmStream::note_abandon_status` before returning on a
+deliberate abandon; anything that does not becomes `cancelled`. Before
+that split (issue #220) a silent turn was indistinguishable from a real
+barge-in in the logs.
 
 ## Barge-in
 

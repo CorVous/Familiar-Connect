@@ -62,6 +62,7 @@ use crate::sleep::maintenance::{
     DEFAULT_PASSES, MaintenanceContext, MaintenanceRun, SleepPromptText, create_passes, run_passes,
 };
 use crate::sleep::opinion_formation::OpinionPlan;
+use crate::support::time::iso_utc;
 use crate::tools::start_activity::{ActivityCatalogEntry, StartActivityEngine};
 
 // return-turn display prefix (history/RAG rendering only)
@@ -507,14 +508,11 @@ pub struct GatePayload {
 impl GatePayload {
     /// Adapt a bus [`DiscordTextPayload`] into a gate input.
     ///
-    /// NOTE: [`DiscordTextPayload`] carries no `alarm` field (the landed struct
-    /// predates this feature), so alarm-piercing does not reach the gate through
-    /// the responder path yet — a shared-file request to add `alarm: bool` is
-    /// filed. Synthetic wakes (`wake`) omit the ping flag → content scan.
+    /// Synthetic wakes (`wake`) omit the ping flag → content scan.
     #[must_use]
     pub fn from_discord(p: &DiscordTextPayload) -> Self {
         Self {
-            alarm: false,
+            alarm: p.alarm,
             content: p.content.clone(),
             pings_bot: if p.wake { None } else { Some(p.pings_bot) },
             channel_id: Some(p.channel_id),
@@ -674,7 +672,10 @@ fn title_case(s: &str) -> String {
     out
 }
 
-fn schedule_message(at: &ActivityType) -> String {
+/// `<label> is only available Mon Tue, 09:00-17:00 PDT`. `tz_abbr` is the
+/// display zone's abbreviation *now* — `active_hours` are bare local
+/// `NaiveTime`s, so without it the model reads the window as UTC.
+fn schedule_message(at: &ActivityType, tz_abbr: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(days) = &at.active_days {
         parts.push(
@@ -685,7 +686,11 @@ fn schedule_message(at: &ActivityType) -> String {
         );
     }
     if let Some((start, end)) = at.active_hours {
-        parts.push(format!("{}-{}", start.format("%H:%M"), end.format("%H:%M")));
+        parts.push(format!(
+            "{}-{} {tz_abbr}",
+            start.format("%H:%M"),
+            end.format("%H:%M")
+        ));
     }
     format!("{} is only available {}", at.label, parts.join(", "))
 }
@@ -909,7 +914,7 @@ impl ActivityEngine {
         let duration = if let Some(window) = self.window_for(&activity_type) {
             let (start, end) = self.window_occurrence(now, window);
             if start - now > Duration::minutes(EARLY_BED_MINUTES) {
-                let local_start = start.with_timezone(&self.tz).format("%H:%M");
+                let local_start = start.with_timezone(&self.tz).format("%H:%M %Z");
                 return json!({"error": format!(
                     "not bedtime — the sleep window starts at {local_start}; head to bed within the hour before it"
                 )});
@@ -1325,7 +1330,7 @@ impl ActivityEngine {
         tracing::info!(
             "{} force sleep {}",
             ls::tag("\u{1f319} Activity", ls::G),
-            ls::kv_styled("wake", &planned_return_at.to_rfc3339(), ls::W, ls::LW),
+            ls::kv_styled("wake", &iso_utc(planned_return_at), ls::W, ls::LW),
         );
     }
 
@@ -1860,7 +1865,9 @@ impl ActivityEngine {
         let event = Event {
             event_id: synth_event_id.clone(),
             turn_id: format!("{turn_prefix}-{synth_event_id}"),
-            session_id: channel_id.to_string(),
+            // Same session key the real text source uses — the router keys
+            // barge-in on the exact string.
+            session_id: format!("discord:{channel_id}"),
             parent_event_ids: Vec::new(),
             topic: TOPIC_DISCORD_TEXT.to_owned(),
             timestamp: self.clock.now(),
@@ -1952,7 +1959,8 @@ impl ActivityEngine {
         if in_days && in_hours {
             None
         } else {
-            Some(schedule_message(activity_type))
+            let tz_abbr = now.with_timezone(&self.tz).format("%Z").to_string();
+            Some(schedule_message(activity_type, &tz_abbr))
         }
     }
 }
@@ -1992,6 +2000,10 @@ impl StartActivityEngine for ActivityEngine {
                 active_hours: t.active_hours,
             })
             .collect()
+    }
+
+    fn display_tz(&self) -> Tz {
+        self.tz
     }
 
     fn is_active(&self) -> bool {
@@ -2151,9 +2163,8 @@ mod tests {
             &self,
             _m: Vec<Message>,
             _t: Option<Vec<Value>>,
-        ) -> anyhow::Result<futures::stream::BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-        {
-            Ok(Box::pin(futures::stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(futures::stream::empty()))
         }
         fn slot(&self) -> Option<&str> {
             Some("background")
@@ -3075,6 +3086,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gate_alarm_pierces_absence_through_the_bus_payload() {
+        // N6: the marker must survive the DiscordTextPayload → GatePayload
+        // adaptation, not just a hand-built GatePayload.
+        let engine = Fx::new(FakeClock::new(noon())).build();
+        start_activity(&engine, "hatbox", None).await;
+        let bus_payload = DiscordTextPayload {
+            familiar_id: FAMILIAR.to_owned(),
+            channel_id: CHANNEL,
+            content: "[alarm fired: check the tea]".to_owned(),
+            alarm: true,
+            ..DiscordTextPayload::default()
+        };
+        let gated = GatePayload::from_discord(&bus_payload);
+        assert!(gated.alarm);
+        assert_eq!(engine.gate(&gated).action, GateAction::Normal);
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn gate_non_alarm_payload_still_reports_no_marker() {
+        let p = GatePayload::from_discord(&DiscordTextPayload {
+            content: "hello".to_owned(),
+            ..DiscordTextPayload::default()
+        });
+        assert!(!p.alarm);
+    }
+
+    #[tokio::test]
     async fn gate_unfocused_ping_suppressed() {
         let engine = Fx::new(FakeClock::new(noon())).build();
         start_activity(&engine, "walk", None).await;
@@ -3412,6 +3451,8 @@ mod tests {
         engine.notify_reply_sent().await;
         let ev = recv_wake(&mut sub).await.expect("wake event");
         assert_eq!(ev.topic, TOPIC_DISCORD_TEXT);
+        // N7: same session key the real text source publishes under.
+        assert_eq!(ev.session_id, format!("discord:{CHANNEL}"));
         let p = wake_payload(&ev);
         assert_eq!(p.channel_id, CHANNEL);
         assert!(p.author.is_none());
@@ -4817,6 +4858,30 @@ mod tests {
         let engine = fx.build();
         let r = engine.defer_start("sleep", None);
         assert!(r["error"].as_str().unwrap().contains("window"));
+    }
+
+    #[tokio::test]
+    async fn early_bed_refusal_names_the_window_timezone() {
+        // 2026-06-13 20:00Z == 13:00 PDT; the 00:00 window start is 18h out.
+        let mut fx = Fx::new(FakeClock::new(dt(2026, 6, 13, 20, 0)));
+        fx.config = sleep_config();
+        fx.display_tz = "America/Los_Angeles".to_owned();
+        let engine = fx.build();
+        let r = engine.defer_start("sleep", None);
+        let err = r["error"].as_str().unwrap().to_owned();
+        assert!(err.contains("starts at 00:00 PDT"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn schedule_refusal_names_the_window_timezone() {
+        // Saturday: weekday_rounds is Mon-Fri 09:00-17:00 local.
+        let mut fx = Fx::new(FakeClock::new(dt(2026, 6, 13, 20, 0)));
+        fx.config = clamp_config();
+        fx.display_tz = "America/Los_Angeles".to_owned();
+        let engine = fx.build();
+        let r = engine.defer_start("weekday_rounds", None);
+        let err = r["error"].as_str().unwrap().to_owned();
+        assert!(err.contains("09:00-17:00 PDT"), "{err}");
     }
 
     #[tokio::test]

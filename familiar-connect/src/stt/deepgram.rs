@@ -459,7 +459,31 @@ impl DeepgramTranscriber {
     /// `endpointing` is always emitted. `keyterm` is repeated per term.
     #[must_use]
     pub fn build_ws_url(&self) -> String {
-        let mut params: Vec<(&str, String)> = vec![
+        let mut params = self.base_params();
+        for term in &self.keyterms {
+            params.push(("keyterm", term.clone()));
+        }
+        Self::render_query(&params)
+    }
+
+    /// [`build_ws_url`](Self::build_ws_url) with the keyterm values elided.
+    ///
+    /// Keyterms carry voice-member display names, usernames, aliases and guild
+    /// nicks (#198), so the live URL is a participant roster — not something to
+    /// write into logs. Substitutes a count, keeping the tunables that make the
+    /// line worth logging.
+    #[must_use]
+    pub fn redacted_ws_url(&self) -> String {
+        let mut params = self.base_params();
+        if !self.keyterms.is_empty() {
+            params.push(("keyterm", format!("<{} redacted>", self.keyterms.len())));
+        }
+        Self::render_query(&params)
+    }
+
+    /// Every query param except `keyterm`.
+    fn base_params(&self) -> Vec<(&'static str, String)> {
+        let mut params: Vec<(&'static str, String)> = vec![
             ("model", self.model.clone()),
             ("language", self.language.clone()),
             ("sample_rate", self.sample_rate.to_string()),
@@ -477,9 +501,10 @@ impl DeepgramTranscriber {
         if self.diarize {
             params.push(("diarize", "true".to_string()));
         }
-        for term in &self.keyterms {
-            params.push(("keyterm", term.clone()));
-        }
+        params
+    }
+
+    fn render_query(params: &[(&str, String)]) -> String {
         let query = params
             .iter()
             .map(|(k, v)| format!("{}={}", encode_query(k), encode_query(v)))
@@ -546,7 +571,7 @@ impl DeepgramTranscriber {
         let headers = self.build_headers();
         tracing::info!(
             target: "familiar_connect.stt.deepgram",
-            url = %url,
+            url = %self.redacted_ws_url(),
             "Deepgram WebSocket connecting"
         );
         let ws = self
@@ -1407,6 +1432,26 @@ mod tests {
         ];
         let p = parse_query(&c.build_ws_url());
         assert_eq!(p["keyterm"], vec!["rebasing", "lifecycle mesh", "Tam"]);
+    }
+
+    #[test]
+    fn redacted_ws_url_hides_keyterms_but_keeps_tunables() {
+        let mut c = DeepgramTranscriber::new("test-key");
+        c.keyterms = vec!["Tam".to_string(), "Cassidy Prather".to_string()];
+        let url = c.redacted_ws_url();
+        // Member names are a participant roster; never log them.
+        assert!(!url.contains("Tam"), "{url}");
+        assert!(!url.contains("Cassidy"), "{url}");
+        let p = parse_query(&url);
+        assert_eq!(p["keyterm"], vec!["<2 redacted>"]);
+        assert_eq!(p["model"], vec![c.model.clone()]);
+        assert_eq!(p["endpointing"], vec![c.endpointing_ms.to_string()]);
+    }
+
+    #[test]
+    fn redacted_ws_url_omits_param_when_no_keyterms() {
+        let c = DeepgramTranscriber::new("test-key");
+        assert!(!c.redacted_ws_url().contains("keyterm="));
     }
 
     #[test]

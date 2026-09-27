@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use serde_json::Value;
 
 use familiar_connect::bus::in_process::InProcessEventBus;
@@ -20,7 +20,7 @@ use familiar_connect::bus::protocols::{BackpressurePolicy, EventBus};
 use familiar_connect::bus::router::TurnRouter;
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::identity::Author;
-use familiar_connect::llm::{LlmClient, LlmDelta, Message};
+use familiar_connect::llm::{LlmClient, Message};
 use familiar_connect::processors::voice_responder::VoiceResponder;
 use familiar_connect::processors::{MemberResolver, ResponderLlm};
 use familiar_connect::tts_player::MockTTSPlayer;
@@ -190,6 +190,41 @@ async fn silent_sentinel_skips_tts_and_assistant_turn() {
             .iter()
             .any(|t| t.role == "user" && t.content.contains("hi nobody"))
     );
+}
+
+/// Issue #220: the silent decision abandons the stream, but the transport must
+/// hear `silent`, not the default `cancelled` (barge-in).
+#[tokio::test]
+async fn silent_decision_notes_silent_abandon_status() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let llm = Arc::new(ScriptedLlm::new(&["<silent>"]));
+    let (r, _) = voice_responder(Arc::clone(&s), llm.clone(), player.clone());
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi nobody", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert_eq!(llm.abandon_status(), "silent");
+}
+
+/// Same seam for the leaked-tool-call arm.
+#[tokio::test]
+async fn suppressed_leak_notes_suppressed_abandon_status() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let llm = Arc::new(ScriptedLlm::new(&["<invoke name=\"read_channel\">"]));
+    let (r, _) = voice_responder(Arc::clone(&s), llm.clone(), player.clone());
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert_eq!(llm.abandon_status(), "suppressed");
 }
 
 #[tokio::test]
@@ -509,7 +544,7 @@ impl LlmClient for GatedLlm {
         &self,
         _m: Vec<Message>,
         _t: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
         let d1_flag = Arc::clone(&self.d1_flag);
         let d1_notify = Arc::clone(&self.d1_notify);
         let proceed_flag = Arc::clone(&self.proceed_flag);
@@ -536,7 +571,7 @@ impl LlmClient for GatedLlm {
                 }
             }
         });
-        Ok(Box::pin(s))
+        Ok(familiar_connect::llm::LlmStream::new(s))
     }
     fn slot(&self) -> Option<&str> {
         None
@@ -758,7 +793,7 @@ impl LlmClient for BarrierLlm {
         &self,
         messages: Vec<Message>,
         _t: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
         let already = messages.iter().any(|m| m.role == "assistant");
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
@@ -776,7 +811,7 @@ impl LlmClient for BarrierLlm {
         }
         self.active.fetch_sub(1, Ordering::SeqCst);
         let content = if already { "<silent>" } else { "Sure thing." };
-        Ok(Box::pin(stream::once(
+        Ok(familiar_connect::llm::LlmStream::new(stream::once(
             async move { Ok(text_delta(content)) },
         )))
     }
@@ -1086,13 +1121,13 @@ impl LlmClient for BlockingLlm {
         &self,
         _m: Vec<Message>,
         _t: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
         self.started.store(true, Ordering::SeqCst);
         self.started_notify.notify_waiters();
         while !self.unblock.load(Ordering::SeqCst) {
             self.unblock_notify.notified().await;
         }
-        Ok(Box::pin(stream::once(
+        Ok(familiar_connect::llm::LlmStream::new(stream::once(
             async move { Ok(text_delta("hello")) },
         )))
     }

@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
-use familiar_connect::llm::{LlmClient, LlmDelta, Message};
-use futures::stream::BoxStream;
+use familiar_connect::llm::{LlmClient, Message};
 use serde_json::Value;
 
 /// A fresh in-memory store wrapped in the async facade.
@@ -78,8 +77,10 @@ impl LlmClient for ScriptedLlm {
         &self,
         _messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-        Ok(Box::pin(futures::stream::empty()))
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
+        Ok(familiar_connect::llm::LlmStream::new(
+            futures::stream::empty(),
+        ))
     }
 
     fn slot(&self) -> Option<&str> {

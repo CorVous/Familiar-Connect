@@ -168,7 +168,106 @@ pub struct LlmDelta {
 // ============================================================================
 
 use async_trait::async_trait;
+use futures::Stream;
 use futures::stream::BoxStream;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
+
+/// Shared cell holding the status word the transport logs when a stream is
+/// abandoned before its terminal event.
+///
+/// Starts at `cancelled` (barge-in — the only abandon the transport can infer
+/// on its own). The consumer overrides it when it abandons deliberately.
+#[derive(Clone, Debug)]
+pub struct AbandonStatus(Arc<Mutex<&'static str>>);
+
+impl Default for AbandonStatus {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new("cancelled")))
+    }
+}
+
+impl AbandonStatus {
+    /// Overwrite the status word (last writer wins).
+    pub fn set(&self, status: &'static str) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = status;
+    }
+
+    /// Current status word.
+    #[must_use]
+    pub fn get(&self) -> &'static str {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The stream [`LlmClient::stream_completion`] hands back.
+///
+/// Delegates `Stream` to the boxed inner stream, so `.next()` call sites read
+/// exactly as they did over a bare `BoxStream`. What it adds is
+/// [`note_abandon_status`](Self::note_abandon_status): the `[LLM call]` status
+/// word to log if this stream is dropped before its terminal event. Without it
+/// every early drop looks like a barge-in (issue #220).
+pub struct LlmStream {
+    inner: BoxStream<'static, anyhow::Result<LlmDelta>>,
+    /// `None` for streams with no call metrics behind them (test doubles, the
+    /// `no_stream` path) — noting a status is then a no-op.
+    abandon: Option<AbandonStatus>,
+}
+
+impl LlmStream {
+    /// Wrap any delta stream; no abandon status to report.
+    pub fn new<S>(inner: S) -> Self
+    where
+        S: Stream<Item = anyhow::Result<LlmDelta>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(inner),
+            abandon: None,
+        }
+    }
+
+    /// Wrap a delta stream whose `Drop` reports `abandon`'s status word.
+    #[must_use]
+    pub fn with_abandon(
+        inner: BoxStream<'static, anyhow::Result<LlmDelta>>,
+        abandon: AbandonStatus,
+    ) -> Self {
+        Self {
+            inner,
+            abandon: Some(abandon),
+        }
+    }
+
+    /// Declare why this stream is about to be abandoned — e.g. `"silent"`,
+    /// `"suppressed"`. Unset, an early drop logs `cancelled`.
+    pub fn note_abandon_status(&self, status: &'static str) {
+        if let Some(abandon) = &self.abandon {
+            abandon.set(status);
+        }
+    }
+}
+
+impl From<BoxStream<'static, anyhow::Result<LlmDelta>>> for LlmStream {
+    fn from(inner: BoxStream<'static, anyhow::Result<LlmDelta>>) -> Self {
+        Self {
+            inner,
+            abandon: None,
+        }
+    }
+}
+
+impl Stream for LlmStream {
+    type Item = anyhow::Result<LlmDelta>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
 
 /// The narrow LLM client seam the rest of the system types against.
 ///
@@ -188,11 +287,14 @@ pub trait LlmClient: Send + Sync {
 
     /// SSE streaming completion. `tools` is the OpenAI `tools` payload (`None`
     /// when the registry is empty); each item is one [`LlmDelta`].
+    ///
+    /// `LlmStream::from(box_stream)` adapts any boxed delta stream, so a stub
+    /// stays a one-liner.
     async fn stream_completion(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>>;
+    ) -> anyhow::Result<LlmStream>;
 
     /// The config slot label (`"fast"` / `"prose"` / `"background"`), or `None`.
     fn slot(&self) -> Option<&str>;
@@ -215,7 +317,7 @@ pub trait LlmClient: Send + Sync {
 
 #[cfg(feature = "net")]
 mod client {
-    use super::{Content, LlmClient, LlmDelta, Message};
+    use super::{AbandonStatus, Content, LlmClient, LlmDelta, LlmStream, Message};
     use crate::config::{CharacterConfig, LLM_SLOT_NAMES, LLMSlotConfig};
     use crate::diagnostics::collector::get_span_collector;
     use crate::log_style as ls;
@@ -243,6 +345,8 @@ mod client {
     const DEFAULT_MAX_CONCURRENT: usize = 4;
     const HTTP_TIMEOUT_S: u64 = 120;
     const HTTP_ERROR_BODY_LIMIT: usize = 600;
+    /// `GET /models` is advisory startup diagnostics — give up quickly.
+    const MODELS_TIMEOUT_S: u64 = 20;
 
     // -- free helpers -------------------------------------------------------
 
@@ -544,12 +648,14 @@ mod client {
     /// was already released at header-check time; this struct's job is to parse
     /// deltas and emit call metrics EXACTLY ONCE — on clean end (`ok`), on a
     /// transport error (`error`), or, via `Drop`, on consumer abandonment
-    /// (`cancelled`, the barge-in path).
+    /// (`abandon`'s word: `cancelled` for a barge-in, or whatever the consumer
+    /// noted).
     struct SseDeltaStream {
         events: InnerEvents,
         metrics: CallMetrics,
         done: bool,
         emitted: bool,
+        abandon: AbandonStatus,
     }
 
     impl SseDeltaStream {
@@ -615,9 +721,12 @@ mod client {
 
     impl Drop for SseDeltaStream {
         fn drop(&mut self) {
-            // Abandoned before a terminal event → cancelled (barge-in). A
-            // clean/errored end already emitted and set `emitted`.
-            self.emit_with("cancelled");
+            // Abandoned before a terminal event. `cancelled` (barge-in) unless
+            // the consumer noted a deliberate reason — silent decision,
+            // suppressed tool-call leak (issue #220). A clean/errored end
+            // already emitted and set `emitted`.
+            let status = self.abandon.get();
+            self.emit_with(status);
         }
     }
 
@@ -1144,7 +1253,7 @@ mod client {
             &self,
             messages: Vec<Message>,
             tools: Option<Vec<Value>>,
-        ) -> Result<BoxStream<'static, Result<LlmDelta>>> {
+        ) -> Result<LlmStream> {
             if self.no_stream {
                 return self.no_stream_completion(messages).await;
             }
@@ -1196,20 +1305,22 @@ mod client {
             metrics.t_first_byte = Some(Instant::now());
 
             let events: InnerEvents = Box::pin(response.bytes_stream().eventsource());
-            Ok(Box::pin(SseDeltaStream {
-                events,
-                metrics,
-                done: false,
-                emitted: false,
-            }))
+            let abandon = AbandonStatus::default();
+            Ok(LlmStream::with_abandon(
+                Box::pin(SseDeltaStream {
+                    events,
+                    metrics,
+                    done: false,
+                    emitted: false,
+                    abandon: abandon.clone(),
+                }),
+                abandon,
+            ))
         }
 
         /// `no_stream=True` path: delegate to `chat`, then synthesize deltas
         /// — content, one per tool call, terminal finish reason.
-        async fn no_stream_completion(
-            &self,
-            messages: Vec<Message>,
-        ) -> Result<BoxStream<'static, Result<LlmDelta>>> {
+        async fn no_stream_completion(&self, messages: Vec<Message>) -> Result<LlmStream> {
             let msg = self.chat(messages).await?;
             let mut deltas: Vec<LlmDelta> = Vec::new();
             let content = msg.content_str();
@@ -1250,7 +1361,7 @@ mod client {
                 finish_reason: Some(if has_tools { "tool_calls" } else { "stop" }.to_string()),
                 ..Default::default()
             });
-            Ok(Box::pin(futures::stream::iter(
+            Ok(LlmStream::new(futures::stream::iter(
                 deltas.into_iter().map(|d| -> Result<LlmDelta> { Ok(d) }),
             )))
         }
@@ -1287,7 +1398,7 @@ mod client {
             &self,
             messages: Vec<Message>,
             tools: Option<Vec<Value>>,
-        ) -> Result<BoxStream<'static, Result<LlmDelta>>> {
+        ) -> Result<LlmStream> {
             OpenRouterClient::stream_completion(self, messages, tools).await
         }
 
@@ -1401,6 +1512,30 @@ mod client {
             clients.insert("__image_description__".to_string(), client);
         }
         Ok(clients)
+    }
+
+    /// `GET {base_url}/models` — raw body.
+    ///
+    /// Feeds the startup capability audit (`crate::model_diagnostics`). Same
+    /// Bearer auth as the chat POST; its own short-timeout client so advisory
+    /// diagnostics never share the traffic semaphore or the 120s read timeout.
+    ///
+    /// # Errors
+    /// Transport failure, or a non-2xx status.
+    pub async fn fetch_model_catalog(api_key: &str, base_url: &str) -> Result<String> {
+        let http = reqwest::Client::builder()
+            .read_timeout(Duration::from_secs(MODELS_TIMEOUT_S))
+            .build()?;
+        let response = http
+            .get(format!("{base_url}/models"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("GET /models returned HTTP {}", status.as_u16()));
+        }
+        Ok(response.text().await?)
     }
 
     #[cfg(test)]
@@ -2517,6 +2652,56 @@ mod client {
             assert!(!line.contains("status=error"), "line: {line}");
         }
 
+        /// Issue #220: a silent decision abandons the stream too, but it is not
+        /// a barge-in — the noted word must reach the `[LLM call]` line.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn noted_silent_abandon_logs_silent_not_cancelled() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            let server = MockServer::start().await;
+            let deltas: Vec<String> = (0..50).map(|i| format!("d{i}")).collect();
+            let refs: Vec<&str> = deltas.iter().map(String::as_str).collect();
+            mount_sse(&server, sse_content(&refs)).await;
+            let c = OpenRouterClient::builder("k", "m")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            let mut s = c.stream_completion(vec![user("hi")], None).await.unwrap();
+            let _ = s.next().await;
+            s.note_abandon_status("silent");
+            drop(s);
+            let line = call_line(&cap);
+            assert!(line.contains("status=silent"), "line: {line}");
+            assert!(!line.contains("status=cancelled"), "line: {line}");
+        }
+
+        /// Same seam, the leaked-tool-call arm's word (issue #109 suppression).
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn noted_suppressed_abandon_logs_suppressed_status() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            let server = MockServer::start().await;
+            let deltas: Vec<String> = (0..50).map(|i| format!("d{i}")).collect();
+            let refs: Vec<&str> = deltas.iter().map(String::as_str).collect();
+            mount_sse(&server, sse_content(&refs)).await;
+            let c = OpenRouterClient::builder("k", "m")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            let mut s = c.stream_completion(vec![user("hi")], None).await.unwrap();
+            let _ = s.next().await;
+            s.note_abandon_status("suppressed");
+            drop(s);
+            let line = call_line(&cap);
+            assert!(line.contains("status=suppressed"), "line: {line}");
+        }
+
         #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn http_4xx_logs_error_status() {
@@ -2783,6 +2968,7 @@ mod client {
 #[cfg(feature = "net")]
 pub use client::{
     OPENROUTER_BASE_URL, OpenRouterClient, OpenRouterClientBuilder, create_llm_clients,
+    fetch_model_catalog,
 };
 
 #[cfg(test)]

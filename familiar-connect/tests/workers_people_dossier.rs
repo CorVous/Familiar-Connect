@@ -14,9 +14,8 @@ use async_trait::async_trait;
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::{AppendFact, FactSubject, NewFact};
 use familiar_connect::identity::Author;
-use familiar_connect::llm::{LlmClient, LlmDelta, Message};
+use familiar_connect::llm::{LlmClient, Message};
 use familiar_connect::processors::people_dossier_worker::PeopleDossierWorker;
-use futures::stream::BoxStream;
 use serde_json::Value;
 
 use helpers::{ScriptedLlm, joined, store, system_text, user_text};
@@ -414,8 +413,10 @@ impl LlmClient for SupersedingLlm {
         &self,
         _messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-        Ok(Box::pin(futures::stream::empty()))
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
+        Ok(familiar_connect::llm::LlmStream::new(
+            futures::stream::empty(),
+        ))
     }
     fn slot(&self) -> Option<&str> {
         Some("background")

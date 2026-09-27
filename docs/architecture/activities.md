@@ -96,9 +96,12 @@ top of `handle()`, before any prompt assembly. Three outcomes:
   suppressed like any other message; it surfaces in the missed-ping
   wake at return.
 
-Her own alarms pierce any absence: a synthetic wake payload carrying
-`alarm: True` (the alarm waker's marker) always gates normal —
-reachable or not — and replying to it does not cut the absence short.
+Her own alarms pierce any absence: a synthetic `discord.text` payload
+with `alarm: true` (the alarm waker's marker on `DiscordTextPayload`,
+carried into the gate by `GatePayload::from_discord`) always gates
+normal — reachable or not — and replying to it does not cut the absence
+short. `alarm` is distinct from `wake`: a wake is traffic-driven (the
+unread nudge, the activity return), an alarm is self-scheduled.
 
 "Real @ping" means the bot user appears in the message's mentions —
 ingest computes a `pings_bot` payload flag covering both `<@id>`
