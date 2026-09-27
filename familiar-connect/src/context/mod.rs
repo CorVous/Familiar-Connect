@@ -1,8 +1,8 @@
 //! Prompt assembly: layered system prompt, recent history, final reminder
-//! (subsystem 05; Python `context/`).
+//! (subsystem 05).
 //!
 //! Re-exports the assembler, the eight concrete layers, and the final-reminder
-//! builder at the module root, mirroring Python's `context/__init__.py`.
+//! builder at the module root.
 
 pub mod assembler;
 pub mod final_reminder;

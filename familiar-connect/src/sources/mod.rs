@@ -1,4 +1,4 @@
-//! Bus sources (subsystem 10; Python `sources/`).
+//! Bus sources (subsystem 10).
 //!
 //! Discord text/embeds, voice queue drain, Twitch queue drain. Per-source
 //! queue->bus semantics for `voice`/`twitch` are pinned by specs 10 (B-VS/B-TS)

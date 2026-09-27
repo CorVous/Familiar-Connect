@@ -1,5 +1,5 @@
 //! Crash-safe `{key}` placeholder fill for config-sourced prompt templates
-//! (subsystem 02; Python `prompt_fill.py`).
+//! (subsystem 02).
 //!
 //! Config-sourced (per-familiar overridable) prompt text is filled with dynamic
 //! values (`{self_name}` etc.) at build time. String formatting that raised on a
@@ -21,8 +21,8 @@ static TOKEN_RE: LazyLock<Regex> =
 /// Replace each `{key}` in `template` with its value from `values`.
 ///
 /// `values` is a slice of `(key, replacement)` pairs; the first matching key
-/// wins. Callers perform any `Display` conversion before calling (Python does
-/// `str(value)`). Unknown `{...}` tokens and stray braces pass through unchanged.
+/// wins. Callers perform any `Display` conversion before calling.
+/// Unknown `{...}` tokens and stray braces pass through unchanged.
 #[must_use]
 pub fn fill_placeholders(template: &str, values: &[(&str, &str)]) -> String {
     TOKEN_RE

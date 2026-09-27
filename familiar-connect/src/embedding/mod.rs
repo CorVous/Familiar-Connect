@@ -1,7 +1,7 @@
 //! Embedder seam + factory registry with built-in backends
-//! (subsystem 04; Python `embedding/`).
+//! (subsystem 04).
 //!
-//! Public surface (mirrors Python `embedding/__init__.py`): the [`Embedder`]
+//! Public surface: the [`Embedder`]
 //! trait, the [`HashEmbedder`] built-in, the [`EmbedderRegistry`] builder, and
 //! the [`known_embedders`] / [`create_embedder`] convenience functions. The
 //! optional `fastembed` ONNX backend is Layer 2 (feature `local-embed`).
@@ -15,7 +15,7 @@ pub use factory::{EmbedderFactory, EmbedderRegistry, create_embedder, known_embe
 pub use hash::HashEmbedder;
 pub use protocol::Embedder;
 
-/// Errors from the embedding subsystem (DESIGN §4.1 — one `thiserror` enum per
+/// Errors from the embedding subsystem (one `thiserror` enum per
 /// subsystem; byte-stable messages are test contracts).
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {

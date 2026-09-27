@@ -1,6 +1,5 @@
-//! Ported from Python `tests/test_rag_embedding_rerank.py` — the M6 embedding
-//! signal in RagContextLayer. The warn-once assertion uses a `tracing` capture
-//! layer (DESIGN §4.8) instead of Python's `caplog`.
+//! The M6 embedding signal in RagContextLayer. The warn-once assertion uses a
+//! `tracing` capture layer.
 // The `Embedder::name` impls return string literals; the trait fixes the return
 // type to `&str`, so clippy's `&'static str` suggestion cannot apply here.
 #![allow(clippy::unnecessary_literal_bound)]

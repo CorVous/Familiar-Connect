@@ -1,5 +1,4 @@
-//! Ported from Python `tests/test_sleep_pass_orchestrators.py` — the
-//! `execute_consolidation` / `execute_opinion_formation` plan→apply
+//! The `execute_consolidation` / `execute_opinion_formation` plan→apply
 //! orchestrators: dry-run-never-mutates (facts + watermark), apply mutates +
 //! advances, and the rail-rejection WARNING signal (the surviving audit trail).
 

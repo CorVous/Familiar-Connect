@@ -21,8 +21,7 @@ pub fn store() -> Arc<AsyncHistoryStore> {
 }
 
 /// Scripted LLM stub: pops one canned reply per `chat` call, records every
-/// prompt, and returns a benign default when the script is exhausted. Mirrors
-/// the Python `_ScriptedLLM` doubles across the worker test suites.
+/// prompt, and returns a benign default when the script is exhausted.
 pub struct ScriptedLlm {
     replies: Mutex<VecDeque<String>>,
     default: String,
@@ -44,7 +43,7 @@ impl ScriptedLlm {
         })
     }
 
-    /// Append a reply to the script (mirrors Python `llm._replies.append(...)`).
+    /// Append a reply to the script.
     pub fn push_reply(&self, reply: impl Into<String>) {
         self.replies.lock().unwrap().push_back(reply.into());
     }

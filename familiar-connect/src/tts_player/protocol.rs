@@ -1,4 +1,4 @@
-//! `TtsPlayer` seam (subsystem 09; Python `tts_player/protocol.py`).
+//! `TtsPlayer` seam (subsystem 09).
 //!
 //! The speak surface used by the voice responder (06). Production wraps
 //! Cartesia/Azure/Gemini + Discord voice playback via

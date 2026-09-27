@@ -1,5 +1,5 @@
 //! Utterance endpointer — TEN-VAD + Smart Turn over a 48 kHz PCM stream
-//! (subsystem 09; Python `voice/turn_detection/endpointer.py`).
+//! (subsystem 09).
 //!
 //! Drives per-user local turn detection: 48 kHz mono int16 PCM in (any chunk
 //! length), a `on_turn_complete` callback out. Three building blocks compose:
@@ -20,7 +20,7 @@
 //! silence after an `incomplete` verdict does not refire it. A subsequent
 //! speech-then-silence cycle does. Smart Turn runs off the reactor via
 //! `spawn_blocking` — wav2vec2 over up to 16 s of audio would otherwise stall
-//! Deepgram keepalives and Discord's 10 s voice heartbeat (spec 09 §27).
+//! Deepgram keepalives and Discord's 10 s voice heartbeat.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -35,14 +35,14 @@ const VAD_CHUNK_SAMPLES: usize = 256;
 const VAD_CHUNK_BYTES: usize = VAD_CHUNK_SAMPLES * 2;
 
 /// The turn-complete callback: awaited with the buffered utterance whenever a
-/// turn ends. Mirrors Python's `Callable[[bytes], Awaitable[None]]`.
+/// turn ends.
 pub type OnTurnComplete =
     Box<dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
-/// Chunk threshold: `int(ms / 16.0)` floored to ≥ 1 (spec 09 §25).
+/// Chunk threshold: `int(ms / 16.0)` floored to ≥ 1.
 ///
 /// `_VAD_CHUNK_MS` is exactly `16.0` (`256/16000*1000`), a power-of-two divisor,
-/// so integer `ms / 16` equals Python's `int(ms / 16.0)` truncation for every
+/// so integer `ms / 16` truncates identically for every
 /// non-negative `ms` — no float cast needed. Defaults land on 200 ms → 12 frames
 /// (192 ms effective) and 100 ms → 6 frames (96 ms).
 const fn chunk_threshold(ms: i64) -> i64 {
@@ -151,17 +151,14 @@ impl UtteranceEndpointer {
     /// Resample, frame into 16 ms VAD windows, advance the state machine.
     ///
     /// # Panics
-    /// Panics when `pcm_48k` has an odd (non-`i16`-aligned) byte length. The pump
-    /// always feeds even mono chunks, so this never fires on the happy path; a
-    /// malformed chunk is a caller bug surfaced loudly, matching Python where
-    /// `Resampler48to16.feed` raises `ValueError` and the exception propagates out
-    /// to the awaiting pump (audio.py:49-51, endpointer.py:133).
+    /// Panics when `pcm_48k` has an odd (non-`i16`-aligned) byte length. The
+    /// pump always feeds even mono chunks, so this never fires on the happy
+    /// path; a malformed chunk is a caller bug, surfaced loudly.
     pub async fn feed_audio(&mut self, pcm_48k: &[u8]) {
         if pcm_48k.is_empty() {
             return;
         }
-        // Odd-length input can't be int16-framed. Python raises `ValueError` here
-        // and it propagates to the pump; mirror that loud failure rather than
+        // Odd-length input can't be int16-framed. Fail loudly rather than
         // silently dropping the chunk.
         let resampled = self
             .resampler

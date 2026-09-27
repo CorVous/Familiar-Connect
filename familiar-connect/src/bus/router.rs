@@ -1,5 +1,4 @@
-//! Per-session turn routing + cancel-prior-scope barge-in (subsystem 01;
-//! Python `bus/router.py`).
+//! Per-session turn routing + cancel-prior-scope barge-in (subsystem 01).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -7,11 +6,10 @@ use std::sync::{Arc, Mutex};
 use crate::bus::envelope::TurnScope;
 
 /// Cancels the prior turn in a session before registering a new one; sessions
-/// are fully independent (Python `TurnRouter`).
+/// are fully independent.
 ///
-/// Thread-safe: the Python original relied on the GIL + a single event loop, but
-/// the Rust runtime is multi-threaded, so the active-scope map is behind a
-/// `Mutex` (DESIGN §4.4). Observable semantics are unchanged.
+/// Thread-safe: the runtime is multi-threaded, so the active-scope map is
+/// behind a `Mutex`.
 #[derive(Default)]
 pub struct TurnRouter {
     active: Mutex<HashMap<String, Arc<TurnScope>>>,

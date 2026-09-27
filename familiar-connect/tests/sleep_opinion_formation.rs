@@ -1,8 +1,8 @@
-//! Ported from Python `tests/test_opinion_formation.py` — the DB-backed and
-//! LLM-backed halves: `gather_days` watermarking, the `_default` importance
-//! rubric in the synthesis prompt, `plan_opinions` end-to-end (configured
-//! prompts reach the LLM, rail-beats-prompt), and `apply_opinions` minting.
-//! The pure render/bucket/validate/importance tests live in-module.
+//! The DB-backed and LLM-backed halves: `gather_days` watermarking, the
+//! `_default` importance rubric in the synthesis prompt, `plan_opinions`
+//! end-to-end (configured prompts reach the LLM, rail-beats-prompt), and
+//! `apply_opinions` minting. The pure render/bucket/validate/importance tests
+//! live in-module.
 
 #[path = "sleep_helpers/mod.rs"]
 mod helpers;

@@ -1,6 +1,6 @@
-//! Ported from Python `tests/test_message_reactions.py` — the RecentHistoryLayer
-//! reaction-render halves (`TestRecentHistoryReactions`) and the single batched
-//! query spy (`TestRecentHistoryReactionsBatch`) via the DB trace hook.
+//! The RecentHistoryLayer reaction-render halves (`TestRecentHistoryReactions`)
+//! and the single batched query spy (`TestRecentHistoryReactionsBatch`) via the
+//! DB trace hook.
 
 #[path = "context_helpers/mod.rs"]
 mod helpers;

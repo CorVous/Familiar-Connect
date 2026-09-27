@@ -1,5 +1,4 @@
-//! Render Discord embeds as plain text (subsystem 10; Python
-//! `sources/discord_embed_text.py`).
+//! Render Discord embeds as plain text (subsystem 10).
 //!
 //! Discord delivers URL unfurls as `Embed` objects on a message. A bot only sees
 //! `message.content` by default — link previews vanish. [`format_embeds`] flattens
@@ -7,10 +6,9 @@
 //! publishing onto the bus, so the LLM sees the same body humans see in the
 //! client.
 //!
-//! Python duck-types the input (any object exposing the relevant attributes). The
-//! Rust port keeps the same freedom by taking a small structural [`EmbedView`]
-//! input struct (DESIGN port notes: "duck-typing becomes small input structs …
-//! tests then build them literally"); the serenity glue constructs one from a
+//! The input is a small structural [`EmbedView`] struct rather than a
+//! concrete client type, so tests build one literally; the serenity glue
+//! constructs one from a
 //! `serenity::model::channel::Embed`.
 
 /// The literal marker prefixing every rendered embed block.
@@ -37,8 +35,7 @@ pub struct EmbedImageView {
 
 /// Structural, duck-typed view of a Discord embed.
 ///
-/// Every field is optional so tests build only the ones a case needs, exactly as
-/// the Python doubles do with `SimpleNamespace`.
+/// Every field is optional so tests build only the ones a case needs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmbedView {
     /// `embed.provider.name` (unfurl source, e.g. `Tumblr`).

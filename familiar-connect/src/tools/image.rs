@@ -1,11 +1,10 @@
-//! `view_image` tool: fetch → compress → vision-describe (subsystem 08; Python
-//! `tools/image.py`; feature `images`).
+//! `view_image` tool: fetch → compress → vision-describe (subsystem 08;
+//! feature `images`).
 //!
-//! The image fetch is injected via the [`ImageFetcher`] seam so tests can supply
-//! canned bytes (the Python suite patches `_fetch_image_bytes`). The production
-//! fetcher uses `reqwest` (feature `net`): a fresh client per call with a 15s
-//! timeout, redirect-following, a content-type allow-list, and a hard 20 MiB
-//! streaming cap.
+//! The image fetch is injected via the [`ImageFetcher`] seam so tests can
+//! supply canned bytes. The production fetcher uses `reqwest` (feature `net`):
+//! a fresh client per call with a 15s timeout, redirect-following, a
+//! content-type allow-list, and a hard 20 MiB streaming cap.
 
 use std::sync::Arc;
 

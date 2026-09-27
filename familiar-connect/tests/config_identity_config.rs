@@ -1,5 +1,5 @@
-//! Integration tests for `config::load_character_config` (subsystem 02;
-//! ports `tests/test_config.py`). These exercise the TOML deep-merge over the
+//! Integration tests for `config::load_character_config` (subsystem 02).
+//! These exercise the TOML deep-merge over the
 //! checked-in `_default/character.toml`, per-section validation, and the
 //! byte-stable `ConfigError` message contract.
 
@@ -12,9 +12,9 @@ fn default_profile() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml")
 }
 
-/// The registry validator sets, injected per DESIGN D3. These mirror the real
-/// `known_projectors()` / `known_embedders()` registries closely enough to load
-/// the shipped default profile and exercise the override paths.
+/// The registry validator sets, injected the D3. These mirror the real
+/// `known_projectors` / `known_embedders` registries closely enough to load the
+/// shipped default profile and exercise the override paths.
 fn projectors() -> BTreeSet<String> {
     [
         "rolling_summary",
@@ -85,7 +85,7 @@ fn assert_err(result: Result<CharacterConfig, ConfigError>, needle: &str) {
 }
 
 /// Assert the *entire* `ConfigError` message matches byte-for-byte. Used where
-/// the numeric `got {value}` tail must match Python exactly (a negative TOML
+/// the numeric `got {value}` tail is pinned exactly (a negative TOML
 /// integer prints as `-1`, not `-1.0`).
 #[track_caller]
 fn assert_err_eq(result: Result<CharacterConfig, ConfigError>, expected: &str) {
@@ -563,7 +563,7 @@ fn text_silence_gap_fold_parsed() {
 fn text_silence_gap_fold_rejects_negative() {
     // Ports test_text_silence_gap_fold_rejects_negative. The `-1` is a TOML
     // integer, so the message tail must read `got -1` (int), byte-for-byte with
-    // Python's `got {v}` — not the padded `got -1.0`.
+    // `got {v}` — not the padded `got -1.0`.
     assert_err_eq(
         load("[providers.history]\ntext_silence_gap_fold_seconds = -1\n"),
         "[providers.history].text_silence_gap_fold_seconds must be >= 0, got -1",
@@ -573,7 +573,7 @@ fn text_silence_gap_fold_rejects_negative() {
 #[test]
 fn text_silence_gap_fold_rejects_negative_float() {
     // A negative TOML float renders through `fmt_num`; `-1.5` is unchanged and
-    // matches Python's `got -1.5`.
+    // matches `got -1.5`.
     assert_err_eq(
         load("[providers.history]\ntext_silence_gap_fold_seconds = -1.5\n"),
         "[providers.history].text_silence_gap_fold_seconds must be >= 0, got -1.5",
@@ -582,7 +582,7 @@ fn text_silence_gap_fold_rejects_negative_float() {
 
 #[test]
 fn coalesce_max_gap_rejects_negative() {
-    // No Python ancestor test, but `parse_coalesce_gap` shares the sign-check
+    // `parse_coalesce_gap` shares the sign-check
     // fix: a negative TOML integer must print `got -1`, not `got -1.0`.
     assert_err_eq(
         load("[providers.history]\ncoalesce_max_gap_seconds = -1\n"),
@@ -721,7 +721,7 @@ fn retrieval_unknown_key_rejected() {
 #[test]
 fn retrieval_negative_weight_rejected() {
     // Ports test_negative_weight_rejected. `-1` is a TOML integer, so the tail
-    // must read `got -1` (int), matching Python's `got {v}` before `float(v)`.
+    // must read `got -1` (int).
     assert_err_eq(
         load("[memory.retrieval]\nimportance_weight = -1\n"),
         "[memory.retrieval].importance_weight must be non-negative, got -1",
@@ -730,7 +730,7 @@ fn retrieval_negative_weight_rejected() {
 
 #[test]
 fn retrieval_negative_weight_float_rejected() {
-    // Negative float renders through `fmt_num`, matching Python's `got -1.5`.
+    // Negative float renders through `fmt_num`.
     assert_err_eq(
         load("[memory.retrieval]\nimportance_weight = -1.5\n"),
         "[memory.retrieval].importance_weight must be non-negative, got -1.5",

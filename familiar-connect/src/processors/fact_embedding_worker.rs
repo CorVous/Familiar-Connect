@@ -1,4 +1,4 @@
-//! FactEmbeddingWorker backfill (subsystem 07; Python `processors/fact_embedding_worker.py`).
+//! FactEmbeddingWorker backfill (subsystem 07).
 //!
 //! For each current fact (`superseded_at IS NULL`) lacking a `fact_embeddings`
 //! row for the active embedder's [`Embedder::name`], run the embedder and

@@ -1,4 +1,4 @@
-//! Alarm waker processor (subsystem 08; Python `tools/waker.py`).
+//! Alarm waker processor (subsystem 08).
 //!
 //! Listens on [`TOPIC_ALARM_FIRED`] and republishes a synthetic
 //! `discord.text`-shaped event so the existing `TextResponder` picks it up and

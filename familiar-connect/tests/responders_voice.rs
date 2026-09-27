@@ -1,6 +1,6 @@
-//! Integration tests for `VoiceResponder` (subsystem 06; Python
-//! `tests/test_voice_responder.py`). The heart of the concurrency suite:
-//! per-user barge-in, the per-channel reply gate, and the sub-200ms cut budget.
+//! Integration tests for `VoiceResponder` (subsystem 06). The heart of the
+//! concurrency suite: per-user barge-in, the per-channel reply gate, and the
+//! sub-200ms cut budget.
 
 #![allow(clippy::significant_drop_tightening, clippy::format_collect)]
 

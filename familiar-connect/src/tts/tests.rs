@@ -1,4 +1,4 @@
-//! Port of `tests/test_tts.py` — Cartesia (WS via fake conn), greeting cache,
+//! TTS tests — Cartesia (WS via fake conn), greeting cache,
 //! Azure (buffered logic + streaming bridge via fake reader), Gemini (upsample /
 //! estimate / style-prompt / synth via fake backend), and the factory.
 
@@ -1276,7 +1276,7 @@ fn factory_unknown_provider_raises() {
         ..TTSConfig::default()
     };
     let err = build_tts_client(&cfg, |_| None).unwrap_err();
-    // Python: `f"Unknown TTS provider {provider!r}; ..."` — repr single-quotes the
+    // The message single-quotes the
     // provider, so the message reads `...provider 'foo';...` (never `"foo"`).
     assert_eq!(
         err.to_string(),

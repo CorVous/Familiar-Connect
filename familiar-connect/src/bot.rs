@@ -1,11 +1,11 @@
-//! Discord bot shell (subsystem 10; Python `bot.py`).
+//! Discord bot shell (subsystem 10).
 //!
 //! Owns the gateway client, the subscribe/unsubscribe/diagnostics slash commands,
 //! the `on_message` / reaction / typing / voice-state / ready handlers, the
 //! [`BotHandle`] adapter bus-only processors post back through, and the
 //! `/subscribe-voice` intake pipeline.
 //!
-//! ## Port shape (DESIGN §4.8 + spec 10 "Rust port notes")
+//! ## Shape
 //!
 //! The serenity-independent logic — the [`BotHandle`] policy, image collection,
 //! embed composition, reaction/edit dispatch, the DM disclaimer + ingest
@@ -228,7 +228,7 @@ pub struct ReadyInfo {
 /// touch.
 ///
 /// Implemented for [`HistoryStore`]; a recorder double stands in for the
-/// "must-not-write" disclaimer tests (DESIGN §4.8).
+/// "must-not-write" disclaimer tests.
 pub trait BotStore: Send + Sync {
     /// Rewrite a stored turn's content by platform message id.
     fn update_turn_content_by_message_id(
@@ -288,11 +288,11 @@ impl BotStore for HistoryStore {
 ///
 /// The serenity gateway handlers (reaction / edit dispatch, B-RX) run on the
 /// reactor; a direct synchronous store write there would block a tokio worker on
-/// the SQLite lock + disk I/O, which DESIGN §4.4 forbids ("DB work stays off the
-/// reactor"). This adapter keeps the cheap subscription / emoji gating inline
+/// the SQLite lock + disk I/O, and DB work must stay off the reactor. This
+/// adapter keeps the cheap subscription / emoji gating inline
 /// (`apply_message_edit` / `apply_reaction_*`) and spawns only the DB write,
-/// honouring spec 10's guidance: "in Rust use the async store, but keep the
-/// no-await-in-gateway-handler spirit by spawning if the write can block."
+/// keeping the no-await-in-gateway-handler property while still using the
+/// async store.
 ///
 /// Writes are fire-and-forget: the enqueue always succeeds (returns `Ok`), and
 /// each spawned task logs its own failure, so the dispatchers' `Err` branch is a
@@ -420,7 +420,7 @@ pub trait PresenceSink: Send + Sync {
 /// A slash-command interaction acknowledgement surface.
 ///
 /// Both methods treat a dead (`NotFound 10062`) interaction as benign — the
-/// action already ran (spec 10 B-SC1/2). A scripted double drives the defer/reply
+/// action already ran. A scripted double drives the defer/reply
 /// guard tests.
 #[async_trait]
 pub trait InteractionAck: Send + Sync {
@@ -815,7 +815,7 @@ pub type ResolveMember = Arc<dyn Fn(i64, i64) -> Option<Author> + Send + Sync>;
 
 /// Bot + outbound seams for bus processors.
 ///
-/// The closures the Python dataclass stored (`send_text`, `trigger_typing`,
+/// The outbound closures (`send_text`, `trigger_typing`,
 /// `resolve_member`) become trait objects; the mutable side caches
 /// (`voice_members`, the late-set `activity_engine`, and — under `discord-voice`
 /// — `voice_runtime`) sit behind mutexes so many tasks can touch them.
@@ -838,7 +838,7 @@ pub struct BotHandle {
     pub activity_engine: Mutex<Option<Arc<dyn ActivityResync>>>,
     /// Per-voice-channel intake pipeline state (voice feature only). A
     /// `BTreeMap` (not `HashMap`) so the TTS voice-client getter's
-    /// `.values().next()` is deterministic + stable (Python `_first_voice_client`).
+    /// `.values.next` is deterministic + stable.
     #[cfg(feature = "discord-voice")]
     pub voice_runtime:
         Mutex<std::collections::BTreeMap<i64, crate::bot::voice_intake::VoiceRuntime>>,
@@ -1061,10 +1061,9 @@ impl BotEvents {
     /// in [`create_bot`]'s dispatcher).
     ///
     /// Registers a persisted voice subscription and marks the channel active in
-    /// the `voice_channels` proxy the activity engine's `voice_active_fn` reads.
-    /// The focus manager sees the new subscription immediately through the
-    /// shared registry (no restart), matching Python's single-registry
-    /// semantics.
+    /// the `voice_channels` proxy the activity engine's `voice_active_fn`
+    /// reads. The focus manager sees the new subscription immediately through
+    /// the shared registry (no restart).
     pub fn on_subscribe_voice(&self, channel_id: i64, guild_id: Option<i64>) {
         if let Ok(cid) = u64::try_from(channel_id) {
             let _ = self
@@ -1791,7 +1790,7 @@ mod serenity_glue {
         /// `/subscribe-voice`: join the caller's voice channel via songbird
         /// (songbird owns the DAVE/MLS handshake), wire the [`RecordingSink`] +
         /// per-speaker intake pipeline, populate the `voice_runtime` map, and
-        /// register the voice subscription (Python `bot.py::subscribe_voice`).
+        /// register the voice subscription.
         ///
         /// [`RecordingSink`]: crate::voice::recording_sink::RecordingSink
         #[cfg(feature = "discord-voice")]
@@ -1877,8 +1876,7 @@ mod serenity_glue {
             // Re-check under the lock before inserting: `join_voice` awaited
             // above, so a concurrent `/subscribe-voice` for this same channel
             // could have won the race and already inserted. Keep the
-            // first-joined runtime (Python's idempotent `subscribe_voice`
-            // intent, bot.py:262) and tear down the one we just built rather
+            // first-joined runtime and tear down the one we just built rather
             // than overwriting — a bare `insert` would drop the live runtime
             // without `stop_voice_intake`, orphaning its intake tasks (which
             // would keep publishing transcripts) and leaking the songbird call.
@@ -1917,7 +1915,7 @@ mod serenity_glue {
         /// `/unsubscribe-voice`: tear down the intake pipeline (cancel the
         /// router / source / per-speaker pumps + fan-ins, close the
         /// transcribers), leave the songbird call, and drop the voice
-        /// subscription (Python `bot.py::unsubscribe_voice`).
+        /// subscription.
         #[cfg(feature = "discord-voice")]
         async fn dispatch_unsubscribe_voice(&self, ctx: &Context, ack: &SlashCtx) {
             use crate::bot::voice_intake::stop_voice_intake;
@@ -2101,8 +2099,8 @@ mod serenity_glue {
         async fn typing_start(&self, ctx: Context, event: TypingStartEvent) {
             // Discord attaches the full `Member` (carrying the user's `bot`
             // flag) on guild typing events; prefer it so the bot flag is read
-            // reliably (Python `on_typing` reads `user.bot` directly). Fall back
-            // to the user cache for DM typing, then to non-bot when uncached.
+            // reliably. Fall back to the user cache for DM typing, then to
+            // non-bot when uncached.
             let is_bot = event.member.as_ref().map_or_else(
                 || ctx.cache.user(event.user_id).is_some_and(|u| u.bot),
                 |m| m.user.bot,
@@ -2177,7 +2175,7 @@ mod serenity_glue {
         pub local_turn_detector: Option<Arc<crate::voice::turn_detection::LocalTurnDetector>>,
     }
 
-    /// Build the gateway client + [`BotHandle`], mirroring Python `create_bot`.
+    /// Build the gateway client + [`BotHandle`].
     ///
     /// Pure construction — no login. The caller drives `client.start()`.
     ///
@@ -2195,7 +2193,7 @@ mod serenity_glue {
         handle.trigger_typing = Some(trigger_typing);
         handle.focus_manager = deps.focus_manager.clone();
         // Typing-interrupt policy: cancel the active turn when a real user types,
-        // back off when another bot types (Python `bot.py` constructs it here and
+        // back off when another bot types (constructed here and
         // stores it on the handle; the text responder + `on_typing` consume it).
         let typing_subs = deps.subscriptions.clone();
         let is_subscribed: crate::typing_interrupt::IsSubscribed = Arc::new(move |ch: i64| {
@@ -2289,7 +2287,7 @@ mod serenity_glue {
 // ---------------------------------------------------------------------------
 //
 // The router → per-user-pump → transcriber-clone → fan-in → VoiceSource topology
-// (spec 10 B-VI34-41) is serenity-free: it drains the `(user_id, mono_pcm)`
+// is serenity-free: it drains the `(user_id, mono_pcm)`
 // channel the landed [`RecordingSink`](crate::voice::recording_sink) fills.
 // Songbird owns only the voice connection + DAVE/MLS; the `VoiceTick` receiver
 // converts songbird's decoded per-SSRC audio into a landed `VoiceTick` and hands
@@ -2318,21 +2316,21 @@ pub mod voice_intake {
     use crate::voice::recording_sink::{AudioChunk, RecordingSink, SsrcResolver, VoiceTick};
     use crate::voice::turn_detection::{LocalTurnDetector, UtteranceEndpointer};
 
-    /// Idle-finalize gap (s) before a forced `finalize` when no local endpointer
-    /// owns endpointing (Python `stt.deepgram.DEFAULT_IDLE_FINALIZE_S`).
+    /// Idle-finalize gap (s) before a forced `finalize` when no local
+    /// endpointer owns endpointing.
     pub const DEFAULT_IDLE_FINALIZE_S: f64 = 0.5;
 
     /// A per-user transcriber clone, shared between its pump and teardown.
     type SharedTranscriber = Arc<AsyncMutex<Box<dyn Transcriber>>>;
-    /// The template, cloned per user (Python `familiar.transcriber`).
+    /// The template, cloned per user.
     type Template = Arc<Mutex<Box<dyn Transcriber>>>;
     /// Yields the current voice-channel member proper nouns to bias STT keyterms
     /// on each per-user transcriber clone (#198). Called on the audio path just
     /// before `start`, so it must not block (a cache read).
     pub type NameProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
-    /// Per-voice-channel intake state (Python `VoiceRuntime`), all per-user maps
-    /// keyed by Discord user id.
+    /// Per-voice-channel intake state, all per-user maps keyed by Discord user
+    /// id.
     #[derive(Default)]
     struct IntakeState {
         transcribers: HashMap<u64, SharedTranscriber>,
@@ -2592,6 +2590,10 @@ pub mod voice_intake {
     /// With no transcriber configured the returned runtime is **playback-only**
     /// (B-VI31): it carries the `voice_client` (so TTS still plays out) but
     /// spawns no intake tasks. The `template` is cloned per user on first audio.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "wiring seam: 8 independent collaborators, no natural grouping"
+    )]
     pub fn start_voice_intake(
         voice_client: Arc<dyn VoiceClientLike>,
         template: Option<Template>,
@@ -2854,12 +2856,13 @@ pub mod voice_intake {
 
     /// [`VoiceClientLike`] adapter over a songbird [`Call`](songbird::Call).
     ///
-    /// Bridges the synchronous 4-method player surface (DESIGN §4.8) onto
-    /// songbird's async call + [`TrackHandle`](songbird::tracks::TrackHandle):
+    /// Bridges the synchronous 4-method player surface onto songbird's async
+    /// call + [`TrackHandle`](songbird::tracks::TrackHandle):
     /// [`DiscordVoicePlayer`](crate::tts_player::DiscordVoicePlayer) hands us
     /// Discord-format stereo s16le @ 48 kHz PCM, which we convert to the
-    /// interleaved `f32` stream songbird's [`RawAdapter`](songbird::input::RawAdapter)
-    /// consumes. `is_playing` is tracked by an atomic flipped false by a
+    /// interleaved `f32` stream songbird's
+    /// [`RawAdapter`](songbird::input::RawAdapter) consumes. `is_playing` is
+    /// tracked by an atomic flipped false by a
     /// [`TrackEvent::End`](songbird::TrackEvent::End) handler.
     struct SongbirdVoiceClient {
         call: Arc<AsyncMutex<songbird::Call>>,
@@ -4400,7 +4403,7 @@ mod tests {
         assert_eq!(f.name.as_deref(), Some("k"));
     }
 
-    // --- composition-root wiring seams (parity-audit §3a/§3b + spec 10) -----
+    // --- composition-root wiring seams -------------------------------------
 
     fn wiring_events(subs: Arc<Mutex<SubscriptionRegistry>>, handle: Arc<BotHandle>) -> BotEvents {
         BotEvents::new(
@@ -4538,7 +4541,7 @@ mod tests {
         assert!(fm.is_subscribed(555));
     }
 
-    // spec 10 §B — `/subscribe-voice` registers a persisted voice row and marks
+    // `/subscribe-voice` registers a persisted voice row and marks
     // the channel active in the `voice_channels` proxy the activity engine reads.
     #[test]
     fn subscribe_voice_registers_and_marks_active() {
@@ -4552,7 +4555,7 @@ mod tests {
         assert!(handle.voice_channels.lock().unwrap().contains(&555));
     }
 
-    // spec 10 §B — `/unsubscribe-voice` finds the guild's voice sub, removes it,
+    // `/unsubscribe-voice` finds the guild's voice sub, removes it,
     // clears the proxy, and returns the channel id for pipeline teardown.
     #[test]
     fn unsubscribe_voice_removes_and_returns_channel() {

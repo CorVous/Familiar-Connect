@@ -1,7 +1,7 @@
 //! Integration tests for `history::async_store::AsyncHistoryStore` — the async
 //! facade that runs every synchronous store call on a blocking thread. Ports the
-//! `TestAsyncStoreWrappers` (test_attentional_store.py) and
-//! `TestAsyncStoreActivityWrappers` (test_history_store.py) suites.
+//! `TestAsyncStoreWrappers` and
+//! `TestAsyncStoreActivityWrappers` suites.
 
 use chrono::{TimeZone, Utc};
 use familiar_connect::history::{AppendTurn, AsyncHistoryStore, HistoryStore};

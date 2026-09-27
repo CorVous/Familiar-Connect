@@ -1,9 +1,9 @@
 //! Cold-cache signals — research-phase instrumentation.
 //!
-//! Port of `familiar_connect/diagnostics/cold_cache.py`. Three pure signal
-//! detectors plus [`log_signals`], which runs all three and emits one INFO line
-//! per firing signal on `familiar_connect.diagnostics.cold_cache`. Informational
-//! only today — nothing drives cache invalidation from these yet.
+//! Three pure signal detectors plus [`log_signals`], which runs all three and
+//! emits one INFO line per firing signal on
+//! `familiar_connect.diagnostics.cold_cache`. Informational only today —
+//! nothing drives cache invalidation from these yet.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -18,7 +18,7 @@ static PROPER_NOUN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b([A-Z][a-zA-Z]{2,})\b").expect("valid"));
 
 // Capitalized discourse markers / sentence-starters, stored lowercase, matched
-// case-insensitively. Incomplete by design (spec 01 §33).
+// case-insensitively. Incomplete by design.
 static SENTENCE_STARTER_STOPWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         "actually",
@@ -82,9 +82,9 @@ fn tokens(text: &str) -> HashSet<String> {
 
 /// Detect when `new_text` shares too few content words with prior context.
 ///
-/// Fires iff both token sets are non-empty, `len(new_tokens) >= min_tokens`, and
-/// the Jaccard overlap is `< min_overlap`. The min-token floor keeps short voice
-/// fragments from firing (spec 01 §32).
+/// Fires iff both token sets are non-empty, `len(new_tokens) >= min_tokens`,
+/// and the Jaccard overlap is `< min_overlap`. The min-token floor keeps short
+/// voice fragments from firing.
 #[must_use]
 pub fn detect_topic_shift(
     new_text: &str,
@@ -109,10 +109,10 @@ pub fn detect_topic_shift(
 
 /// Return proper nouns in `new_text` absent from `prior_context`.
 ///
-/// Proper noun = capitalized word of 3+ letters. Matches whose lowercase form is
-/// in `stopwords` are skipped; duplicates deduped by exact surface (first-seen
-/// order); a noun is reported iff its lowercase form does not occur as a
-/// **substring** of `prior_context.lower()` (spec 01 §33).
+/// Proper noun = capitalized word of 3+ letters. Matches whose lowercase form
+/// is in `stopwords` are skipped; duplicates deduped by exact surface
+/// (first-seen order); a noun is reported iff its lowercase form does not occur
+/// as a **substring** of `prior_context.lower`.
 #[must_use]
 #[allow(clippy::implicit_hasher)] // callers use the default hasher
 pub fn detect_unknown_proper_noun(
@@ -142,8 +142,8 @@ pub fn detect_unknown_proper_noun(
 
 /// Return the gap in seconds if it meets or exceeds `threshold_seconds`.
 ///
-/// `None` if there is no prior turn or the gap is below threshold; a gap exactly
-/// equal to the threshold **fires** (spec 01 §34).
+/// `None` if there is no prior turn or the gap is below threshold; a gap
+/// exactly equal to the threshold **fires**.
 #[must_use]
 pub fn detect_silence_gap(
     prev_turn_at: Option<DateTime<Utc>>,
@@ -162,9 +162,9 @@ pub fn detect_silence_gap(
     Some(gap)
 }
 
-/// Which signals fired in [`log_signals`]. A key is "present" (Python `in`) when
-/// its accessor is truthy: `topic_shift` when `true`, `unknown_proper_nouns`
-/// when non-empty, `silence_gap_s` when `Some`.
+/// Which signals fired in [`log_signals`]. A key is "present" when its accessor
+/// is truthy: `topic_shift` when `true`, `unknown_proper_nouns` when non-empty,
+/// `silence_gap_s` when `Some`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Fired {
     /// Whether the topic-shift signal fired.
@@ -178,7 +178,7 @@ pub struct Fired {
 /// Run all detectors; emit one INFO line per firing signal, tagged with the
 /// inbound turn's channel id. Returns which signals fired.
 #[must_use]
-#[allow(clippy::too_many_arguments)] // mirrors the Python keyword-only signature
+#[allow(clippy::too_many_arguments)] // one signal-bundle signature, taken whole
 pub fn log_signals(
     channel_id: i64,
     turn_id: &str,
@@ -266,7 +266,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use std::collections::HashSet;
 
-    // Python default kwargs made explicit at each call site.
+    // Defaults made explicit at each call site.
     const OVERLAP: f64 = 0.15;
     const MIN_TOKENS: usize = 4;
     const GAP_THRESHOLD: f64 = 300.0;

@@ -1,4 +1,4 @@
-//! In-process mock TTS player for tests (subsystem 09; Python `tts_player/mock.py`).
+//! In-process mock TTS player for tests (subsystem 09).
 //!
 //! Simulates playback by sleeping a fraction of the word duration per tick,
 //! checking [`TurnScope::is_cancelled`] between ticks so barge-in tests can

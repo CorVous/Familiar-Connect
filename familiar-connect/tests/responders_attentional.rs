@@ -1,5 +1,4 @@
-//! Focus-aware responder tests (subsystem 06; Python
-//! `tests/test_attentional_responders.py`).
+//! Focus-aware responder tests (subsystem 06).
 
 #[path = "responders_support/mod.rs"]
 mod support;

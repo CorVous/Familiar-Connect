@@ -1,5 +1,4 @@
-//! Voice-budget span test — silent path (subsystem 06; Python
-//! `tests/test_voice_responder.py::TestVoiceBudgetSpans`).
+//! Voice-budget span test — silent path (subsystem 06).
 //!
 //! Alone in its own binary so the process-wide span collector starts empty (see
 //! `responders_voice_budget.rs` for the rationale): a silent turn records no

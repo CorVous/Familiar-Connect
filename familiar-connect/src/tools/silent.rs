@@ -1,5 +1,4 @@
-//! `silent` tool + the [`SILENT_RESULT`] sentinel (subsystem 08; Python
-//! `tools/silent.py`).
+//! `silent` tool + the [`SILENT_RESULT`] sentinel (subsystem 08).
 //!
 //! Suppresses the familiar's reply for a turn. The agentic loop detects the
 //! sentinel among a turn's tool results and returns

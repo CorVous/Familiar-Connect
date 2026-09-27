@@ -1,10 +1,10 @@
 //! Maintenance-pass registry — discrete DB-maintenance actions + order
-//! (subsystem 04; Python `sleep/maintenance.py`).
+//! (subsystem 04).
 //!
 //! A *maintenance pass* is one discrete, one-shot consolidation over the
 //! familiar's database (run once per sleep). Today's two: `consolidation` (fact
-//! retire/rewrite) and `opinion` (opinion-formation). The registry (DESIGN D14 —
-//! an explicit [`PassRegistry::with_builtins`] builder, not an import-time global
+//! retire/rewrite) and `opinion` (opinion-formation). The registry (an
+//! explicit [`PassRegistry::with_builtins`] builder, not an import-time global
 //! dict) sequences them; the ONE thing it has that the projector registry lacks
 //! is an ordered inter-pass data-flow: consolidation's retirements feed the
 //! opinion pass's known-bits deny-list, threaded through a shared
@@ -46,7 +46,7 @@ pub const DEFAULT_PASSES: [&str; 2] = [CONSOLIDATION_PASS, OPINION_PASS];
 // rejection logging (the surviving audit trail)
 // ---------------------------------------------------------------------------
 
-/// Shared shape of a rail-blocked proposal across passes (Python `_Rejection`).
+/// Shared shape of a rail-blocked proposal across passes.
 trait Rejection {
     fn rail(&self) -> &str;
     fn detail(&self) -> &str;
@@ -326,7 +326,7 @@ pub trait MaintenancePass: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// registry (DESIGN D14 — explicit builder, sorted names, byte-exact errors)
+// registry (explicit builder, sorted names, byte-exact errors)
 // ---------------------------------------------------------------------------
 
 /// A pass factory: turns the per-sleep context into a boxed pass.

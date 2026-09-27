@@ -1,6 +1,6 @@
-//! Ported from Python `tests/test_context_assembler.py` — assembler compose +
-//! cache, and RecentHistoryLayer rendering (prefix, coalesce, silence fold,
-//! guild-nick labels, reply markers, mention rewriting).
+//! Assembler compose + cache, and RecentHistoryLayer rendering (prefix,
+//! coalesce, silence fold, guild-nick labels, reply markers, mention
+//! rewriting).
 
 #[path = "context_helpers/mod.rs"]
 mod helpers;

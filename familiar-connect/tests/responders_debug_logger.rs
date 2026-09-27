@@ -1,5 +1,4 @@
-//! Integration tests for `DebugLoggerProcessor` (subsystem 06; Python
-//! `tests/test_debug_logger_processor.py`).
+//! Integration tests for `DebugLoggerProcessor` (subsystem 06).
 
 #[path = "responders_support/mod.rs"]
 mod support;

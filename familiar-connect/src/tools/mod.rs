@@ -1,8 +1,8 @@
-//! Agentic machinery + shipped tools (subsystem 08; Python `tools/`).
+//! Agentic machinery + shipped tools (subsystem 08).
 //!
 //! registry, loop, builtins, alarms, silent, shift_focus, read_channel,
-//! view_image, start_activity. `agentic` is Python `tools/loop.py` (`loop` is a
-//! Rust keyword). The `view_image` trio (`image`, `image_compress`) is gated on
+//! view_image, start_activity. The module is named `agentic` because `loop` is
+//! a Rust keyword. The `view_image` trio (`image`, `image_compress`) is gated on
 //! the `images` feature.
 
 pub mod agentic;

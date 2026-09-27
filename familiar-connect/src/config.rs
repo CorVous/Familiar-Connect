@@ -1,18 +1,18 @@
 //! `CharacterConfig` loader: TOML deep-merge + validation + `ConfigError`
-//! (subsystem 02; Python `config.py`).
+//! (subsystem 02).
 //!
 //! The process-wide "load once, immutable thereafter" layer: parses
-//! `character.toml` deep-merged over the checked-in default profile into a fully
-//! validated, frozen [`CharacterConfig`]. Validation is hand-rolled over
+//! `character.toml` deep-merged over the checked-in default profile into a
+//! fully validated, frozen [`CharacterConfig`]. Validation is hand-rolled over
 //! `toml::Value` — the per-section unknown-key policy is deliberately
 //! inconsistent (some sections reject unknown keys, `[tts]` /
 //! `[providers.stt.*]` / `[channels.<id>]` ignore them), so serde
 //! `deny_unknown_fields` cannot reproduce the contract. Error messages are
-//! byte-stable test contracts (DESIGN §4.1); reproduce the phrases exactly.
+//! byte-stable test contracts; reproduce the phrases exactly.
 //!
-//! The two Python deferred-import registry lookups (`known_projectors`,
-//! `known_embedders`) are injected as `&BTreeSet<String>` parameters (DESIGN
-//! D3), keeping this a near-leaf module.
+//! The two registry lookups (`known_projectors`,
+//! `known_embedders`) are injected as `&BTreeSet<String>` parameters, keeping
+//! this a near-leaf module.
 
 use crate::budget::{ModelBudgetCurve, TierBudget};
 use chrono::NaiveTime;
@@ -92,7 +92,7 @@ const BUDGET_FIELDS: [&str; 12] = [
 #[derive(Clone, Debug, PartialEq)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "mirrors the Python dataclass's independent boolean knobs 1:1"
+    reason = "these are independent boolean knobs, not a state enum"
 )]
 pub struct LLMSlotConfig {
     /// Model string (required, non-empty).
@@ -730,7 +730,7 @@ impl Default for CharacterConfig {
     }
 }
 
-/// Tier → LLM slot mapping (mirrors run.py responder wiring).
+/// Tier → LLM slot mapping (matches the responder wiring).
 fn tier_to_slot(tier: &str) -> Option<&'static str> {
     match tier {
         "voice" => Some("fast"),
@@ -770,7 +770,7 @@ impl CharacterConfig {
     ///
     /// # Panics
     /// Panics if `tier` is not one of the canonical tier names (callers only
-    /// pass canonical names; mirrors Python's `KeyError`).
+    /// pass canonical names).
     #[must_use]
     pub fn budget_for(&self, tier: &str) -> TierBudget {
         let base = *self
@@ -796,8 +796,8 @@ impl CharacterConfig {
 ///
 /// The default profile must exist (else a `ConfigError` containing "default
 /// character profile"); a missing target file is treated as `{}`. The registry
-/// validator sets (`known_projectors`, `known_embedders`) are injected (DESIGN
-/// D3) rather than looked up via a module cycle.
+/// validator sets (`known_projectors`, `known_embedders`) are injected rather
+/// than looked up via a module cycle.
 pub fn load_character_config(
     path: &Path,
     defaults_path: &Path,
@@ -855,7 +855,7 @@ fn deep_merge(base: &Table, override_: &Table) -> Table {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "faithful 1:1 transliteration of the Python _parse_character_config sequence"
+    reason = "one flat field-by-field parse sequence; splitting it would scatter the error-message contract"
 )]
 fn parse_character_config(
     data: &Table,
@@ -870,7 +870,7 @@ fn parse_character_config(
 
     let display_tz = data
         .get("display_tz")
-        .map_or_else(|| "UTC".to_owned(), py_str);
+        .map_or_else(|| "UTC".to_owned(), value_str);
     if display_tz.parse::<chrono_tz::Tz>().is_err() {
         return Err(ConfigError(format!(
             "invalid display_tz '{display_tz}' — use an IANA name like 'America/Los_Angeles'"
@@ -882,11 +882,11 @@ fn parse_character_config(
 
     let aliases = match data.get("aliases") {
         None => Vec::new(),
-        Some(Value::Array(arr)) => arr.iter().map(py_str).collect(),
+        Some(Value::Array(arr)) => arr.iter().map(value_str).collect(),
         Some(other) => {
             return Err(ConfigError(format!(
                 "aliases must be a list of strings, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -912,7 +912,7 @@ fn parse_character_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[llm].max_concurrent_requests must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -964,7 +964,7 @@ fn parse_character_config(
                     other => {
                         return Err(ConfigError(format!(
                             "[discord].dm_allowlist entries must be integer user IDs, got {}",
-                            py_type_name(other)
+                            value_type_name(other)
                         )));
                     }
                 }
@@ -974,7 +974,7 @@ fn parse_character_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[discord].dm_allowlist must be a list of integer user IDs, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1031,7 +1031,7 @@ pub fn parse_hhmm_range(value: &Value, key: &str) -> Result<(NaiveTime, NaiveTim
     let err = || {
         ConfigError(format!(
             "{key} must be 'HH:MM-HH:MM' (may wrap midnight, start != end), got {}",
-            py_repr(value)
+            value_repr(value)
         ))
     };
     let Some(s) = value.as_str() else {
@@ -1044,13 +1044,12 @@ pub fn parse_hhmm_range(value: &Value, key: &str) -> Result<(NaiveTime, NaiveTim
     let mut parsed: Vec<NaiveTime> = Vec::with_capacity(2);
     for part in &parts {
         let pieces: Vec<&str> = part.split(':').collect();
-        // Count Unicode scalars, not bytes (DESIGN §4.9). The ASCII-digit gate
-        // still dominates: any two-scalar piece that passes `is_ascii_digit`
-        // has byte length 2 as well, so this is behaviour-neutral for ASCII and
-        // only aligns with the convention. Non-ASCII Unicode digits (which
-        // Python's `str.isdigit()`/`int()` would accept) remain rejected — the
-        // blessed ASCII-digit deviation, consistent with the structured_output
-        // gate.
+        // Count Unicode scalars, not bytes. The ASCII-digit gate still
+        // dominates: any two-scalar piece that passes `is_ascii_digit` has byte
+        // length 2 as well, so this is behaviour-neutral for ASCII and only
+        // aligns with the convention. Non-ASCII Unicode digits (which a more
+        // lenient parser would accept) remain rejected — the blessed
+        // ASCII-digit deviation, consistent with the structured_output gate.
         if pieces.len() != 2
             || !pieces
                 .iter()
@@ -1082,7 +1081,7 @@ fn empty_table() -> &'static Table {
     LazyLock::force(&EMPTY_TABLE)
 }
 
-const fn py_type_name(v: &Value) -> &'static str {
+const fn value_type_name(v: &Value) -> &'static str {
     match v {
         Value::String(_) => "str",
         Value::Integer(_) => "int",
@@ -1096,7 +1095,7 @@ const fn py_type_name(v: &Value) -> &'static str {
 
 #[allow(
     clippy::float_cmp,
-    reason = "fract() == 0.0 exactly detects integer-valued floats for Python-style formatting"
+    reason = "fract() == 0.0 exactly detects integer-valued floats for %g-style formatting"
 )]
 fn fmt_num(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
@@ -1108,7 +1107,7 @@ fn fmt_num(x: f64) -> String {
 
 #[allow(
     clippy::float_cmp,
-    reason = "fract() == 0.0 exactly detects integer-valued bounds for Python %g formatting"
+    reason = "fract() == 0.0 exactly detects integer-valued bounds for %g formatting"
 )]
 fn fmt_g(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
@@ -1118,7 +1117,7 @@ fn fmt_g(x: f64) -> String {
     }
 }
 
-fn py_repr(v: &Value) -> String {
+fn value_repr(v: &Value) -> String {
     match v {
         Value::String(s) => format!("'{s}'"),
         Value::Integer(n) => n.to_string(),
@@ -1130,14 +1129,14 @@ fn py_repr(v: &Value) -> String {
     }
 }
 
-fn py_str(v: &Value) -> String {
+fn value_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Integer(n) => n.to_string(),
         Value::Float(f) => fmt_num(*f),
         Value::Boolean(b) => (if *b { "True" } else { "False" }).to_owned(),
         Value::Datetime(d) => d.to_string(),
-        other => py_repr(other),
+        other => value_repr(other),
     }
 }
 
@@ -1157,7 +1156,7 @@ fn expect_table<'a>(value: Option<&'a Value>, label: &str) -> Result<&'a Table, 
         Some(Value::Table(t)) => Ok(t),
         Some(other) => Err(ConfigError(format!(
             "{label} must be a table, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1215,7 +1214,7 @@ fn field_int(raw: &Table, prefix: &str, key: &str, default: i64) -> Result<i64, 
         Some(Value::Integer(n)) => Ok(*n),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be an integer, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1227,7 +1226,7 @@ fn field_number(raw: &Table, prefix: &str, key: &str, default: f64) -> Result<f6
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1238,7 +1237,7 @@ fn field_bool(raw: &Table, prefix: &str, key: &str, default: bool) -> Result<boo
         Some(Value::Boolean(b)) => Ok(*b),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a bool, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1266,7 +1265,7 @@ fn positive_int(
             };
             Err(ConfigError(format!(
                 "{prefix}.{key} must be {kind}, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )))
         }
     }
@@ -1286,7 +1285,7 @@ fn positive_float(prefix: &str, raw: &Table, key: &str, default: f64) -> Result<
         ))),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1307,7 +1306,7 @@ fn parse_sleep_config(raw: &Table) -> Result<(Option<(NaiveTime, NaiveTime)>, i6
         Some(other) => {
             return Err(ConfigError(format!(
                 "[sleep].grace_minutes must be a positive integer, got {}",
-                py_repr(other)
+                value_repr(other)
             )));
         }
     };
@@ -1331,8 +1330,8 @@ fn parse_history_windows(raw: &Table) -> Result<(i64, i64), ConfigError> {
 fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
     match raw.get("coalesce_max_gap_seconds") {
         None => Ok(45.0),
-        // Python does the `v < 0` sign check on the raw TOML value before
-        // `float(v)`, so a negative integer prints as an int (`got -1`), not a
+        // The `v < 0` sign check runs on the raw TOML value before the
+        // float conversion, so a negative integer prints as an int (`got -1`), not a
         // padded float (`got -1.0`). Mirror that per-arm.
         Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
             "[providers.history].coalesce_max_gap_seconds must be >= 0, got {n}"
@@ -1345,7 +1344,7 @@ fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "[providers.history].coalesce_max_gap_seconds must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1353,8 +1352,8 @@ fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
 fn parse_text_silence(raw: &Table) -> Result<f64, ConfigError> {
     match raw.get("text_silence_gap_fold_seconds") {
         None => Ok(0.0),
-        // Sign check on the raw value (see `parse_coalesce_gap`): integers print
-        // as ints, floats through `fmt_num`, matching Python's `got {v}`.
+        // Sign check on the raw value (see `parse_coalesce_gap`): integers
+        // print as ints, floats through `fmt_num`.
         Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
             "[providers.history].text_silence_gap_fold_seconds must be >= 0, got {n}"
         ))),
@@ -1366,7 +1365,7 @@ fn parse_text_silence(raw: &Table) -> Result<f64, ConfigError> {
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "[providers.history].text_silence_gap_fold_seconds must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1396,7 +1395,7 @@ fn parse_ranged_float(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[llm.{slot}].{key} must be a number, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1426,7 +1425,7 @@ fn parse_provider_order(
                     other => {
                         return Err(ConfigError(format!(
                             "[llm.{slot}].provider_order entries must be non-empty strings, got {}",
-                            py_repr(other)
+                            value_repr(other)
                         )));
                     }
                 }
@@ -1435,14 +1434,14 @@ fn parse_provider_order(
         }
         Some(other) => Err(ConfigError(format!(
             "[llm.{slot}].provider_order must be a list of strings, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "faithful 1:1 transliteration of the Python _parse_llm_slots field sequence"
+    reason = "one flat field-by-field parse sequence; splitting it would scatter the error-message contract"
 )]
 fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, ConfigError> {
     let mut slots = BTreeMap::new();
@@ -1456,7 +1455,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[llm.{name}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let model = match section.get("model") {
@@ -1474,7 +1473,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].temperature must be a number, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1486,7 +1485,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].top_k must be a positive integer, got {}",
-                    py_repr(other)
+                    value_repr(other)
                 )));
             }
         };
@@ -1513,7 +1512,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].reasoning must be a string, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1548,7 +1547,7 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
         Some(other) => {
             return Err(ConfigError(format!(
                 "[tts].provider must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1560,11 +1559,11 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
     }
     let greetings = match raw.get("greetings") {
         None => Vec::new(),
-        Some(Value::Array(arr)) => arr.iter().map(py_str).collect(),
+        Some(Value::Array(arr)) => arr.iter().map(value_str).collect(),
         Some(other) => {
             return Err(ConfigError(format!(
                 "[tts].greetings must be a list of strings, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1622,7 +1621,7 @@ fn parse_channel_overrides(raw: &Table) -> Result<BTreeMap<i64, ChannelOverrides
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[channels.{key}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let history_window_size = match section.get("history_window_size") {
@@ -1636,7 +1635,7 @@ fn parse_channel_overrides(raw: &Table) -> Result<BTreeMap<i64, ChannelOverrides
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[channels.{key}].history_window_size must be an integer, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1690,7 +1689,7 @@ fn parse_turn_detection_config(raw: &Table) -> Result<TurnDetectionConfig, Confi
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.turn_detection].strategy must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1739,7 +1738,7 @@ fn parse_stt_config(raw: &Table) -> Result<STTConfig, ConfigError> {
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.stt].backend must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1841,7 +1840,7 @@ fn mem_pos_int(section: &Table, name: &str, key: &str, default: i64) -> Result<i
         ))),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}].{key} must be a positive integer, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1860,7 +1859,7 @@ fn mem_pos_float(section: &Table, name: &str, key: &str, default: f64) -> Result
         ))),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}].{key} must be a positive number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1871,14 +1870,14 @@ fn worker_section<'a>(raw: &'a Table, name: &str) -> Result<&'a Table, ConfigErr
         Some(Value::Table(t)) => Ok(t),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}] must be a table, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "explicit per-worker knob parsing (Python derives these by dataclass reflection; DESIGN says enumerate explicitly)"
+    reason = "per-worker knobs are enumerated explicitly rather than derived by reflection"
 )]
 fn parse_memory_providers(
     raw: &Table,
@@ -2083,7 +2082,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].backend must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2104,7 +2103,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2114,7 +2113,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].fastembed_model must be a non-empty string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2130,7 +2129,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].fastembed_cache_dir must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2156,7 +2155,7 @@ fn parse_budgets(raw: &Table) -> Result<BTreeMap<String, TierBudget>, ConfigErro
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[budget.{tier}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let default = out.get(tier).copied().unwrap_or_default();
@@ -2180,7 +2179,7 @@ fn parse_tier_budget(
             ))),
             Some(other) => Err(ConfigError(format!(
                 "[budget.{tier}].{key} must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };
@@ -2224,7 +2223,7 @@ fn parse_budget_curves(raw: &Table) -> Result<BTreeMap<String, ModelBudgetCurve>
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[budget.model_curves.'{model_name}'] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         check_unknown_keys(
@@ -2240,7 +2239,7 @@ fn parse_budget_curves(raw: &Table) -> Result<BTreeMap<String, ModelBudgetCurve>
                 other => {
                     return Err(ConfigError(format!(
                         "[budget.model_curves.'{model_name}'].{key} must be a positive number, got {}",
-                        py_type_name(other)
+                        value_type_name(other)
                     )));
                 }
             };
@@ -2319,7 +2318,7 @@ fn parse_prompt_config(raw: &Table) -> Result<PromptFields, ConfigError> {
             Some(Value::String(s)) => Ok(s.trim().to_owned()),
             Some(other) => Err(ConfigError(format!(
                 "[prompt].{key} must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };
@@ -2341,7 +2340,7 @@ fn parse_memory_retrieval(raw: &Table) -> Result<MemoryRetrievalConfig, ConfigEr
             None => Ok(fallback),
             // Sign check on the raw value before `float(v)` (see
             // `parse_coalesce_gap`): a negative integer prints as `got -1`, not
-            // `got -1.0`, matching Python's `got {v}`.
+            // `got -1.0`.
             Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
                 "[memory.retrieval].{key} must be non-negative, got {n}"
             ))),
@@ -2353,7 +2352,7 @@ fn parse_memory_retrieval(raw: &Table) -> Result<MemoryRetrievalConfig, ConfigEr
             Some(Value::Float(f)) => Ok(*f),
             Some(other) => Err(ConfigError(format!(
                 "[memory.retrieval].{key} must be a non-negative number, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };

@@ -304,15 +304,15 @@ reconnect_backoff_cap_s = 16.0
 idle_close_s            = 30.0  # close per-user stream after silence; 0 disables
 
 [providers.stt.parakeet]
-# NOT YET IMPLEMENTED in the Rust port (``local-stt`` backend crate TBD —
-# see docs/rust-port/DESIGN.md §6); config accepted, backend errors at runtime.
+# NOT YET IMPLEMENTED (``local-stt`` backend crate TBD); config accepted,
+# backend errors at runtime.
 model_name   = "nvidia/parakeet-tdt-0.6b-v3"
 device       = "auto"           # "auto" | "cuda" | "cpu"
 idle_close_s = 30.0
 
 [providers.stt.faster_whisper]
-# NOT YET IMPLEMENTED in the Rust port (``local-stt`` backend crate TBD —
-# see docs/rust-port/DESIGN.md §6); config accepted, backend errors at runtime.
+# NOT YET IMPLEMENTED (``local-stt`` backend crate TBD); config accepted,
+# backend errors at runtime.
 model_size   = "small"          # "tiny" | "base" | "small" | "medium" | "large-v3"
 device       = "auto"           # "auto" | "cuda" | "cpu"
 compute_type = "auto"           # "auto" | "int8" | "float16" | "float32"

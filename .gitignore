@@ -1,24 +1,10 @@
 # Rust build artifacts
 /target/
 
-# Python-generated files (historical)
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
 # Secrets
 .env
 .env.*
 !.env.example
-
-# Auto-generated version file
-src/*/_version.py
 
 # mkdocs build output
 site/
@@ -36,6 +22,13 @@ data/familiars/*
 # Local turn-detection ONNX models (Silero ~2 MB, Smart Turn v3 ~360 MB).
 # Downloaded out of band; see docs/architecture/voice-pipeline.md.
 /data/models/
+
+# FastEmbed model cache (~130 MB for BGE-small). The `fastembed` crate's
+# default cache_dir is the CWD-relative `.fastembed_cache`, so this lands
+# wherever cargo was invoked from — not anchored. Set
+# `[providers.embedding].fastembed_cache_dir` or FASTEMBED_CACHE_DIR to
+# relocate it.
+.fastembed_cache/
 
 .aider*
 

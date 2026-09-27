@@ -1,4 +1,4 @@
-//! Logging-only TTS player (subsystem 09; Python `tts_player/logging_player.py`).
+//! Logging-only TTS player (subsystem 09).
 //!
 //! Phase-2 production default: logs what it *would* speak but produces no audio.
 //! Honours cancellation so the barge-in loop behaves the same as with a real

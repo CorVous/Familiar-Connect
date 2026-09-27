@@ -1,4 +1,3 @@
-//! Ported from Python `tests/test_fact_extractor.py`.
 //!
 //! Watermark-driven fact extraction: full-batch gate, watermark advance (incl.
 //! bad JSON), self-capability post-filter, prompt-content rails, activity-return
@@ -27,7 +26,7 @@ use serde_json::{Value, json};
 use helpers::{ScriptedLlm, joined, store, system_text, user_text};
 
 // Mode tags + display prefix owned by subsystem 11 (activities); mirrored here
-// for the tests, matching the Python `activities` constants.
+// for the tests.
 const ACTIVITY_RETURN_MODE: &str = "activity_return";
 const SLEEP_RETURN_MODE: &str = "sleep_return";
 const RETURN_TURN_MARKER_PREFIX: &str = "[returned from ";

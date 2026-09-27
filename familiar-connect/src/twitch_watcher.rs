@@ -1,4 +1,4 @@
-//! Twitch EventSub WebSocket watcher (subsystem 11; Python `twitch_watcher.py`).
+//! Twitch EventSub WebSocket watcher (subsystem 11).
 //!
 //! Converts EventSub callbacks (follows, subs, gift subs, resubs, cheers,
 //! channel-point redemptions, ad breaks) into normalized [`TwitchEvent`] values
@@ -6,15 +6,13 @@
 //! dormant (no production wiring constructs the watcher), so the concrete
 //! `twitch_api` EventSub WS session is deferred; this module ports the pure
 //! handler logic, the listener-registration matrix, and the run/stop lifecycle
-//! against an abstract [`EventSub`] seam (the Python code duck-typed against
-//! twitchAPI's `EventSubWebsocket`; tests pass mocks).
+//! against an abstract [`EventSub`] seam.
 //!
-//! Rust cancellation model (DESIGN §4.4): the Python `run` slept on
-//! `asyncio.Event().wait()` with a `finally: await eventsub.stop()`. Rust has no
-//! async `Drop`, so [`TwitchWatcher::run`] takes a
+//! Cancellation model: Rust has no async `Drop`, so
+//! [`TwitchWatcher::run`] takes a
 //! [`CancellationToken`](tokio_util::sync::CancellationToken) instead — it
-//! `start()`s, waits on the token, then `stop()`s. Task-abort alone would skip
-//! the stop, so callers must cancel the token to unwind cleanly.
+//! `start`s, waits on the token, then `stop`s. Task-abort alone would skip the
+//! stop, so callers must cancel the token to unwind cleanly.
 #![cfg(feature = "twitch")]
 
 use std::sync::Arc;
@@ -506,8 +504,8 @@ impl TwitchWatcher {
     }
 
     /// Run the watcher: register listeners → `start()` → wait on `cancel` →
-    /// `stop()`. (Python slept on `Event().wait()` with a `finally` stop; the
-    /// Rust cancellation seam replaces both.)
+    /// `stop()`. The cancellation token replaces both the wait and the teardown
+    /// hook.
     pub async fn run(
         self: &Arc<Self>,
         send: UnboundedSender<TwitchEvent>,

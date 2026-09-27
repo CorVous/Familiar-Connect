@@ -1,9 +1,9 @@
 //! Logs-first timing/diagnostics: spans, collectors, voice budget, cold-cache
-//! signals, summary table (subsystem 01; Python `diagnostics/`).
+//! signals, summary table (subsystem 01).
 //!
-//! Layer 0: imports only [`crate::log_style`]. The public surface mirrors the
-//! Python package — [`spans::timed_sync`]/[`spans::timed_async`] (the `@span`
-//! decorator has no Rust analog), the [`collector::SpanCollector`] ring +
+//! Layer 0: imports only [`crate::log_style`]. The public surface is
+//! [`spans::timed_sync`]/[`spans::timed_async`], the
+//! [`collector::SpanCollector`] ring +
 //! singleton, the [`voice_budget::VoiceBudgetRecorder`] funnel, the
 //! [`cold_cache`] signal detectors, and [`report::render_summary_table`].
 

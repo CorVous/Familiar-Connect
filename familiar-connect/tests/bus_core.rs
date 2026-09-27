@@ -1,4 +1,4 @@
-//! Ported from `tests/test_bus.py` — `InProcessEventBus` lifecycle, fan-out,
+//! `InProcessEventBus` lifecycle, fan-out,
 //! backpressure, and shutdown-drain semantics.
 
 use std::time::Duration;
@@ -180,10 +180,10 @@ async fn block_policy_waits_on_slow_consumer() {
     assert_eq!(got, vec![0_u64, 1, 2]);
     // The publisher is measurably back-pressured: with a cap-1 queue and a 20 ms
     // consumer, the final publish cannot complete until the consumer drains an
-    // earlier event, so at least one full consumer sleep elapses. (Python's
-    // wall-clock `>= 30 ms` was a loose margin around this; the deterministic
+    // earlier event, so at least one full consumer sleep elapses.
+    // A wall-clock `>= 30 ms` was a loose margin around this; the deterministic
     // virtual-time value under `tokio::time::pause` is one 20 ms consumer sleep —
-    // see the deviation note.)
+    // see the deviation note.
     assert!(
         elapsed >= Duration::from_millis(20),
         "elapsed = {elapsed:?}"

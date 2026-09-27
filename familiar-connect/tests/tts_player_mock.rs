@@ -1,4 +1,4 @@
-//! Port of `tests/test_tts_player_mock.py` — the mock player honours
+//! The mock player honours
 //! `TurnScope` cancellation and `stop`, so the barge-in integration test is
 //! meaningful.
 

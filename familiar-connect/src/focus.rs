@@ -1,17 +1,16 @@
-//! Attentional focus controller for a single familiar (subsystem 05; Python
-//! `focus.py`).
+//! Attentional focus controller for a single familiar (subsystem 05).
 //!
 //! Two independent focus pointers (text, voice). Focus shifts are model-decided
-//! (via the `shift_focus` tool) and applied immediately at tool-call time — no
-//! deferral (behavior 50; `end_turn` is a no-op). An unread nudge fires when a
-//! non-focused channel receives traffic, throttled by a debounce window with an
-//! injectable clock (DESIGN §4.8).
+//! (via the `shift_focus` tool) and applied immediately at tool-call time —
+//! no deferral (`end_turn` is a no-op). An unread nudge fires when
+//! a non-focused channel receives traffic, throttled by a debounce window with
+//! an injectable clock.
 //!
-//! Per DESIGN port notes the two Python `asyncio.Lock`s collapse into a single
-//! [`std::sync::Mutex`] over the focus state — an acceptable simplification that
-//! also closes the benign cross-modal double-pointer persist race (behavior 49).
-//! `on_shift` is invoked outside the lock. The store dependency is a narrow
-//! [`FocusStore`] trait so tests inject a scripted double.
+//! A single [`std::sync::Mutex`] guards the focus state — this also closes
+//! the
+//! benign cross-modal double-pointer persist race. `on_shift` is
+//! invoked outside the lock. The store dependency is a narrow [`FocusStore`]
+//! trait so tests inject a scripted double.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -42,8 +41,8 @@ pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 /// Presence-refresh hook awaited once after each applied shift.
 pub type OnShift = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
-/// The narrow store seam [`FocusManager`] needs (DESIGN §4.8: tests inject a
-/// scripted double). Implemented for [`AsyncHistoryStore`].
+/// The narrow store seam [`FocusManager`] needs (tests inject a scripted
+/// double). Implemented for [`AsyncHistoryStore`].
 #[async_trait]
 pub trait FocusStore: Send + Sync {
     /// Load the persisted focus pointers row, if any.
@@ -107,7 +106,7 @@ impl FocusStore for AsyncHistoryStore {
     }
 }
 
-/// Interior mutable focus state (single-mutex design; DESIGN port notes).
+/// Interior mutable focus state (single-mutex design).
 struct FocusState {
     text_focus: Option<i64>,
     voice_focus: Option<i64>,
@@ -338,7 +337,7 @@ impl FocusManager {
         }
     }
 
-    /// Whether a non-focused arrival warrants a nudge (behavior 51).
+    /// Whether a non-focused arrival warrants a nudge.
     #[must_use]
     pub fn should_wake(&self, channel_id: i64) -> bool {
         if !self.unread_nudge_enabled {
@@ -359,7 +358,7 @@ impl FocusManager {
         self.state.lock().expect("focus state mutex").last_nudge = now;
     }
 
-    /// Responder end-of-turn hook — intentionally a no-op (behavior 50).
+    /// Responder end-of-turn hook — intentionally a no-op.
     #[allow(
         clippy::unused_async,
         reason = "kept async so both responders can await it uniformly"

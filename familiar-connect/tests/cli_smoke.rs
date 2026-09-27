@@ -1,5 +1,4 @@
-//! CLI subprocess smoke tests (subsystem 10; Python `test_cli.py` /
-//! `test_version.py` subprocess halves).
+//! CLI subprocess smoke tests (subsystem 10).
 //!
 //! These drive the real `familiar-connect` binary end-to-end for the
 //! discord-free subcommands (`version`, `diagnose`, bare-invocation help),
@@ -14,7 +13,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[test]
 fn version_subcommand_prints_version() {
-    // Ported from test_version.py::test_version_subcommand.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
         .arg("version")
@@ -25,7 +23,6 @@ fn version_subcommand_prints_version() {
 
 #[test]
 fn version_flag_prints_version() {
-    // Ported from test_version.py::test_version_flag.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
         .arg("--version")
@@ -36,7 +33,7 @@ fn version_flag_prints_version() {
 
 #[test]
 fn bare_invocation_shows_usage() {
-    // Ported from test_cli.py::test_parser_no_subcommand_shows_help — a bare
+    //  bare
     // invocation prints help and exits 0.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
@@ -49,7 +46,7 @@ fn bare_invocation_shows_usage() {
 #[test]
 fn diagnose_reads_stdin_and_shows_placeholder() {
     // `diagnose -` reads stdin; a line with no span markers yields the "no spans"
-    // placeholder (test_diagnose_cmd.py::test_empty_log_shows_placeholder shape).
+    // laceholder.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
         .args(["diagnose", "-"])
