@@ -11,6 +11,7 @@ by the admin, never exposed through Discord.
 - `DISCORD_BOT` — Discord bot token
 - `OPENROUTER_API_KEY` — shared across every LLM call site
 - `CARTESIA_API_KEY` — Cartesia TTS (required when `[tts].provider="cartesia"`, the default)
+- `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech TTS (required when `[tts].provider="azure"`; needs the `azure-tts` build feature)
 - `DEEPGRAM_API_KEY` — Deepgram STT credential. Every other Deepgram knob lives in `[providers.stt.deepgram]`. Full list: [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
 - `FAMILIAR_ID` — picks the character folder (under the familiars root) this process runs.
 - `FAMILIARS_ROOT` — overrides the per-user familiars root (default: platform data dir). `FAMILIAR_DEFAULTS_ROOT` overrides where the tracked `_default` skeleton resolves (default: `data/familiars`). See [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
@@ -171,7 +172,7 @@ to `false`.
 
 `[llm.<slot>]` does not run the unknown-key check, so adding
 `multimodal` (or omitting it) never fails load.
-- `[tts]` — provider (`cartesia`, the default and only implemented backend) + its voice / model fields.
+- `[tts]` — provider (`cartesia` (default) / `azure`) + provider-specific voice / model fields.
 - `[focus]` — attentional unread-nudge controls (`unread_nudge_enabled`,
   `nudge_debounce_seconds`). See
   [Tuning — Attentional focus](tuning.md#attentional-focus).
@@ -258,11 +259,21 @@ meaningful selection.
 | Provider | Status | Env vars | Character fields |
 |---|---|---|---|
 | `cartesia` (default) | wired | `CARTESIA_API_KEY` | `cartesia_voice_id`, `cartesia_model` |
+| `azure` | wired behind the `azure-tts` feature | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | `azure_voice` (default `en-US-AmberNeural`) |
 
-`cartesia` is the only accepted value. The `azure` and `gemini` stubs were
-removed; a profile still naming one fails config validation with a message
-saying the provider is no longer supported. The `TtsClient` /
-`StreamingTtsClient` seam remains the extension point for further backends.
+Both stream: audio reaches the player chunk by chunk as raw mono 16-bit PCM
+at 48 kHz, so neither needs resampling.
+
+The two fail differently when misconfigured. Cartesia, the shipped default,
+degrades: a missing `CARTESIA_API_KEY` logs a warning and the bot runs
+text-only. Azure is an explicit opt-in, so startup refuses — exit code 1 with
+an `ERROR` line `TTS provider unavailable: <reason>` — when the binary lacks
+the `azure-tts` feature, or `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` is
+missing or malformed. Nothing is left to fail on the first synthesis
+mid-conversation.
+
+The `gemini` stub was removed; a profile still naming it fails config
+validation with a message saying the provider is no longer supported.
 
 ### `think_prepend` and tools
 

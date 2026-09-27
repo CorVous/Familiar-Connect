@@ -1,6 +1,6 @@
 # Security
 
-Familiar-Connect handles user-provided API keys and tokens (Discord bot, Deepgram, Cartesia, OpenRouter). Treat all credentials as secrets.
+Familiar-Connect handles user-provided API keys and tokens (Discord bot, Deepgram, Cartesia, Azure Speech, OpenRouter). Treat all credentials as secrets.
 
 Trust model is single-operator: the admin running the bot has full access to every character's on-disk data. No per-user sandboxing.
 
@@ -12,7 +12,7 @@ Trust model is single-operator: the admin running the bot has full access to eve
 
 ## Transport & network
 
-- All external API calls (Deepgram, Cartesia, OpenRouter, Twitch) use TLS (HTTPS / WSS). Never downgrade to plaintext.
+- All external API calls (Deepgram, Cartesia, Azure Speech, OpenRouter, Twitch) use TLS (HTTPS / WSS). Never downgrade to plaintext.
 
 ## Logging & error handling
 

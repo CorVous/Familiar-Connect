@@ -78,7 +78,8 @@ Copy `.env.example` to `.env` and fill:
 | `DISCORD_BOT` | always | Bot token. **Not** `DISCORD_BOT_TOKEN`. Missing → exit 1. |
 | `OPENROUTER_API_KEY` | always | LLM. Missing → exit 1. |
 | `DEEPGRAM_API_KEY` | voice STT | Required when `[providers.stt].backend="deepgram"` (default). |
-| `CARTESIA_API_KEY` | TTS | The only implemented backend; byte-streaming playback. |
+| `CARTESIA_API_KEY` | TTS (default provider) | Byte-streaming playback. Missing → warning, text-only. |
+| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | TTS when `[tts].provider="azure"` | Needs an `azure-tts` build. Missing → exit 1. |
 | `FAMILIAR_ID` | selects familiar | Or pass `--familiar <id>` (flag wins). |
 | `FAMILIARS_ROOT` | per-user familiars root | Overrides the platform data-dir default (#201). |
 | `FAMILIAR_DEFAULTS_ROOT` | `_default` skeleton root | Overrides the CWD-relative `data/familiars`. |

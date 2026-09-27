@@ -50,11 +50,13 @@ const LLM_SHARED_KEYS: [&str; 3] = [
 pub const BUDGET_TIER_NAMES: [&str; 3] = ["voice", "text", "background"];
 /// Allowed values for `[llm.<slot>].reasoning`.
 pub const REASONING_LEVELS: [&str; 6] = ["off", "none", "low", "medium", "high", "default"];
+/// Default `[tts].azure_voice`.
+pub const DEFAULT_AZURE_TTS_VOICE: &str = "en-US-AmberNeural";
 
-const TTS_PROVIDERS: [&str; 1] = ["cartesia"];
+const TTS_PROVIDERS: [&str; 2] = ["azure", "cartesia"];
 /// Providers that existed as unwired stubs and were removed; named so an
 /// upgraded profile gets a migration hint instead of a bare "unknown".
-const REMOVED_TTS_PROVIDERS: [&str; 2] = ["azure", "gemini"];
+const REMOVED_TTS_PROVIDERS: [&str; 1] = ["gemini"];
 const TURN_STRATEGIES: [&str; 2] = ["deepgram", "ten+smart_turn"];
 const STT_BACKENDS: [&str; 3] = ["deepgram", "parakeet", "faster_whisper"];
 const MESSAGE_RENDERINGS: [&str; 2] = ["prefixed", "name_only"];
@@ -358,12 +360,14 @@ impl Default for STTConfig {
 /// Text-to-speech config from `[tts]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TTSConfig {
-    /// `"cartesia"` — the only implemented backend, and the default.
+    /// `"cartesia"` (default) | `"azure"` (needs the `azure-tts` feature).
     pub provider: String,
     /// Cartesia voice id.
     pub cartesia_voice_id: Option<String>,
     /// Cartesia model.
     pub cartesia_model: Option<String>,
+    /// Azure neural voice name.
+    pub azure_voice: String,
     /// Greeting lines (stringified).
     pub greetings: Vec<String>,
 }
@@ -374,6 +378,7 @@ impl Default for TTSConfig {
             provider: "cartesia".to_owned(),
             cartesia_voice_id: None,
             cartesia_model: None,
+            azure_voice: DEFAULT_AZURE_TTS_VOICE.to_owned(),
             greetings: Vec::new(),
         }
     }
@@ -1752,6 +1757,7 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
         provider,
         cartesia_voice_id: tts_opt_string(raw, "cartesia_voice_id")?,
         cartesia_model: tts_opt_string(raw, "cartesia_model")?,
+        azure_voice: tts_nonempty(raw, "azure_voice", DEFAULT_AZURE_TTS_VOICE)?,
         greetings,
     })
 }
@@ -1761,6 +1767,16 @@ fn tts_opt_string(raw: &Table, key: &str) -> Result<Option<String>, ConfigError>
         None => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(_) => Err(ConfigError(format!("[tts].{key} must be a string"))),
+    }
+}
+
+fn tts_nonempty(raw: &Table, key: &str, default: &str) -> Result<String, ConfigError> {
+    match raw.get(key) {
+        None => Ok(default.to_owned()),
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        Some(_) => Err(ConfigError(format!(
+            "[tts].{key} must be a non-empty string"
+        ))),
     }
 }
 
@@ -2700,15 +2716,15 @@ fn parse_trusted_image_hosts(
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DeepgramSTTConfig, DiscordTextConfig,
-        EmbeddingConfig, FactSupersedeConfig, FocusConfig, LLM_SLOT_NAMES, MemoryProvidersConfig,
-        MemoryRetrievalConfig, PeopleDossierConfig, ReflectionConfig, RichNoteConfig,
-        RollingSummaryConfig, STTConfig, TTSConfig, ToolsConfig, TurnDetectionConfig,
-        default_projectors, parse_tts_config,
+        BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DEFAULT_AZURE_TTS_VOICE,
+        DeepgramSTTConfig, DiscordTextConfig, EmbeddingConfig, FactSupersedeConfig, FocusConfig,
+        LLM_SLOT_NAMES, MemoryProvidersConfig, MemoryRetrievalConfig, PeopleDossierConfig,
+        ReflectionConfig, RichNoteConfig, RollingSummaryConfig, STTConfig, TTSConfig, ToolsConfig,
+        TurnDetectionConfig, default_projectors, parse_tts_config,
     };
     use crate::budget::TierBudget;
     use std::collections::BTreeSet;
-    use toml::Table;
+    use toml::{Table, Value};
 
     #[test]
     fn tiered_slots() {
@@ -2743,29 +2759,54 @@ mod tests {
 
     #[test]
     fn removed_tts_providers_name_the_removal() {
-        // #N1: azure/gemini stubs deleted — a stale profile gets a migration hint.
-        for provider in ["azure", "gemini"] {
+        // #N1: the gemini stub was deleted — a stale profile gets a migration hint.
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "gemini".into());
+        let err = parse_tts_config(&raw).expect_err("removed provider rejected");
+        assert_eq!(
+            err.0,
+            "[tts].provider 'gemini' is no longer supported — it was an \
+             unwired stub and has been removed; use \"cartesia\""
+        );
+    }
+
+    #[test]
+    fn azure_is_a_valid_tts_provider_with_default_voice() {
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "azure".into());
+        let tts = parse_tts_config(&raw).expect("azure accepted");
+        assert_eq!(tts.provider, "azure");
+        assert_eq!(tts.azure_voice, "en-US-AmberNeural");
+        assert_eq!(TTSConfig::default().azure_voice, DEFAULT_AZURE_TTS_VOICE);
+    }
+
+    #[test]
+    fn azure_voice_overrides_default() {
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "azure".into());
+        raw.insert("azure_voice".to_owned(), "en-GB-SoniaNeural".into());
+        let tts = parse_tts_config(&raw).expect("azure_voice parses");
+        assert_eq!(tts.azure_voice, "en-GB-SoniaNeural");
+    }
+
+    #[test]
+    fn azure_voice_must_be_nonempty_string() {
+        for bad in [Value::from(""), Value::from(3)] {
             let mut raw = Table::new();
-            raw.insert("provider".to_owned(), provider.into());
-            let err = parse_tts_config(&raw).expect_err("removed provider rejected");
-            assert_eq!(
-                err.0,
-                format!(
-                    "[tts].provider '{provider}' is no longer supported — it was an \
-                     unwired stub and has been removed; use \"cartesia\""
-                )
-            );
+            raw.insert("azure_voice".to_owned(), bad);
+            let err = parse_tts_config(&raw).expect_err("bad azure_voice rejected");
+            assert_eq!(err.0, "[tts].azure_voice must be a non-empty string");
         }
     }
 
     #[test]
-    fn unknown_tts_provider_lists_the_only_option() {
+    fn unknown_tts_provider_lists_the_options() {
         let mut raw = Table::new();
         raw.insert("provider".to_owned(), "foo".into());
         let err = parse_tts_config(&raw).expect_err("unknown provider rejected");
         assert_eq!(
             err.0,
-            "[tts].provider 'foo' unknown; valid options: cartesia"
+            "[tts].provider 'foo' unknown; valid options: azure, cartesia"
         );
     }
 

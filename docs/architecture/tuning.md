@@ -59,7 +59,8 @@ Set in `.env` or the host environment. Never log them.
 
 | Var | Provider |
 |---|---|
-| `CARTESIA_API_KEY` | Cartesia — the default and only implemented backend. |
+| `CARTESIA_API_KEY` | Cartesia — the default. |
+| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure Speech (`provider = "azure"`, `azure-tts` build). Region is the bare name, e.g. `eastus`. |
 
 ### Optional path overrides
 
@@ -129,9 +130,10 @@ endpointing_ms  = 500
 keyterms        = []     # see § STT — Deepgram for the full set
 
 [tts]
-provider          = "cartesia"   # the only implemented backend
+provider          = "cartesia"   # or "azure" (azure-tts build)
 cartesia_voice_id = "..."
 cartesia_model    = "sonic-3"
+azure_voice       = "en-US-AmberNeural"
 greetings         = []
 
 [llm]
@@ -593,9 +595,10 @@ selected.
 | Provider | Voice field | Model field | Extras |
 |---|---|---|---|
 | `cartesia` (default) | `cartesia_voice_id` | `cartesia_model` | — |
+| `azure` | `azure_voice` (default `en-US-AmberNeural`) | — | needs the `azure-tts` feature |
 
-`cartesia` is the only accepted value; the unwired `azure` / `gemini` stubs
-were removed. See
+Azure opens one WebSocket per utterance, like Cartesia, and requests
+`raw-48khz-16bit-mono-pcm`. The removed `gemini` stub is rejected at load. See
 [Configuration model — TTS providers](configuration-model.md#tts-providers).
 
 `greetings = ["..."]` pre-synthesises greeting audio at startup so

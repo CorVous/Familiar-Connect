@@ -496,7 +496,9 @@ fn factory_creates_cartesia_from_config() {
         (k == "CARTESIA_API_KEY").then(|| "sk-cart-test-abc".to_owned())
     })
     .unwrap();
-    let TtsClientKind::Cartesia(c) = kind;
+    let TtsClientKind::Cartesia(c) = kind else {
+        panic!("expected Cartesia, got {kind:?}");
+    };
     assert_eq!(c.api_key, "sk-cart-test-abc");
     assert_eq!(c.voice_id, "some-voice-uuid");
     assert_eq!(c.model, "sonic-turbo");
@@ -563,22 +565,89 @@ fn factory_unknown_provider_raises() {
     // provider, so the message reads `...provider 'foo';...` (never `"foo"`).
     assert_eq!(
         err.to_string(),
-        "Unknown TTS provider 'foo'; expected 'cartesia'"
+        "Unknown TTS provider 'foo'; expected 'azure' or 'cartesia'"
     );
 }
 
 #[test]
-fn factory_rejects_the_removed_stub_providers() {
-    // #N1: azure/gemini were unwired stubs, deleted outright.
-    for provider in ["azure", "gemini"] {
-        let cfg = TTSConfig {
-            provider: provider.to_owned(),
-            ..TTSConfig::default()
-        };
-        let err = build_tts_client(&cfg, |_| None).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!("Unknown TTS provider '{provider}'; expected 'cartesia'")
-        );
+fn factory_rejects_the_removed_gemini_stub() {
+    // #N1: gemini was an unwired stub, deleted outright.
+    let cfg = TTSConfig {
+        provider: "gemini".to_owned(),
+        ..TTSConfig::default()
+    };
+    let err = build_tts_client(&cfg, |_| None).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Unknown TTS provider 'gemini'; expected 'azure' or 'cartesia'"
+    );
+}
+
+fn azure_env(key: &str) -> Option<String> {
+    match key {
+        "AZURE_SPEECH_KEY" => Some("azure-key-123".to_owned()),
+        "AZURE_SPEECH_REGION" => Some("westeurope".to_owned()),
+        _ => None,
     }
+}
+
+fn azure_cfg() -> TTSConfig {
+    TTSConfig {
+        provider: "azure".to_owned(),
+        azure_voice: "en-GB-SoniaNeural".to_owned(),
+        ..TTSConfig::default()
+    }
+}
+
+#[cfg(not(feature = "azure-tts"))]
+#[test]
+fn factory_azure_without_feature_names_the_rebuild() {
+    // Refused even with credentials present: nothing could synthesize.
+    let err = build_tts_client(&azure_cfg(), azure_env).unwrap_err();
+    assert!(matches!(err, TtsError::Config(_)));
+    assert_eq!(
+        err.to_string(),
+        "TTS provider 'azure' requires the 'azure-tts' feature. Rebuild with \
+         `azure-tts` added to --features \
+         (e.g. `cargo build --release --features discord,discord-voice,azure-tts`)."
+    );
+}
+
+#[cfg(feature = "azure-tts")]
+#[test]
+fn factory_creates_azure_from_config() {
+    let kind = build_tts_client(&azure_cfg(), azure_env).unwrap();
+    let TtsClientKind::Azure(c) = kind else {
+        panic!("expected Azure, got {kind:?}");
+    };
+    assert_eq!(c.region, "westeurope");
+    assert_eq!(c.voice, "en-GB-SoniaNeural");
+    // Key never leaks through Debug.
+    assert!(!format!("{c:?}").contains("azure-key-123"));
+}
+
+#[cfg(feature = "azure-tts")]
+#[test]
+fn factory_azure_missing_key_names_the_variable() {
+    let err = build_tts_client(&azure_cfg(), |k| {
+        (k == "AZURE_SPEECH_REGION").then(|| "eastus".to_owned())
+    })
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "AZURE_SPEECH_KEY environment variable is required for Azure TTS"
+    );
+}
+
+#[cfg(feature = "azure-tts")]
+#[test]
+fn factory_azure_missing_region_names_the_variable() {
+    let err = build_tts_client(&azure_cfg(), |k| {
+        (k == "AZURE_SPEECH_KEY").then(|| "k".to_owned())
+    })
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "AZURE_SPEECH_REGION environment variable is required for Azure TTS"
+    );
 }

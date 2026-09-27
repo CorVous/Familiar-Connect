@@ -349,12 +349,18 @@ idle_close_s = 30.0
 
 # --- Text-to-speech --------------------------------------------------------
 #
-# provider: "cartesia" — the only implemented backend. Set CARTESIA_API_KEY.
+# provider: "cartesia" (default) or "azure".
+#
+# Cartesia: set CARTESIA_API_KEY. Without it the bot runs text-only.
+# Azure:    build with `--features azure-tts` and set AZURE_SPEECH_KEY +
+#           AZURE_SPEECH_REGION; startup refuses if any is missing.
+#           azure_voice is any Azure neural voice name.
 
 [tts]
 provider          = "cartesia"
 cartesia_voice_id = "999df508-4de5-40a7-8bd3-8c12f678c284"
 cartesia_model    = "sonic-3"
+azure_voice       = "en-US-AmberNeural"
 greetings         = []
 
 # --- Prompt shaping --------------------------------------------------------

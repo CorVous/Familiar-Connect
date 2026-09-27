@@ -424,11 +424,25 @@ assistant turn records only if the full reply played uncancelled.
 
 ## TTS
 
-One client behind `synthesize(text) → TTSResult`: `CartesiaTTSClient`.
-`DiscordVoicePlayer` synthesises, mono→stereo, pushes through songbird.
-Without a configured client, `LoggingTTSPlayer` logs the intended speech.
+Two clients behind `synthesize(text) → TTSResult`: `CartesiaTTSClient`
+(default) and `AzureTTSClient` (`azure-tts` feature). `DiscordVoicePlayer`
+synthesises, mono→stereo, pushes through songbird. Without a configured
+client, `LoggingTTSPlayer` logs the intended speech.
 
 Already a trait seam. Adding a backend is one new type.
+
+### Azure
+
+`AzureTTSClient` drives the `azure-speech` SDK: one WebSocket per
+utterance, SSML naming `[tts].azure_voice`, output format
+`raw-48khz-16bit-mono-pcm` — the same mono 48 kHz PCM Cartesia delivers,
+so the player path is identical. It implements `synthesize_stream` too.
+The SDK hands chunks off through a bounded broadcast channel that silently
+drops frames a slow reader misses, so a drain task copies them into an
+unbounded queue as they arrive. Chunks are re-aligned to whole 16-bit
+samples before reaching `mono_to_stereo`. A stream that ends without the
+service's `turn.end` is surfaced as an error, not played as truncated
+audio. Word boundaries fill `TTSResult.timestamps` on the buffered path.
 
 ### Byte-level streaming (Cartesia)
 

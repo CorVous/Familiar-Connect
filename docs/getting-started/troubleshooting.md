@@ -13,9 +13,16 @@ Common startup errors and what they mean:
   OpenRouter key.
 - **`Opus library not found — voice playback will not work`** — voice
   commands still run, but no audio; install libopus.
-- **`[tts].provider '<name>' is no longer supported`** — the `azure` and
-  `gemini` stubs never had a backend and were removed. Set
-  `[tts].provider = "cartesia"` and `CARTESIA_API_KEY`.
+- **`[tts].provider 'gemini' is no longer supported`** — the `gemini`
+  stub never had a backend and was removed. Set
+  `[tts].provider = "cartesia"` and `CARTESIA_API_KEY` (or `"azure"`).
+- **`TTS provider unavailable: TTS provider 'azure' requires the 'azure-tts' feature…`**
+  — exit 1. Rebuild with `azure-tts` in `--features`
+  (e.g. `--features discord,discord-voice,azure-tts`).
+- **`TTS provider unavailable: AZURE_SPEECH_KEY environment variable is required for Azure TTS`**
+  (or `AZURE_SPEECH_REGION`) — exit 1. Set both in `.env`. A key with
+  stray whitespace or a region that isn't a bare name like `eastus` is
+  refused the same way, naming the variable.
 - **`[llm.<slot>].tool_calling = false is unsupported …`** — silence and
   `shift_focus` are both tool calls, so that surface could neither
   decline to reply nor move. Remove the key (it defaults to `true`);
@@ -34,7 +41,8 @@ Common startup errors and what they mean:
 - **Bot joined voice but no audio plays** — confirm libopus loaded on
   startup (look for the `Loaded Opus from:` debug line). Without it
   `voice_client.play(...)` is silent. Also confirm a TTS provider in
-  `[tts].provider` and the matching env var (`CARTESIA_API_KEY`) is set;
+  `[tts].provider` and the matching env var (`CARTESIA_API_KEY`, or the
+  `AZURE_SPEECH_*` pair) is set;
   with no client the player falls back to `LoggingTTSPlayer`, which
   only logs.
 - **Voice transcripts come out anonymous** — every frame is unattributed
