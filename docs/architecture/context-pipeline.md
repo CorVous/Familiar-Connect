@@ -96,6 +96,7 @@ for an assembler's lifetime, so no invalidation key includes it.
 | `ConversationSummaryLayer` | `summaries` table — the single per-familiar focus-stream row at `FOCUS_STREAM_CHANNEL_ID` (`ctx.channel_id` ignored) | `focus:<last_consumed_at>:<last_summarised_id>` |
 | `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `ego:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
+| `VoiceRosterLayer` | in-memory `VoiceRoster` (who is in the voice call + a decaying join/leave log) | `voice|r<revision>` — one counter covering membership *and* the live event set |
 | `RagContextLayer` | `fts/turns/` + `fts/facts/` tantivy search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent_cross_channel(window_size)` — all **consumed** turns across all channels, ordered by `arrived_at, id` | not cached — it *is* the query |
 
@@ -151,6 +152,85 @@ rolling summaries, people dossiers, RAG — reads that folded text and
 nothing else. That is why `view_image` still writes a caption for a
 model that can see the image perfectly well; see
 [Image viewing](overview.md#image-viewing).
+
+## Voice call roster
+
+Voice membership already lived in the gateway's side cache — read by the
+speaker resolver and STT keyterm biasing (see [Voice pipeline — Voice
+member roster](voice-pipeline.md#voice-member-roster)) — but never
+reached the prompt, so the bot had no idea who was in the call.
+`VoiceRosterLayer` renders it.
+
+```
+In the call: Cor, Cassidy, Tam.
+Tam just joined. pixel left.
+```
+
+Two lines, both optional. The roster line lists current members by
+`Author::label()` (display name → username → user id), in join order,
+capped at 12 names with a `+N more` tail. The narration line reports the
+most recent 6 undecayed join/leave events, oldest first. An empty call
+renders **nothing at all** — never "In the call: nobody."
+
+**Voice turns only.** `build` returns the empty string whenever
+`ctx.viewer_mode != "voice"`, and `default_assembler` only installs the
+layer for the voice tier. Call membership is meaningless on a text turn,
+and letting it churn there would cost tokens on every message and
+invalidate the text path's cache prefix for no benefit.
+
+### The shared roster type
+
+`VoiceRoster` (`familiar-connect/src/voice_roster.rs`) is a standalone,
+never-feature-gated type — the same seam shape as `FocusManager`. The
+`discord` gateway glue writes it through `BotHandle::voice_members`
+(which *is* this type, not a second copy): `/subscribe-voice` snapshots
+the channel's current occupants, `on_voice_state_update` records
+arrivals and departures, `/unsubscribe-voice` clears it. The ungated
+layer reads the very same `Arc`, so the roster the model sees can never
+drift from the roster the STT biasing uses.
+
+Only the narration is new to the gateway path. Bots and the familiar's
+own user id are excluded exactly as before, at both the snapshot and the
+update, and a snapshot never narrates — nobody "just joined" when the
+familiar walked into a call already in progress.
+
+### Decay and bounds
+
+Events are timestamped on an injectable monotonic clock and pruned on
+read: anything older than `[voice].roster_event_window_seconds`
+(default `120.0`) stops being narrated. Membership itself never decays —
+only the narration ages out. The log is additionally hard-capped at 16
+entries, so a long call with heavy churn cannot grow it without bound.
+
+### Why it sits late, and how its cache key stays still
+
+`default_assembler` orders layers stability-descending. The roster
+changes whenever anyone joins or leaves, so it sits **next-to-last** —
+after `people_dossier`, before `rag_context`. A join therefore
+invalidates only the roster block and the RAG block behind it, never the
+persona / lorebook / summary / dossier prefix. It does not go last
+because `rag_context` is strictly more volatile (its cue changes every
+single turn).
+
+The subtlety is time decay. A key containing a clock reading would
+change every turn and re-render a block that nobody touched; a key
+ignoring time would keep serving "Tam just joined." after it should have
+aged out. Instead the roster carries a monotonic `revision` counter that
+every mutation bumps — *and pruning bumps too*, because pruning happens
+inside the read path (`view()` / `revision()` both prune first). So the
+key is just `voice|r<revision>`: stable while nothing happens, however
+much time passes, and different the moment membership changes or an
+event falls out of the window.
+
+### Token cost
+
+Around 8-15 tokens on a typical 3-4 person call (`In the call: Cor,
+Cassidy, Tam.` estimates at 8; each narrated event adds ~5). Worst case —
+12 names plus a `+N more` tail and 6 narrated events — is ~56.
+That is small and self-bounding, so the layer has no `TierBudget` entry —
+unlike history / RAG / dossier / summary / reflections / lorebook, whose
+sizes are driven by unbounded stored data, the roster is bounded by the
+size of a Discord voice channel.
 
 ## Watermark-driven workers
 
@@ -1075,28 +1155,45 @@ first voice subscription as defaults (`set_focus_immediately`).
 
 The `channel_names` map (channel_id → display name) and its
 `guild_names` sibling drive readable logs, the unread digest, and the
-Discord presence line (`✨ <server> -> #<channel>`). Four sites
+Discord presence line (`✨ <server> -> #<channel>`). These sites
 populate them:
 
-- `on_ready` — bulk snapshot of every cached guild channel.
+- `guild_create` — the gateway's full guild payload (channel list plus
+  server name). This is where naming actually arrives: the READY payload
+  lists guilds as *unavailable stubs*, with the real data following as a
+  burst of `GUILD_CREATE` events, so a ready-time snapshot sees nothing
+  on a cold start. The same handler covers joining a guild mid-session.
+- `channel_update` and `guild_update` — mid-session renames of a
+  channel or a server.
 - `/subscribe-text` and `/subscribe-voice` — the interaction's own
   channel object plus the gateway-cached server name, so a channel
-  created *after* boot (absent from the ready snapshot) is still named.
+  created *after* boot is named the moment it is subscribed.
 - `register_dm_channel` — the DM peer's display name, refreshed on
   every DM, under the `Private Message` sentinel server name.
 - `rehydrate_dm_naming` at boot — the peer name recovered from history,
   falling back to `user <peer_id>` when a freshly-allowlisted peer has
   no history yet.
 
-There is no `ChannelUpdate` handler, so a rename mid-session is only
-picked up on the next restart. A channel that still misses the cache
-never renders as a bare snowflake: labels read `unnamed channel
-(id <cid>)` (presence, focus line) or `#unnamed(<cid>)` (logs, tool
-labels), which says *name unknown* instead of implying the channel is
-named after its id.
+`on_ready` still snapshots whatever guilds the gateway cache already
+holds. That covers a warm reconnect only and is empty on a cold start,
+which is why it was never the fix for #222.
+
+Every naming batch re-syncs the presence line, but only when the focused
+channel's rendered label actually changed — one presence update per
+batch, because Discord rate-limits presence updates. Without that
+re-sync, focus seeded at boot (before any name is known) would keep the
+`unnamed channel` fallback in the status until the next focus shift. As
+on ready, an in-flight activity re-asserts its away presence afterwards,
+so the online focus line never clobbers an idle/dnd status.
+
+A channel that still misses the cache never renders as a bare snowflake:
+labels read `unnamed channel (id <cid>)` (presence, focus line) or
+`#unnamed(<cid>)` (logs, tool labels), which says *name unknown* instead
+of implying the channel is named after its id.
 
 Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N
-missed=N` on a text shift, `[👁️ Focus]` once names are known on ready.
+missed=N` on a text shift, `[Focus] guild=… named=N` (debug) per naming
+batch.
 
 #### Unread nudge
 

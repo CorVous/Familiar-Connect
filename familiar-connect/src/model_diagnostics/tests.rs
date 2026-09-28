@@ -700,8 +700,11 @@ mod refresh {
             Utc::now(),
         )
         .unwrap();
+        // Generous: this guards against a HANG (a real dial-out to TEST-NET-1
+        // blocks until connect timeout), not against slowness. A tight bound
+        // here just flakes under load.
         tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(30),
             run_capability_audit(
                 "sk".to_owned(),
                 "http://192.0.2.1:9".to_owned(),
@@ -721,7 +724,6 @@ mod refresh {
 #[test]
 fn capability_resolution_on_the_boot_path_is_local_only() {
     use crate::model_diagnostics::cache::{resolve_capabilities_from_cache, write_cache};
-    use std::time::Instant;
     use tempfile::TempDir;
 
     let dir = TempDir::new().unwrap();
@@ -736,12 +738,9 @@ fn capability_resolution_on_the_boot_path_is_local_only() {
         std::iter::once(("prose".to_owned(), slot("vendor/vl"))).collect();
 
     // Synchronous, no runtime, no client, no URL in the signature — the type
-    // system already forbids a fetch here. Timing pins the intent.
-    let start = Instant::now();
+    // system already forbids a fetch here, so that is the real guarantee. A
+    // wall-clock bound here only added load-sensitive flake (it tripped once
+    // under concurrent builds) and pinned nothing the signature does not.
     resolve_capabilities_from_cache(&mut slots, &cache);
-    assert!(
-        start.elapsed().as_millis() < 500,
-        "boot resolution must be a file read, not a request"
-    );
     assert_eq!(slots["prose"].multimodal, Some(true));
 }

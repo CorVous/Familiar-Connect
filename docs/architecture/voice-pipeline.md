@@ -91,6 +91,72 @@ equal to the raw SSRC (always < 2^32, so it can never collide with a
 Discord snowflake) rather than being dropped; the turn transcribes
 anonymously.
 
+### Voice member roster
+
+Speaker names come from `BotHandle.voice_members`, one shared `VoiceRoster`
+(`familiar-connect/src/voice_roster.rs`) the `resolve_member` seam reads on
+the audio path. It has three lifecycle points:
+
+- **Snapshot at join.** `/subscribe-voice` reads the channel's occupants out
+  of the gateway cache (`Guild::voice_states`, filtered to the joined channel)
+  and replaces the roster with them. Without this the bot only ever learned
+  about people who *changed* voice state after it arrived — everyone already
+  seated stayed anonymous for the whole session. Resolution tries the cache
+  first (`VoiceState::member`, then `Guild::members`, then the user cache) and
+  gives whoever is left **one REST member lookup**
+  (`GuildId::member` → `GET /guilds/{guild}/members/{user}`).
+  That REST leg exists because voice state is presence, not speech: a
+  participant who joins and stays quiet *is* in `voice_states` but misses all
+  three cache lookups — `VoiceState::member` is not always populated,
+  `Guild::members` is sparse with no `GUILD_MEMBERS` intent, and the user cache
+  is fed by people who do things. Cache-only resolution dropped exactly those
+  people, and now that the roster feeds the prompt, dropping them means the
+  model cannot see them at all.
+- **Maintained on voice-state updates.** A join or move *into* the subscribed
+  channel inserts; a leave or a move *out* removes. Bots and the familiar's
+  own user id are excluded at both the snapshot and the update. Removal is
+  keyed by member id alone, so an update from elsewhere in the guild needs no
+  before-channel.
+- **Cleared at leave.** `/unsubscribe-voice` empties the roster, so the next
+  call does not inherit the last one's members.
+
+The REST leg is bounded and does **not** violate the audio path's no-REST rule
+(`resolve_member`, B-VM29): it runs once per join, before intake starts, over at
+most the channel's headcount — at most `ROSTER_FETCH_CONCURRENCY` (4) requests
+in flight, all sharing one `ROSTER_FETCH_BUDGET` (2 s) wall-clock deadline, so a
+slow Discord cannot hold up the join. Nothing is dropped meanwhile: `join_voice`
+has already registered the songbird receivers and their tick channel is
+unbounded, so audio buffers while the roster resolves. The per-frame resolver on the audio path
+stays cache-only. A failed, errored, or over-budget lookup degrades to an
+id-only `Author` (platform + numeric id, no names) — never a drop, because
+losing a known user id to a failed *name* lookup is the original N16 bug. The
+policy half (`resolve_voice_roster`, the `MemberFetcher` seam) is ungated and
+unit-tested with a scripted fetcher; only the serenity HTTP implementation is
+behind `discord-voice`.
+
+Each insert and remove also appends a timestamped join/leave event, decaying
+after `[voice].roster_event_window_seconds` (default `120.0`) and hard-capped
+at 16 entries. A snapshot narrates nothing — nobody "just joined" when the
+familiar walked into a call already in progress.
+
+The roster has three readers. Beyond speaker resolution
+(`voice_member_cached`) it feeds STT keyterm biasing (`voice_member_keyterms`,
+#198) and the prompt: `VoiceRosterLayer` renders `In the call: …` plus the
+narration into the voice system prompt. The type is never feature-gated, so
+the ungated layer reads the very `Arc` this gated glue writes — no second copy
+to drift. See
+[Context pipeline — Voice call roster](context-pipeline.md#voice-call-roster)
+for the layer, its position, and the decay rule.
+
+Keyterms are baked into the Deepgram connect URL when a speaker's stream
+opens, so a member who leaves mid-call stays in the keyterms of streams that
+are already open; those streams close after `idle_close_s` and the next one
+picks up the current roster.
+
+A resolver miss no longer erases the speaker: the persisted turn keeps the
+numeric user id (`Author` with platform + id, no names), so unnamed speakers
+stay distinct from each other rather than fusing into one anonymous voice.
+
 ## Turn detection
 
 **Today:** Deepgram's hosted endpointer. One WebSocket per speaker,
@@ -403,13 +469,18 @@ in **stability descending** order:
 | 2 | `OperatingModeLayer` | `viewer_mode` flip (constant per mode) |
 | 3 | `ConversationSummaryLayer` | `SummaryWorker` writes (every N turns) |
 | 4 | `PeopleDossierLayer` | `PeopleDossierWorker` watermark advances |
-| 5 | `RagContextLayer` | per-turn cue (always changes) |
+| 5 | `VoiceRosterLayer` | someone joins / leaves the call, or an event decays out |
+| 6 | `RagContextLayer` | per-turn cue (always changes) |
 | — | `RecentHistoryLayer` | per-turn (contributes user/assistant messages, not system text) |
 
 `RagContextLayer` therefore sits at the tail of the system message,
 so its inevitable per-turn churn invalidates *only* itself — the
 prefix from `CharacterCardLayer` through `PeopleDossierLayer` stays
-cached when its constituent layers haven't moved.
+cached when its constituent layers haven't moved. `VoiceRosterLayer`
+sits just ahead of it for the same reason: a join invalidates two small
+tail blocks instead of the whole prompt, and its cache key is a state
+counter rather than a clock, so a quiet call re-uses the cached render
+turn after turn.
 
 The `default_assembler` layer-order test in
 `familiar-connect/src/commands/run.rs` pins this ordering so a refactor

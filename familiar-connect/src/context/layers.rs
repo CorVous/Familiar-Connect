@@ -38,6 +38,7 @@ use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::{AccountProfile, Fact, HistoryTurn};
 use crate::identity::{ego_canonical_key, is_ego_key};
 use crate::llm::{Message, sanitize_name};
+use crate::voice_roster::{RosterEvent, RosterEventKind, VoiceRoster};
 
 /// A shared async history store handle every layer holds.
 type Store = Arc<AsyncHistoryStore>;
@@ -2112,6 +2113,94 @@ impl LorebookBuilder {
             max_entries: self.max_entries.max(0),
             max_tokens: self.max_tokens,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Voice roster
+// ---------------------------------------------------------------------------
+
+/// Voice-call roster line + narrated join/leave events.
+///
+/// Reads the shared [`VoiceRoster`] the `discord` gateway glue writes. Voice
+/// turns only — a text prompt gets nothing (roster churn would cost tokens and
+/// poison that path's cache prefix for no benefit).
+pub struct VoiceRosterLayer {
+    roster: Arc<VoiceRoster>,
+}
+
+/// Roster names rendered before the `+N more` tail.
+const MAX_RENDERED_NAMES: usize = 12;
+/// Newest events narrated per turn.
+const MAX_RENDERED_EVENTS: usize = 6;
+
+impl VoiceRosterLayer {
+    /// New layer over `roster`.
+    #[must_use]
+    pub const fn new(roster: Arc<VoiceRoster>) -> Self {
+        Self { roster }
+    }
+}
+
+/// `In the call: A, B, C.` — capped, with a `+N more` tail past the cap.
+fn format_roster_line(members: &[String]) -> String {
+    use std::fmt::Write as _;
+    let shown = members.len().min(MAX_RENDERED_NAMES);
+    let mut line = members[..shown].join(", ");
+    let hidden = members.len() - shown;
+    if hidden > 0 {
+        let _ = write!(line, ", +{hidden} more");
+    }
+    format!("In the call: {line}.")
+}
+
+/// `Tam just joined. pixel left.` — newest [`MAX_RENDERED_EVENTS`], chronological.
+fn format_roster_events(events: &[RosterEvent]) -> String {
+    let skip = events.len().saturating_sub(MAX_RENDERED_EVENTS);
+    events[skip..]
+        .iter()
+        .map(|ev| match ev.kind {
+            RosterEventKind::Joined => format!("{} just joined.", ev.label),
+            RosterEventKind::Left => format!("{} left.", ev.label),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[async_trait]
+impl Layer for VoiceRosterLayer {
+    fn name(&self) -> &'static str {
+        "voice_roster"
+    }
+
+    async fn build(&self, ctx: &AssemblyContext) -> String {
+        if ctx.viewer_mode != "voice" {
+            return String::new();
+        }
+        let view = self.roster.view();
+        // Empty call renders nothing — never "In the call: nobody."
+        if view.members.is_empty() {
+            return String::new();
+        }
+        let mut out = format_roster_line(&view.members);
+        if !view.events.is_empty() {
+            out.push('\n');
+            out.push_str(&format_roster_events(&view.events));
+        }
+        out
+    }
+
+    /// `voice|r<revision>`; a constant off-switch key on non-voice turns.
+    ///
+    /// The roster's revision counter covers membership *and* the visible event
+    /// set: every mutation bumps it, and so does a decay eviction (pruning
+    /// happens inside the read). A raw clock reading would churn the key every
+    /// turn; the revision only moves when the rendered text actually can.
+    async fn invalidation_key(&self, ctx: &AssemblyContext) -> String {
+        if ctx.viewer_mode != "voice" {
+            return "off".to_owned();
+        }
+        format!("voice|r{}", self.roster.revision())
     }
 }
 

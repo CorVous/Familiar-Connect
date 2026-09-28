@@ -16,7 +16,7 @@ upstream; this file is the whole record.
 | 219 | `dim` contradicting `fastembed_model` fails silently | bounded bug | fixed |
 | 220 | silent reported as cancelled | bounded bug | fixed |
 | 221 | Tool calling is no longer optional | bounded bug | fixed |
-| 222 | Familiars don't report focused channel correctly | bounded bug | fixed |
+| 222 | Familiars don't report focused channel correctly | bounded bug | fixed — first pass missed the root cause, see below |
 | 199 | High volume of decryption failures | investigation | fixed — and a worse defect found beside it |
 | 214 | Add Privacy Policy and Terms of Use | bounded docs | fixed |
 | 218 | Detect issues with model configuration via diagnostics | bounded feature | fixed |
@@ -25,7 +25,7 @@ upstream; this file is the whole record.
 | 180 | Time format hygiene | medium feature | LLM-facing edges fixed; store was already clean |
 | 183 | Improve token-counting heuristic | bounded feature | fixed — calibration learned, reported, and enforced on the assembly budget |
 | 203 | Wrong channel replies | investigation | reported mechanism already fixed; two real causes found and fixed |
-| 205 | Bad multi-party identity disambiguation | investigation | probably fixed via #199 — needs live confirmation |
+| 205 | Bad multi-party identity disambiguation | investigation | **confirmed fixed by live data** — see below |
 | 196 | ten-vad-sys FFI crate | large | not attempted |
 | 200 | Break out character.toml by file | large | not attempted; cheapest slice already taken by #151 |
 | 184 | Catch-up profiling for default config tuning | large | not attempted; #183 supplies one of its inputs |
@@ -92,14 +92,42 @@ confined to the tool-less configuration:
    post the literal call syntax to Discord. It now runs the same guard.
 
 ### 222 — channel reported as a raw snowflake
-`/subscribe-text` and `/subscribe-voice` never recorded channel or guild names,
-so any channel absent from the `on_ready` snapshot stayed nameless forever and
-presence rendered a bare snowflake. Both handlers now record names from the
-interaction (no REST added), a historyless DM falls back to its peer id, and
-the remaining misses render `unnamed channel (id N)`. A gateway backfill at the
-point of the miss was considered and rejected: `FocusManager` is
-feature-agnostic core with no cache access, and resolving an uncached channel
-is a REST round-trip on the presence path.
+**The first pass missed the root cause.** It fixed real gaps — `/subscribe-text`
+and `/subscribe-voice` never recorded channel or guild names, a historyless DM
+had no peer name, and a miss rendered a bare snowflake instead of
+`unnamed channel (id N)` — but it left the reporter's actual symptom in place:
+presence still read `unnamed channel (id …)` for an ordinary, long-subscribed
+guild channel.
+
+The real cause is that **the `on_ready` snapshot was always empty**. The
+serenity `ready` handler built `channel_names` / `guild_names` from
+`ctx.cache.guild(...)` for each entry in `ready.guilds`, but Discord's READY
+payload lists guilds only as unavailable stubs (`{id, unavailable: true}`) —
+full guild data follows as a burst of `GUILD_CREATE` events. Worse, serenity's
+own cache update for READY runs *before* the handler is dispatched and
+explicitly removes every guild in `ready.guilds` from `cache.guilds`
+(`CacheUpdate for ReadyEvent`), so the lookup returned `None` for every guild,
+on a cold start *and* on a reconnect. With no `guild_create`, `channel_update`,
+or `guild_update` handler anywhere, nothing ever filled the caches, and every
+guild channel rendered via the fallback for the whole session.
+
+Fixed by adding `guild_create` (plus `channel_update` / `guild_update`, see
+N14) feeding a new serenity-free seam, `BotEvents::on_guild_available(GuildInfo)`,
+which reuses `record_channel_naming`. Because focus is seeded at boot — before
+any name is known — and `sync_presence` runs then, a naming batch also re-syncs
+presence, but only when the focused channel's rendered label actually changed
+(one presence update per batch; Discord rate-limits presence). Without that
+re-sync the status would stay wrong until the next focus shift and the bug
+would look unfixed. The re-sync keeps the B-PR24 ordering: an in-flight
+activity re-asserts its away presence afterwards, so a naming batch cannot
+clobber an idle/dnd status with the online focus line.
+
+The `ready` snapshot is kept, now sourced from `ctx.cache.guilds()` rather than
+the READY stub list, so it covers a warm reconnect instead of being dead code.
+
+A gateway backfill at the point of the miss was considered and rejected:
+`FocusManager` is feature-agnostic core with no cache access, and resolving an
+uncached channel is a REST round-trip on the presence path.
 
 ### 199 — decryption failures, and the real bug beside them
 The reported `RTCP decryption failed: Crypto(Error)` spam is **benign upstream
@@ -563,16 +591,19 @@ channel replied at all), but whether an alarm should also pierce focus is a
 product decision, not a bug fix. Related to #221, where focus switching is
 reachable only via a tool call.
 
-### N14 — a channel rename is invisible until the next restart
+### N14 — a channel rename is invisible until the next restart `[fixed]`
 
 Found while fixing #222. The focus name caches (`channel_names` / `guild_names`)
-are write-only pushes from four discovery points — the `on_ready` snapshot, both
-`/subscribe-*` handlers (added with the #222 fix), `register_dm_channel`, and
-boot-time `rehydrate_dm_naming`. There is no `ChannelUpdate` / `GuildUpdate`
-handler, so renaming a channel or server mid-session leaves presence, logs, and
-the model's focus line showing the *old* name until the process restarts. Cheap
-to close (`EventHandler::channel_update` → `fm.set_channel_name`), but it is a
-separate gateway event from the one #222 reported.
+were write-only pushes from discovery points that all fire once — the (empty)
+`on_ready` snapshot, both `/subscribe-*` handlers, `register_dm_channel`, and
+boot-time `rehydrate_dm_naming`. With no `ChannelUpdate` / `GuildUpdate`
+handler, renaming a channel or server mid-session left presence, logs, and the
+model's focus line showing the *old* name until the process restarted.
+
+Closed with the second #222 pass: `EventHandler::channel_update` and
+`guild_update` now feed the same `on_guild_available` seam as `guild_create`,
+so a rename updates the caches and re-syncs presence when it touches the
+focused channel.
 
 ### N15 — a vision-capable slot paid twice for every image `[fixed]`
 
@@ -592,3 +623,88 @@ Fixed by the #204 role split. The handler now reads `ctx.multimodal` and runs
 one leg: the caption model for a slot that can see (memory only), the
 substitution model for one that cannot (perception, doubling as memory). The
 substitution model is never invoked for a multimodal slot.
+
+### N16 — the bot never sees who was already in the voice call `[fixed]`
+
+Found in a live call. `BotHandle.voice_members` — the cache `resolve_member`
+reads to name a speaker — was populated *only* by `on_voice_state_update`,
+which by definition fires on changes. `/subscribe-voice` never enumerated the
+channel, so every member already seated when the familiar joined was invisible
+to it for the whole session: no name on their turns, and no contribution to the
+STT keyterms that bias transcription toward the people actually present.
+
+The call that surfaced it: 25% of user turns landed with both
+`author_display_name` and `author_user_id` NULL, all from people who were in
+the channel before the bot. (The SSRC layer was already fixed by #199/#205 —
+`unmapped_frames=0` across 8,307 speaking frames — so this was the only
+remaining cause.)
+
+Fixed by snapshotting the channel's occupants from the gateway cache
+(`Guild::voice_states`) into the roster at join, resolving each through
+`VoiceState::member` → `Guild::members` → the user cache and skipping anyone
+none of them knows (no `GUILD_MEMBERS` intent, and no REST on the audio path).
+
+Two smaller pieces landed with it. The persisted turn now keeps the numeric
+user id when name resolution misses, instead of dropping the author entirely
+and fusing every unresolved speaker into one anonymous voice — rare after the
+snapshot, but someone can still speak in the gap between joining and their
+voice-state event landing. And the roster now carries the per-guild nickname,
+which the keyterm list already expected.
+
+### N17 — the voice-member roster only ever grew `[fixed]`
+
+Same call. `on_voice_state_update` was insert-only: a leave
+(`after_channel_id == None`) and a move to another channel both returned before
+any removal, and nothing cleared the map on unsubscribe or shutdown. Members
+therefore accumulated for the process's lifetime — the familiar could not
+detect a departure, kept resolving people who had left, and biased STT keyterms
+toward names nobody in the channel was going to say.
+
+Fixed in the same handler: a join or move into the subscribed channel inserts,
+anything else removes by member id (a member who was never in the roster makes
+that a no-op, so no before-channel is needed), and `/unsubscribe-voice` clears
+the roster outright. Bots are now excluded on update as well as at snapshot —
+the guard previously covered only the familiar's own id.
+
+Keyterms are baked into the Deepgram connect URL when a speaker's stream opens,
+so a departed member's name lingers in streams already open; those close after
+`idle_close_s` and reopen against the current roster.
+
+## Live verification — 2026-08-18 voice call
+
+Log archived at `~/.local/share/familiar-connect/logs/2026-08-18-voice-call.log`
+(3,184 lines, 54 LLM calls, ~5 speakers). First real data on this branch.
+
+**#199 / #205 — confirmed fixed.** `unmapped_frames=0` across 8,307 speaking
+frames for the whole session; it was equal to `speaking_frames` (100% unmapped)
+before. Zero `provisional-id` warnings, zero `RTCP decryption failed` lines. So
+the `join_voice` registration race really was the root cause of #205's identity
+confusion, and quieting the RTCP noise worked.
+
+**#220 — confirmed live.** The `fast` slot reported `cancelled=8 ok=15
+silent=5`: deliberate silences are now distinguishable from barge-ins in
+production, which is exactly what the fix was for.
+
+**#206 — first real measurement, and it changes the analysis.** The earlier
+brief assumed the shipped `_default`, which puts Claude Haiku on `fast`. The
+live profile runs `z-ai/glm-5v-turbo` and `z-ai/glm-5.2` — *both* z-ai — so the
+Anthropic single-`cache_control`-block theory does not apply to this
+deployment, and the proposed breakpoint split would have bought nothing.
+
+The hypothesis still holds in a sharper form. Hit *rate* is high (fast 100%,
+prose 88.5%) but token-weighted reuse is low (fast 23.3%, prose 17.5%) — around
+four fifths of the prefix is invalidated every turn. Prose `cost_p50` is
+1,333 ms between hits and misses, though over only 3 misses.
+
+Separately and not about caching: `fast` TTFB p50 is 2,837 ms (p95 7,974 ms)
+against a documented sub-second target. Worth its own investigation.
+
+**#183 — the documented assumption was false.** Observed
+`in_tokens / est_in_tokens` was **1.453** for glm-5.2 (n=26) and **1.197** for
+glm-5v-turbo (n=15). `budget.rs` had documented `len/4` as deliberately
+*over*-counting, "safer for budgets"; for both live models it under-counts by
+20–45%, so `TierBudget` caps were effectively that much larger than configured
+— a tuning-contract violation that would have silently invalidated #184's
+numbers. The upward-only clamp added earlier is vindicated: this is precisely
+the case it exists for. Calibration is now persisted across restarts so a cold
+start is no longer blind, and the false claim is corrected in the docs.

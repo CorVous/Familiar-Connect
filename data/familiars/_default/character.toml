@@ -627,6 +627,16 @@ unread_nudge_enabled   = true
 nudge_debounce_seconds = 30.0
 catch_up_limit         = 20
 
+# --- Voice call ---------------------------------------------------------------
+#
+# roster_event_window_seconds: how long a join/leave stays narrated in the
+# voice prompt ("Tam just joined." / "pixel left."). Older events decay out;
+# the roster line itself ("In the call: …") never decays. Must be positive.
+# Voice turns only — text prompts never carry the roster.
+
+[voice]
+roster_event_window_seconds = 120.0
+
 # --- Tools -------------------------------------------------------------------
 #
 # loop_max_iterations: hard cap on agentic-loop rounds per turn

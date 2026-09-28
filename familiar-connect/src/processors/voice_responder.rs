@@ -369,10 +369,18 @@ impl VoiceInner {
         )
     }
 
+    /// Resolve the speaker, degrading to an id-only author on a cache miss.
+    ///
+    /// A miss loses the *name*, not the *identity*: dropping the author
+    /// entirely wrote the turn with a NULL user id too, fusing every unresolved
+    /// speaker into one anonymous voice (N16). `label()` falls back to the id,
+    /// so unnamed speakers stay distinguishable in the transcript.
     fn resolve_author(&self, channel_id: i64, user_id: Option<i64>) -> Option<Author> {
         let uid = user_id?;
-        let resolver = self.member_resolver.as_ref()?;
-        resolver(channel_id, uid)
+        self.member_resolver
+            .as_ref()
+            .and_then(|resolve| resolve(channel_id, uid))
+            .or_else(|| Some(Author::new("discord", uid.to_string(), None, None)))
     }
 
     async fn stream_and_speak(&self, scope: &TurnScope, channel_id: i64) -> Option<String> {

@@ -32,12 +32,13 @@ use crate::config::EmbeddingConfig;
 use crate::context::layers::ChannelResolver;
 use crate::context::{
     Assembler, CharacterCardLayer, ConversationSummaryLayer, LorebookLayer, OperatingModeLayer,
-    PeopleDossierLayer, RagContextLayer, RecentHistoryLayer, ReflectionLayer,
+    PeopleDossierLayer, RagContextLayer, RecentHistoryLayer, ReflectionLayer, VoiceRosterLayer,
 };
 use crate::embedding::{Embedder, EmbeddingError};
 use crate::familiar::Familiar;
 use crate::focus::FocusManager;
 use crate::sleep::maintenance::SleepPromptText;
+use crate::voice_roster::VoiceRoster;
 
 /// `run` arguments.
 #[derive(Args, Debug)]
@@ -190,7 +191,12 @@ fn operating_modes(config: &crate::config::CharacterConfig) -> HashMap<String, S
 /// recent-history is a distinct slot (not a system-prompt layer), so the
 /// layer-order pin applies to the system-prompt `Vec`: `[character_card,
 /// operating_mode, lorebook, conversation_summary, reflection, people_dossier,
-/// rag_context]` with `rag_context` last, recent-history in its own slot.
+/// voice_roster, rag_context]` with `rag_context` last, recent-history in its
+/// own slot.
+///
+/// `roster` (voice tier only) adds the live-call roster line next-to-last: it
+/// churns on every join/leave, so it sits behind every stable layer and ahead of
+/// only `rag_context`, which churns per turn regardless.
 #[must_use]
 pub fn default_assembler(
     familiar: &Familiar,
@@ -199,6 +205,7 @@ pub fn default_assembler(
     silence_gap_fold_seconds: f64,
     embedder: Option<Arc<dyn Embedder>>,
     focus_manager: Option<Arc<FocusManager>>,
+    roster: Option<Arc<VoiceRoster>>,
 ) -> Assembler {
     let store = familiar.history_store.clone();
     let display_tz = familiar.config.display_tz.clone();
@@ -240,7 +247,7 @@ pub fn default_assembler(
     }
     let rag = Arc::new(rag.build());
 
-    Assembler::builder()
+    let mut builder = Assembler::builder()
         .layer(Arc::new(CharacterCardLayer::new(
             familiar.root.join("character.md"),
         )))
@@ -269,11 +276,12 @@ pub fn default_assembler(
                 .max_tokens(Some(budget.dossier_tokens))
                 .familiar_display_name(familiar.display_name())
                 .build(),
-        ))
-        // RAG is the last system-prompt layer; recent-history is a slot.
-        .rag(rag)
-        .recent_history(recent)
-        .build()
+        ));
+    if let Some(roster) = roster {
+        builder = builder.layer(Arc::new(VoiceRosterLayer::new(roster)));
+    }
+    // RAG is the last system-prompt layer; recent-history is a slot.
+    builder.rag(rag).recent_history(recent).build()
 }
 
 /// Build an [`ActivityEngine`] from the familiar's `activities.toml`.
@@ -924,6 +932,12 @@ async fn async_main(
     .await?;
 
     let bot_user_id = Arc::new(Mutex::new(None::<i64>));
+    // One roster, two readers: the gateway writes membership through the handle,
+    // the voice assembler's roster layer renders it.
+    let voice_roster = Arc::new(
+        VoiceRoster::new()
+            .with_event_window_seconds(familiar.config.voice.roster_event_window_seconds),
+    );
     let (handle, client) = create_bot(CreateBotDeps {
         token: token.clone(),
         familiar_id: familiar.id.clone(),
@@ -951,6 +965,7 @@ async fn async_main(
         history_store: familiar.history_store.clone(),
         bus: familiar.bus.clone(),
         focus_manager: Some(focus_manager.clone()),
+        voice_roster: voice_roster.clone(),
     })
     .await?;
 
@@ -963,7 +978,10 @@ async fn async_main(
         0.0,
         embedder.clone(),
         Some(focus_manager.clone()),
+        Some(voice_roster.clone()),
     ));
+    // Text prompts get no roster layer: call membership is irrelevant there and
+    // its churn would cost tokens + cache prefix on every text turn.
     let text_assembler = Arc::new(default_assembler(
         &familiar,
         familiar.config.text_window_size,
@@ -971,6 +989,7 @@ async fn async_main(
         familiar.config.text_silence_gap_fold_seconds,
         embedder.clone(),
         Some(focus_manager.clone()),
+        None,
     ));
 
     let tts_player: Arc<dyn TtsPlayer> = if let Some(tts) = familiar.tts_client.clone() {
@@ -1361,7 +1380,10 @@ async fn async_main(
     familiar.router.shutdown();
     // 7. bus.
     familiar.bus.shutdown().await;
-    // 8. (the LLM client `close()` step has no Rust analog — reqwest connection
+    // 8. persist token calibration — the writer debounces, so a clean exit
+    //    would otherwise drop the tail of the session's learning (#183).
+    crate::budget::get_token_calibration().flush();
+    // 9. (the LLM client `close()` step has no Rust analog — reqwest connection
     //     pools close on drop.)
 
     match bot_ended {
@@ -1386,6 +1408,7 @@ mod tests {
     use crate::focus::FocusManager;
     use crate::processors::SendText;
     use crate::subscriptions::SubscriptionRegistry;
+    use crate::voice_roster::VoiceRoster;
     use async_trait::async_trait;
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
@@ -1720,7 +1743,15 @@ mod tests {
 
     fn layer_order() -> Vec<String> {
         let (familiar, _dir) = load_test_familiar(false);
-        let asm = default_assembler(&familiar, 20, TierBudget::default(), 0.0, None, None);
+        let asm = default_assembler(
+            &familiar,
+            20,
+            TierBudget::default(),
+            0.0,
+            None,
+            None,
+            Some(Arc::new(VoiceRoster::new())),
+        );
         asm.layer_names().into_iter().map(str::to_owned).collect()
     }
 
@@ -1751,6 +1782,25 @@ mod tests {
         let rag = order.iter().position(|n| n == "rag_context").unwrap();
         assert_eq!(rag, order.len() - 1);
         assert!(!order.iter().any(|n| n == "recent_history"));
+    }
+
+    #[test]
+    fn voice_roster_sits_between_people_dossier_and_rag() {
+        // Volatile-end placement: a join must not invalidate the stable prefix,
+        // and rag_context churns per turn regardless, so the roster rides ahead
+        // of it.
+        let order = layer_order();
+        let dossier = order.iter().position(|n| n == "people_dossier").unwrap();
+        let roster = order.iter().position(|n| n == "voice_roster").unwrap();
+        let rag = order.iter().position(|n| n == "rag_context").unwrap();
+        assert!(dossier < roster && roster < rag);
+    }
+
+    #[test]
+    fn voice_roster_layer_absent_without_a_roster() {
+        let (familiar, _dir) = load_test_familiar(false);
+        let asm = default_assembler(&familiar, 20, TierBudget::default(), 0.0, None, None, None);
+        assert!(!asm.layer_names().contains(&"voice_roster"));
     }
 
     // --- build_activity_engine ---
