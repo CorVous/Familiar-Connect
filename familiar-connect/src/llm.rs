@@ -271,8 +271,9 @@ impl Stream for LlmStream {
 
 /// The narrow LLM client seam the rest of the system types against.
 ///
-/// Only these five methods are ever touched from outside the transport module,
-/// so a ~5-line scripted stub satisfies it (the 04/07 worker doubles and the 06
+/// Only these methods are ever touched from outside the transport module, and
+/// `model` has a default, so a ~5-line scripted stub satisfies it (the 04/07
+/// worker doubles and the 06
 /// responder doubles implement exactly this). The OpenRouter client (Layer 2,
 /// subsystem 08) implements the trait; the streaming/chat bodies, the rate-limit
 /// semaphore, and `create_llm_clients` are that later task's remit.
@@ -299,6 +300,18 @@ pub trait LlmClient: Send + Sync {
     /// The config slot label (`"fast"` / `"prose"` / `"background"`), or `None`.
     fn slot(&self) -> Option<&str>;
 
+    /// The model id, keying #183 token calibration.
+    ///
+    /// Defaults to `""` — a calibration miss, leaving the raw estimate — so
+    /// stubs need not implement it. Decorators must forward the inner value.
+    #[allow(
+        clippy::unnecessary_literal_bound,
+        reason = "only this default returns a literal; overrides borrow from self"
+    )]
+    fn model(&self) -> &str {
+        ""
+    }
+
     /// Whether `ImageResult`s serialize as multimodal blocks for this client.
     fn multimodal(&self) -> bool;
 
@@ -318,6 +331,7 @@ pub trait LlmClient: Send + Sync {
 #[cfg(feature = "net")]
 mod client {
     use super::{AbandonStatus, Content, LlmClient, LlmDelta, LlmStream, Message};
+    use crate::budget::{estimate_tokens_from_chars, get_token_calibration};
     use crate::config::{CharacterConfig, LLM_SLOT_NAMES, LLMSlotConfig};
     use crate::diagnostics::collector::get_span_collector;
     use crate::log_style as ls;
@@ -606,12 +620,11 @@ mod client {
             if let Some(p) = &self.provider {
                 parts.push(ls::kv_styled("provider", p, ls::W, ls::LM));
             }
-            // Estimated prompt tokens via the char/4 heuristic (mirrors
-            // `budget::estimate_tokens`, CHARS_PER_TOKEN=4; `input_chars` is
-            // already a Unicode-scalar count). Emitted next to the true
-            // `in_tokens` so the estimated-vs-actual ratio is observable
-            // (issues #183/#184) — no calibration, purely a metric.
-            let est_in_tokens = self.input_chars.div_ceil(4);
+            // Estimated prompt tokens through the shared estimator
+            // (`input_chars` is already a Unicode-scalar count). Emitted next to
+            // the true `in_tokens` so the estimated-vs-actual ratio is
+            // observable (issues #183/#184).
+            let est_in_tokens = estimate_tokens_from_chars(self.input_chars);
             parts.push(ls::kv_styled(
                 "est_in_tokens",
                 &est_in_tokens.to_string(),
@@ -626,6 +639,22 @@ mod client {
             }
             if let Some(v) = self.cached_tokens {
                 parts.push(ls::kv_styled("cached", &v.to_string(), ls::W, ls::LW));
+            }
+            // Feed the calibration store, then surface the model's running
+            // true/estimated ratio (this call included) as `cal_ratio` so the
+            // learned rate is collectable from logs (#183). Absent until the
+            // model has a usage-bearing call.
+            let calibration = get_token_calibration();
+            if let Some(actual) = self.in_tokens {
+                calibration.record(&self.model, est_in_tokens, actual);
+            }
+            if let Some(ratio) = calibration.ratio(&self.model) {
+                parts.push(ls::kv_styled(
+                    "cal_ratio",
+                    &format!("{ratio:.3}"),
+                    ls::W,
+                    ls::LC,
+                ));
             }
             tracing::info!(target: "familiar_connect.llm", "{}", parts.join(" "));
         }
@@ -1406,6 +1435,10 @@ mod client {
             self.slot.as_deref()
         }
 
+        fn model(&self) -> &str {
+            &self.model
+        }
+
         fn multimodal(&self) -> bool {
             self.multimodal
         }
@@ -1541,6 +1574,7 @@ mod client {
     #[cfg(test)]
     mod tests {
         use super::{MAX_DELAY_S, OpenRouterClient, backoff_delay, create_llm_clients};
+        use crate::budget::reset_token_calibration;
         use crate::config::{CharacterConfig, LLMSlotConfig};
         use crate::diagnostics::collector::{get_span_collector, reset_span_collector};
         use crate::diagnostics::testutil::{Capture, install_capture, singleton_guard, strip_ansi};
@@ -1628,6 +1662,17 @@ mod client {
 
         fn user(text: &str) -> Message {
             Message::new("user", text)
+        }
+
+        // --- trait surface -------------------------------------------------
+
+        /// #183: the model must reach calibration through the trait object the
+        /// responders hold, not just the inherent accessor.
+        #[test]
+        fn model_reaches_through_the_trait_object() {
+            let c = OpenRouterClient::builder("k", "vendor/model-x").build();
+            let erased: &dyn crate::llm::LlmClient = &c;
+            assert_eq!(erased.model(), "vendor/model-x");
         }
 
         // --- build_payload -------------------------------------------------
@@ -2745,6 +2790,56 @@ mod client {
             assert!(line.contains("cached=800"), "line: {line}");
         }
 
+        /// #183: the learned true/estimated ratio rides the `[LLM call]` line.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn calibration_ratio_surfaces_in_call_log() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            reset_token_calibration();
+            let server = MockServer::start().await;
+            let usage = json!({ "prompt_tokens": 150, "completion_tokens": 10 });
+            mount_sse(&server, sse_with_usage(&["x"], Some(usage), None)).await;
+            let c = OpenRouterClient::builder("k", "cal/one")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            // 400 scalars -> est 100 tokens; the provider bills 150 -> ratio 1.5.
+            let mut s = c
+                .chat_stream(vec![Message::new("user", "A".repeat(400))])
+                .await
+                .unwrap();
+            while s.next().await.is_some() {}
+            drop(s);
+            let line = call_line(&cap);
+            assert!(line.contains("est_in_tokens=100"), "line: {line}");
+            assert!(line.contains("cal_ratio=1.500"), "line: {line}");
+        }
+
+        /// No reported usage → nothing learned → no `cal_ratio` key.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn no_usage_means_no_calibration_key() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            reset_token_calibration();
+            let server = MockServer::start().await;
+            mount_sse(&server, sse_content(&["x"])).await;
+            let c = OpenRouterClient::builder("k", "cal/two")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            let mut s = c.chat_stream(vec![user("hi")]).await.unwrap();
+            while s.next().await.is_some() {}
+            drop(s);
+            let line = call_line(&cap);
+            assert!(!line.contains("cal_ratio="), "line: {line}");
+        }
+
         fn call_line(cap: &Capture) -> String {
             cap.records()
                 .into_iter()
@@ -2973,7 +3068,7 @@ pub use client::{
 
 #[cfg(test)]
 mod tests {
-    use super::{Content, LlmDelta, Message, sanitize_name};
+    use super::{Content, LlmClient, LlmDelta, LlmStream, Message, sanitize_name};
     use serde_json::{Value, json};
 
     // --- sanitize_name -----------------------------------------------------
@@ -3159,5 +3254,40 @@ mod tests {
     #[test]
     fn content_default_is_empty_text() {
         assert_eq!(Content::default(), Content::Text(String::new()));
+    }
+
+    // --- LlmClient::model default (#183) -----------------------------------
+
+    struct BareStub;
+
+    #[async_trait::async_trait]
+    impl LlmClient for BareStub {
+        async fn chat(&self, _messages: Vec<Message>) -> anyhow::Result<Message> {
+            Ok(Message::new("assistant", "ok"))
+        }
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<Value>>,
+        ) -> anyhow::Result<LlmStream> {
+            Ok(LlmStream::new(futures::stream::empty()))
+        }
+        fn slot(&self) -> Option<&str> {
+            None
+        }
+        fn multimodal(&self) -> bool {
+            false
+        }
+        fn tool_calling_enabled(&self) -> bool {
+            false
+        }
+    }
+
+    // A stub that never names a model keeps the raw estimator: `""` misses the
+    // calibration store.
+    #[test]
+    fn model_defaults_to_empty_string() {
+        let c: &dyn LlmClient = &BareStub;
+        assert_eq!(c.model(), "");
     }
 }

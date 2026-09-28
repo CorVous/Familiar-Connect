@@ -75,6 +75,12 @@ pub trait Layer: Send + Sync {
 `(layer.name, invalidation_key)`. Two `assemble` calls with the same
 context re-run `build` only for layers whose key changed.
 
+`AssemblyContext` carries the familiar id, channel, viewer mode, guild,
+and the target `model`. The responders set `model` from
+`LlmClient::model()`; layers key it into the token-calibration store when
+they trim (see [tuning](tuning.md#token-count-calibration)). It is fixed
+for an assembler's lifetime, so no invalidation key includes it.
+
 ### Static, file-sourced
 
 | Layer | Source | Invalidation |
@@ -514,7 +520,9 @@ about.
   worker already iterates every subject with facts). `resolve_label` has
   no account row for the self key, so the worker substitutes the
   familiar's display name for the dossier header. The self-record uses a
-  distinct compaction prompt: it **preserves settled opinions, stances,
+  distinct compaction prompt (`[prompt].dossier_self_system`, against
+  `.dossier_other_system` for everyone else): it **preserves settled
+  opinions, stances,
   and feelings** (the views the familiar holds consistently) and drops
   only momentary reactions — unlike the person-dossier prompt, which
   sheds transient feelings wholesale. The self-record also drops
@@ -759,9 +767,11 @@ out as prose (issue #221).
 Both responders also append a *second* copy of the same block as a
 trailing `system` message, after recent history, with
 `include_mode_instruction=True`. This appends the per-mode operating
-directive (`"You are speaking aloud. Keep replies short (one or two
-sentences). Avoid markdown."` for voice; the text-channel equivalent
-for text) to the tail copy. The directive is still set up-front by
+directive (`[prompt].operating_mode_voice`, shipped as `"You are
+speaking aloud. Keep replies short (one or two sentences). Avoid
+markdown."`; `.operating_mode_text` for text) to the tail copy. Both
+consumers read that one config pair — the reminder holds no in-code
+copy. The directive is still set up-front by
 `OperatingModeLayer` — the trailing copy is recency insurance: long
 contexts make models drift away from format gates buried at the top
 of the system prompt, and a final-position reminder is the cheapest

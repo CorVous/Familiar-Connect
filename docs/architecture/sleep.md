@@ -97,6 +97,12 @@ copy to drift against (mirrors `post_history_instructions`). Production
 always merges `_default`, so the real text always resolves; empty config
 yields an empty prompt, never a stale duplicate.
 
+The same rule now covers every model-facing prompt outside the sleep
+passes — the operating-mode directives, the voice tool nudge, the
+`start_activity` policy, and the memory-projector instruction text
+(#151). The full `[prompt]` surface is listed in
+[Configuration model — Character config](configuration-model.md#2-character-config).
+
 Only the phrasing is configurable. The dynamic window data (facts,
 turns, cited ids, the known-bits deny-list) and the machine-parsed JSON
 reply shape are assembled in code. Placeholders are filled by literal

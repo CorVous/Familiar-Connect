@@ -83,6 +83,15 @@ pub struct ProjectorContext {
     pub familiar_display_name: Option<String>,
     /// Config-sourced dream-framing clause for the fact extractor.
     pub dream_extraction_clause: String,
+    /// Config-sourced instruction text for the rolling summariser.
+    pub rolling_summary_system: String,
+    /// Config-sourced persona for the reflection writer.
+    pub reflection_system: String,
+    /// Config-sourced self-record instruction text (`{self_name}`).
+    pub dossier_self_system: String,
+    /// Config-sourced other-person dossier instruction text
+    /// (`{display_name}`).
+    pub dossier_other_system: String,
     /// IANA `display_tz`; anchors date-only LLM timestamps to the local day.
     pub display_tz: String,
 }
@@ -99,6 +108,10 @@ impl ProjectorContext {
             memory: MemoryProvidersConfig::default(),
             familiar_display_name: None,
             dream_extraction_clause: String::new(),
+            rolling_summary_system: String::new(),
+            reflection_system: String::new(),
+            dossier_self_system: String::new(),
+            dossier_other_system: String::new(),
             display_tz: "UTC".to_owned(),
         }
     }
@@ -299,7 +312,8 @@ fn summary_factory(ctx: &ProjectorContext) -> Result<Box<dyn MemoryProjector>, P
         ctx.familiar_id.clone(),
     )
     .turns_threshold(knobs.turns_threshold)
-    .tick_interval_s(knobs.tick_interval_s);
+    .tick_interval_s(knobs.tick_interval_s)
+    .system_prompt(ctx.rolling_summary_system.clone());
     let name = worker.name();
     Ok(worker_projector(name, move |token| async move {
         worker.run(token).await;
@@ -336,7 +350,9 @@ fn people_dossier_factory(
         ctx.background_llm()?,
         ctx.familiar_id.clone(),
     )
-    .tick_interval_s(ctx.memory.people_dossier.tick_interval_s);
+    .tick_interval_s(ctx.memory.people_dossier.tick_interval_s)
+    .self_system(ctx.dossier_self_system.clone())
+    .other_system(ctx.dossier_other_system.clone());
     if let Some(display) = &ctx.familiar_display_name {
         worker = worker.familiar_display_name(display.clone());
     }
@@ -357,7 +373,8 @@ fn reflection_factory(ctx: &ProjectorContext) -> Result<Box<dyn MemoryProjector>
     .max_reflections_per_tick(knobs.max_reflections_per_tick)
     .max_turns_per_tick(knobs.max_turns_per_tick)
     .recent_facts_limit(knobs.recent_facts_limit)
-    .tick_interval_s(knobs.tick_interval_s);
+    .tick_interval_s(knobs.tick_interval_s)
+    .persona(ctx.reflection_system.clone());
     let name = worker.name();
     Ok(worker_projector(name, move |token| async move {
         worker.run(token).await;

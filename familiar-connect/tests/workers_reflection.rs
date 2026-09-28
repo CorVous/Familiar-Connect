@@ -13,7 +13,7 @@ use familiar_connect::history::store::{AppendFact, AppendTurn, Reflection};
 use familiar_connect::llm::LlmClient;
 use familiar_connect::processors::reflection_worker::ReflectionWorker;
 
-use helpers::{ScriptedLlm, store, user_text};
+use helpers::{ScriptedLlm, default_config, store, system_text, user_text};
 
 fn seed_turns(store: &AsyncHistoryStore, count: i64) -> Vec<i64> {
     let mut out = Vec::new();
@@ -219,4 +219,50 @@ async fn caps_turn_window_per_tick() {
     assert!(!prompt.contains(&format!("id={} ", turn_ids[0])));
     assert!(prompt.contains(&format!("id={} ", turn_ids[turn_ids.len() - 50])));
     assert!(!prompt.contains(&format!("id={} ", turn_ids[turn_ids.len() - 51])));
+}
+
+// ---------------------------------------------------------------------------
+// Persona is config, the reply contract is code (#151)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn shipped_default_supplies_the_reflection_persona() {
+    let store = store();
+    seed_turns(&store, 20);
+    let llm = ScriptedLlm::new(["[]"], "[]");
+    worker(&store, &llm)
+        .persona(default_config().reflection_system)
+        .tick()
+        .await
+        .unwrap();
+    let system = system_text(&llm.calls()[0]);
+    assert!(
+        system.starts_with(
+            "You write short, high-level reflections over recent chat history — \
+             patterns, recurring tensions, open questions, themes the participants \
+             keep circling back to. Skip blow-by-blow recaps; that's what summaries \
+             are for. Each reflection is one or two sentences."
+        ),
+        "{system}"
+    );
+}
+
+#[tokio::test]
+async fn overridden_persona_keeps_the_code_owned_reply_contract() {
+    let store = store();
+    seed_turns(&store, 20);
+    let llm = ScriptedLlm::new(["[]"], "[]");
+    worker(&store, &llm)
+        .persona("REFLECT_PERSONA_MARKER")
+        .tick()
+        .await
+        .unwrap();
+    let system = system_text(&llm.calls()[0]);
+    assert!(system.starts_with("REFLECT_PERSONA_MARKER"), "{system}");
+    // The JSON schema / citation rules are code, not config.
+    assert!(system.contains("cited_turn_ids"), "{system}");
+    assert!(
+        system.contains("Cite at least one turn id or fact id per reflection."),
+        "{system}"
+    );
 }

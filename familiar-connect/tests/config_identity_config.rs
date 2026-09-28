@@ -461,6 +461,124 @@ fn image_description_constraints_must_be_string() {
     );
 }
 
+// --- relocated prompt text (#151) ------------------------------------------
+
+#[test]
+fn operating_modes_default_from_profile() {
+    let cfg = load_ok("");
+    assert_eq!(
+        cfg.operating_mode_voice,
+        "You are speaking aloud. Keep replies short (one or two sentences). \
+         Avoid markdown."
+    );
+    assert_eq!(
+        cfg.operating_mode_text,
+        "You are chatting in a text channel. Markdown and multi-line replies \
+         are fine."
+    );
+}
+
+#[test]
+fn operating_modes_override() {
+    let cfg = load_ok(
+        "[prompt]\noperating_mode_voice = \"whisper\"\noperating_mode_text = \"scribble\"\n",
+    );
+    assert_eq!(cfg.operating_mode_voice, "whisper");
+    assert_eq!(cfg.operating_mode_text, "scribble");
+}
+
+#[test]
+fn voice_tool_ack_default_from_profile() {
+    let cfg = load_ok("");
+    assert_eq!(
+        cfg.voice_tool_ack,
+        "Always speak at least a brief acknowledgement before calling a tool. \
+         Never reply with a tool call alone."
+    );
+}
+
+#[test]
+fn voice_tool_ack_override() {
+    let cfg = load_ok("[prompt]\nvoice_tool_ack = \"say something first\"\n");
+    assert_eq!(cfg.voice_tool_ack, "say something first");
+}
+
+#[test]
+fn start_activity_description_default_from_profile() {
+    let cfg = load_ok("");
+    // Same budget + policy contract the tool schema used to pin in code.
+    assert!(cfg.start_activity_description.chars().count() <= 450);
+    let lower = cfg.start_activity_description.to_lowercase();
+    assert!(lower.contains("quiet"));
+    assert!(lower.contains("goodbye"));
+    assert!(lower.contains("miss"));
+    assert!(
+        cfg.start_activity_description
+            .contains("in-character goodbye")
+    );
+}
+
+#[test]
+fn start_activity_description_override() {
+    let cfg = load_ok("[prompt]\nstart_activity_description = \"go outside\"\n");
+    assert_eq!(cfg.start_activity_description, "go outside");
+}
+
+#[test]
+fn worker_prompts_default_from_profile() {
+    let cfg = load_ok("");
+    assert!(
+        cfg.rolling_summary_system
+            .contains("retrieval-friendly summaries")
+    );
+    assert!(cfg.reflection_system.contains("high-level reflections"));
+    assert!(cfg.dossier_self_system.contains("{self_name}"));
+    assert!(cfg.dossier_self_system.contains("self-record"));
+    assert!(cfg.dossier_other_system.contains("{display_name}"));
+    assert!(cfg.dossier_other_system.contains("Drop transient feelings"));
+}
+
+#[test]
+fn worker_prompts_override() {
+    let cfg = load_ok(
+        "[prompt]\nrolling_summary_system = \"sum it\"\nreflection_system = \"reflect\"\n\
+         dossier_self_system = \"me: {self_name}\"\ndossier_other_system = \"them: {display_name}\"\n",
+    );
+    assert_eq!(cfg.rolling_summary_system, "sum it");
+    assert_eq!(cfg.reflection_system, "reflect");
+    assert_eq!(cfg.dossier_self_system, "me: {self_name}");
+    assert_eq!(cfg.dossier_other_system, "them: {display_name}");
+}
+
+#[test]
+fn relocated_prompt_must_be_string() {
+    assert_err(
+        load("[prompt]\noperating_mode_voice = 42\n"),
+        "operating_mode_voice",
+    );
+    assert_err(
+        load("[prompt]\nrolling_summary_system = true\n"),
+        "rolling_summary_system",
+    );
+}
+
+#[test]
+fn relocated_prompts_absent_default_empty() {
+    // No `_default` entry, no in-code copy — an empty defaults profile leaves
+    // every relocated field blank rather than resurrecting a hardcoded string.
+    let defaults =
+        "[llm.fast]\nmodel = \"x\"\n[llm.prose]\nmodel = \"x\"\n[llm.background]\nmodel = \"x\"\n";
+    let cfg = load_custom(None, defaults).unwrap();
+    assert!(cfg.operating_mode_voice.is_empty());
+    assert!(cfg.operating_mode_text.is_empty());
+    assert!(cfg.voice_tool_ack.is_empty());
+    assert!(cfg.start_activity_description.is_empty());
+    assert!(cfg.rolling_summary_system.is_empty());
+    assert!(cfg.reflection_system.is_empty());
+    assert!(cfg.dossier_self_system.is_empty());
+    assert!(cfg.dossier_other_system.is_empty());
+}
+
 #[test]
 fn sleep_prompts_default_from_profile() {
     let cfg = load_ok("");

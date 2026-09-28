@@ -62,9 +62,17 @@ const DEFAULT_PROJECTORS: [&str; 5] = [
     "reflection",
     "fact_supersede",
 ];
-const PROMPT_FIELDS: [&str; 6] = [
+const PROMPT_FIELDS: [&str; 14] = [
     "post_history_instructions",
     "image_description_constraints",
+    "operating_mode_voice",
+    "operating_mode_text",
+    "voice_tool_ack",
+    "start_activity_description",
+    "rolling_summary_system",
+    "reflection_system",
+    "dossier_self_system",
+    "dossier_other_system",
     "sleep_consolidation_system",
     "sleep_stance_system",
     "sleep_synthesis_system",
@@ -686,6 +694,23 @@ pub struct CharacterConfig {
     pub post_history_instructions: String,
     /// Appended to the neutral image-description base prompt.
     pub image_description_constraints: String,
+    /// Per-mode operating directive, voice tier. One source for the
+    /// `operating_mode` layer and the final reminder.
+    pub operating_mode_voice: String,
+    /// Per-mode operating directive, text tier.
+    pub operating_mode_text: String,
+    /// Voice-tier nudge to speak before calling a tool.
+    pub voice_tool_ack: String,
+    /// Roleplay guidance carried by `start_activity`'s tool description.
+    pub start_activity_description: String,
+    /// Static rolling-summary instruction text.
+    pub rolling_summary_system: String,
+    /// Static reflection persona (the reply contract stays in code).
+    pub reflection_system: String,
+    /// Static self-dossier instruction text (`{self_name}`).
+    pub dossier_self_system: String,
+    /// Static other-person dossier instruction text (`{display_name}`).
+    pub dossier_other_system: String,
     /// Static sleep-consolidation instruction text.
     pub sleep_consolidation_system: String,
     /// Static sleep-stance instruction text.
@@ -732,6 +757,14 @@ impl Default for CharacterConfig {
             dm_allowlist: Vec::new(),
             post_history_instructions: String::new(),
             image_description_constraints: String::new(),
+            operating_mode_voice: String::new(),
+            operating_mode_text: String::new(),
+            voice_tool_ack: String::new(),
+            start_activity_description: String::new(),
+            rolling_summary_system: String::new(),
+            reflection_system: String::new(),
+            dossier_self_system: String::new(),
+            dossier_other_system: String::new(),
             sleep_consolidation_system: String::new(),
             sleep_stance_system: String::new(),
             sleep_synthesis_system: String::new(),
@@ -1038,6 +1071,14 @@ fn parse_character_config(
         dm_allowlist,
         post_history_instructions: prompt.post_history_instructions,
         image_description_constraints: prompt.image_description_constraints,
+        operating_mode_voice: prompt.operating_mode_voice,
+        operating_mode_text: prompt.operating_mode_text,
+        voice_tool_ack: prompt.voice_tool_ack,
+        start_activity_description: prompt.start_activity_description,
+        rolling_summary_system: prompt.rolling_summary_system,
+        reflection_system: prompt.reflection_system,
+        dossier_self_system: prompt.dossier_self_system,
+        dossier_other_system: prompt.dossier_other_system,
         sleep_consolidation_system: prompt.sleep_consolidation_system,
         sleep_stance_system: prompt.sleep_stance_system,
         sleep_synthesis_system: prompt.sleep_synthesis_system,
@@ -2390,6 +2431,14 @@ fn parse_discord_text_config(raw: &Table) -> Result<DiscordTextConfig, ConfigErr
 struct PromptFields {
     post_history_instructions: String,
     image_description_constraints: String,
+    operating_mode_voice: String,
+    operating_mode_text: String,
+    voice_tool_ack: String,
+    start_activity_description: String,
+    rolling_summary_system: String,
+    reflection_system: String,
+    dossier_self_system: String,
+    dossier_other_system: String,
     sleep_consolidation_system: String,
     sleep_stance_system: String,
     sleep_synthesis_system: String,
@@ -2411,6 +2460,14 @@ fn parse_prompt_config(raw: &Table) -> Result<PromptFields, ConfigError> {
     Ok(PromptFields {
         post_history_instructions: get("post_history_instructions")?,
         image_description_constraints: get("image_description_constraints")?,
+        operating_mode_voice: get("operating_mode_voice")?,
+        operating_mode_text: get("operating_mode_text")?,
+        voice_tool_ack: get("voice_tool_ack")?,
+        start_activity_description: get("start_activity_description")?,
+        rolling_summary_system: get("rolling_summary_system")?,
+        reflection_system: get("reflection_system")?,
+        dossier_self_system: get("dossier_self_system")?,
+        dossier_other_system: get("dossier_other_system")?,
         sleep_consolidation_system: get("sleep_consolidation_system")?,
         sleep_stance_system: get("sleep_stance_system")?,
         sleep_synthesis_system: get("sleep_synthesis_system")?,
