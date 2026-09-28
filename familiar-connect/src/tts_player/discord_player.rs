@@ -6,8 +6,8 @@
 //! * **Streaming** — when the client exposes [`TtsClient::as_streaming`], chunks
 //!   feed into a [`StreamingPcmSource`] as they arrive so playback starts within
 //!   ~one TTFB.
-//! * **Buffered** — fallback for buffered-only clients (Gemini): synthesize the
-//!   whole utterance, then play.
+//! * **Buffered** — fallback for buffered-only clients: synthesize the whole
+//!   utterance, then play.
 //!
 //! Both paths poll `is_playing()` every [`POLL`] so [`TurnScope::is_cancelled`]
 //! cuts playback within ~20 ms when a new turn arrives. A single [`tokio::sync::Mutex`]
@@ -314,7 +314,7 @@ fn info_cut(turn: &str) {
 
 /// Build the streaming source, forwarding the client's duck-typed jitter hints
 /// (pre-roll + underrun padding) into the [`StreamingPcmSource`] knobs. Bursty
-/// providers (Azure) opt into a cushion; steady-cadence ones (Cartesia) keep the
+/// providers opt into a cushion; steady-cadence ones (Cartesia) keep the
 /// defaults. Extracted so the forwarding is guarded by
 /// observing the built source's read behavior (its jitter fields are private).
 fn build_streaming_source(streaming: &dyn StreamingTtsClient) -> Arc<StreamingPcmSource> {

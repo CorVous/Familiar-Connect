@@ -109,11 +109,12 @@ project. Review their policies yourself.
 | **OpenRouter** (`openrouter.ai`) | The assembled prompt: recent conversation across channels, summaries, dossiers, facts, reflections, your Discord display name, a `discord_<user id>` identifier, and any images. OpenRouter then routes it to whichever model provider the operator picked, so it reaches that provider too. | Every reply, plus every background memory pass (fact extraction, dossiers, summaries, reflections, sleep). |
 | **Deepgram** (`api.deepgram.com`) | Raw voice audio, streamed live per speaker. The connection URL also carries the display names, usernames, and nicknames of everyone in the voice channel, as recognition hints. | Whenever the bot is in a voice channel. |
 | **Cartesia** (`api.cartesia.ai`) | The text the bot is about to speak. No user names or ids — though the bot's reply can of course quote you. | Whenever the bot speaks. |
-| **Arbitrary image hosts** | An HTTP request from the operator's machine, exposing its IP address to that host. | When the model uses `view_image` on an attachment or a URL somebody pasted. Fetched images are then sent to OpenRouter. |
+| **Image hosts on the allowlist** (Discord's CDNs plus a short list of image CDNs — `[tools].trusted_image_hosts`) | An HTTP request from the operator's machine, exposing its IP address to that host. | When the model uses `view_image` on an attachment, an embed, or a pasted URL. Hosts outside the allowlist are refused without any request being made, unless the operator sets `[tools].allow_untrusted_image_urls = true`, which permits any public host. Fetched images are then sent to OpenRouter. |
 
-Azure Speech and Google Gemini are selectable as text-to-speech providers
-in configuration, but their backends are not wired up in the shipped
-build and currently send nothing.
+Cartesia is the only text-to-speech provider. Azure Speech and Google
+Gemini were previously selectable in configuration but never had working
+backends; they have been removed, and no audio or text has ever been sent
+to either.
 
 Embeddings are computed on the operator's own machine — there is no
 remote embedding provider. Optional local models (the ONNX turn detector,

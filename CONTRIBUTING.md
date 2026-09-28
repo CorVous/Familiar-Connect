@@ -12,7 +12,7 @@ system.
   `rust-toolchain.toml`). Rust is the only toolchain needed to build,
   test, and run the workspace.
 - Integration surfaces are **feature-gated**: `discord`, `discord-voice`,
-  `stt-deepgram`, `local-turn`, `local-embed`, `twitch`, `azure-tts`,
+  `stt-deepgram`, `local-turn`, `local-embed`, `twitch`,
   `audio-resample`. Defaults (`store`, `net`, `images`) cover everything
   unit tests need. Feature-gated code must keep default-feature gates green.
 

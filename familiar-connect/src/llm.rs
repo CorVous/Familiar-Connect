@@ -1486,7 +1486,7 @@ mod client {
         if slot.image_tools {
             parts.push(ls::kv_styled("image_tools", "on", ls::W, ls::LM));
         }
-        if slot.multimodal {
+        if slot.resolve_multimodal(None) {
             parts.push(ls::kv_styled("multimodal", "on", ls::W, ls::LM));
         }
         tracing::info!(target: "familiar_connect.llm", "{}", parts.join(" "));
@@ -1494,10 +1494,13 @@ mod client {
 
     /// One [`OpenRouterClient`] per call-site slot in `LLM_SLOT_NAMES`.
     ///
-    /// Plus a reserved `"__image_description__"` client when
-    /// `image_description_model` is set. All clients share ONE injected
-    /// rate-limit semaphore sized from `[llm].max_concurrent_requests`.
-    /// A missing slot is an `Err`.
+    /// Plus the two reserved image clients when their models are set:
+    /// `"__image_description__"` (substitution) and `"__image_caption__"`
+    /// (persistence). All clients share ONE injected rate-limit semaphore sized
+    /// from `[llm].max_concurrent_requests`. A missing slot is an `Err`.
+    ///
+    /// `multimodal` is read at its resolved value — auto-detection has already
+    /// filled unset slots by the time the composition root calls this.
     pub fn create_llm_clients(
         api_key: &str,
         config: &CharacterConfig,
@@ -1523,26 +1526,40 @@ mod client {
                 .reasoning(slot.reasoning.clone())
                 .tool_calling(slot.tool_calling)
                 .image_tools(slot.image_tools)
-                .multimodal(slot.multimodal)
+                .multimodal(slot.resolve_multimodal(None))
                 .think_prepend(slot.think_prepend)
                 .semaphore(semaphore.clone())
                 .build();
             log_slot_config(slot_name, slot);
             clients.insert(slot_name.to_string(), client);
         }
-        if !config.image_description_model.is_empty() {
-            let client = OpenRouterClient::builder(api_key, &config.image_description_model)
-                .slot("image_description")
-                .semaphore(semaphore)
+        for (key, slot_label, model) in [
+            (
+                "__image_description__",
+                "image_description",
+                &config.image_description_model,
+            ),
+            (
+                "__image_caption__",
+                "image_caption",
+                &config.image_caption_model,
+            ),
+        ] {
+            if model.is_empty() {
+                continue;
+            }
+            let client = OpenRouterClient::builder(api_key, model)
+                .slot(slot_label)
+                .semaphore(semaphore.clone())
                 .build();
             let line = format!(
                 "{} {} {}",
                 ls::tag("Config", ls::W),
-                ls::kv("slot", "image_description"),
-                ls::kv("model", &config.image_description_model),
+                ls::kv("slot", slot_label),
+                ls::kv("model", model),
             );
             tracing::info!(target: "familiar_connect.llm", "{line}");
-            clients.insert("__image_description__".to_string(), client);
+            clients.insert(key.to_string(), client);
         }
         Ok(clients)
     }
@@ -2943,7 +2960,7 @@ mod client {
                 LLMSlotConfig {
                     model: "x/y".into(),
                     image_tools: true,
-                    multimodal: true,
+                    multimodal: Some(true),
                     ..Default::default()
                 },
             );

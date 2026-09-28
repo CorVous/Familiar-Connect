@@ -11,8 +11,6 @@ by the admin, never exposed through Discord.
 - `DISCORD_BOT` — Discord bot token
 - `OPENROUTER_API_KEY` — shared across every LLM call site
 - `CARTESIA_API_KEY` — Cartesia TTS (required when `[tts].provider="cartesia"`, the default)
-- `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` — Azure Speech (placeholders; the Azure backend is not wired)
-- `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) — Gemini TTS (placeholder; the Gemini backend is not wired)
 - `DEEPGRAM_API_KEY` — Deepgram STT credential. Every other Deepgram knob lives in `[providers.stt.deepgram]`. Full list: [Tuning — STT — Deepgram](tuning.md#stt-deepgram).
 - `FAMILIAR_ID` — picks the character folder (under the familiars root) this process runs.
 - `FAMILIARS_ROOT` — overrides the per-user familiars root (default: platform data dir). `FAMILIAR_DEFAULTS_ROOT` overrides where the tracked `_default` skeleton resolves (default: `data/familiars`). See [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
@@ -84,10 +82,26 @@ Surface today:
   `[providers.memory.rich_note].self_capability_pattern must be a valid
   regex, got '<pattern>'` rather than blowing up mid-run. See
   [Context pipeline — No self-capability statements](context-pipeline.md#no-self-capability-statements).
-- `[llm].image_description_model` — model name for vision-based image
-  descriptions (e.g. `"openai/gpt-4o"`). Shared across all slots; empty
-  string (default) disables the description step. When set, `create_llm_clients`
-  builds a reserved `"__image_description__"` client.
+- `[llm].image_description_model` — the **substitution** model: it
+  describes an image for a calling slot that cannot see it (e.g.
+  `"openai/gpt-4o"`). Shared across all slots; empty string (default)
+  disables it. When set, `create_llm_clients` builds a reserved
+  `"__image_description__"` client.
+- `[llm].image_caption_model` — the **persistence** model: the durable
+  caption written to history, and therefore the only trace of an image
+  that ever reaches fact extraction, summaries, and dossiers. Used
+  whenever the calling slot *can* see the image, since the image itself
+  never survives into the turn store. Pick something cheap. Empty
+  (default) falls back to `image_description_model`. When set,
+  `create_llm_clients` builds a reserved `"__image_caption__"` client.
+
+  The two keys name one call, never two. `view_image` runs exactly one
+  describe leg per image and picks the model by role: a text-only slot
+  runs the substitution model (whose output doubles as the caption,
+  because the tool result *is* the description); a vision-capable slot
+  runs the caption model and skips substitution entirely. Either key
+  stands in for a missing other. See
+  [Image viewing](overview.md#image-viewing).
 - `[llm].max_concurrent_requests` — process-wide cap on in-flight
   LLM requests across every slot (default `4`).
 - `[llm.fast]` / `[llm.prose]` / `[llm.background]` — tiered LLM slots
@@ -100,18 +114,55 @@ Surface today:
   `cancel_alarm`, and optionally `view_image`) and runs the agentic loop.
   `image_tools` (default `false`) independently gates `view_image`
   registration — the loop runs when either flag is set. `multimodal`
-  (default `false`) controls whether `ImageResult` tool-result messages
-  include JPEG content blocks (`true`) or text description only (`false`).
+  controls whether `ImageResult` tool-result messages include JPEG
+  content blocks (`true`) or the text description only (`false`).
   See [Tool calling](overview.md#tool-calling) and
   [Image viewing](overview.md#image-viewing). Both flags are cross-checked
   against the model at startup — see
   [Startup model diagnostics](#startup-model-diagnostics).
-- `[tts]` — provider (`cartesia` (default) / `azure` / `gemini`) + provider-specific voice / model fields. Only `cartesia` has a wired backend; the other two are accepted by config validation and refused at startup.
+
+#### `multimodal` is tri-state
+
+`multimodal` has three states, not two:
+
+| Value | Meaning |
+|---|---|
+| omitted | **Auto-detect** from the OpenRouter catalog: on when the model's `architecture.input_modalities` include `image`, off otherwise. Off when no catalog is available. |
+| `true` | Explicit override — always on, whatever the catalog says. |
+| `false` | Explicit override — always off, whatever the catalog says. |
+
+Explicit always beats detected, in both directions. An operator who
+writes `multimodal = false` against a vision model has made a deliberate
+cost choice and detection must never quietly reverse it; that is why the
+field is `Option<bool>` in `LLMSlotConfig` rather than a `bool` where an
+explicit `false` would be indistinguishable from silence. A profile that
+already sets the key keeps working unchanged.
+
+`image_tools` is deliberately **not** tri-state. It is an intent knob,
+not a capability fact: `view_image` works on a text-only model too — the
+substitution description stands in for the image — and an operator may
+not want image fetches at all on a vision-capable one. Neither direction
+is inferable from the catalog, so it stays an explicit opt-in defaulting
+to `false`.
+
+`[llm.<slot>]` does not run the unknown-key check, so adding
+`multimodal` (or omitting it) never fails load.
+- `[tts]` — provider (`cartesia`, the default and only implemented backend) + its voice / model fields.
 - `[focus]` — attentional unread-nudge controls (`unread_nudge_enabled`,
   `nudge_debounce_seconds`). See
   [Tuning — Attentional focus](tuning.md#attentional-focus).
 - `[tools]` — agentic loop bounds (`loop_max_iterations`, default
   `5`), shared by voice and text responders.
+- `[tools].trusted_image_hosts` — hosts `view_image` may fetch.
+  Default-deny: exact hostnames, or a `*.suffix` pattern matching any
+  subdomain of `suffix`. Ships with Discord's CDNs plus a short list of
+  image-only CDNs. Entries must be bare hostnames — a scheme, path, or
+  port is rejected at load.
+- `[tools].allow_untrusted_image_urls` — default `false`. `true` drops
+  the host list. Private, loopback, link-local, and other reserved
+  addresses stay refused either way, as do non-http(s) schemes; that
+  rule has no config escape. See
+  [Security — outbound image fetches](security.md#outbound-image-fetches-view_image).
 - `[prompt].post_history_instructions` — free-text block appended to
   the *trailing* reminder, the system message that sits after recent
   history (right before the model's next turn). The deepest,
@@ -171,13 +222,11 @@ meaningful selection.
 | Provider | Status | Env vars | Character fields |
 |---|---|---|---|
 | `cartesia` (default) | wired | `CARTESIA_API_KEY` | `cartesia_voice_id`, `cartesia_model` |
-| `azure` | **not wired** | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | `azure_voice` |
-| `gemini` | **not wired** | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | `gemini_voice`, `gemini_model` (+ optional style / scene / pace / accent / context / audio-profile) |
 
-`azure` and `gemini` remain valid config values — they are placeholders for
-backends that have not landed. Selecting one is refused at startup with an
-`ERROR` naming the fix, and the process continues without TTS rather than
-failing on the first synthesis mid-conversation.
+`cartesia` is the only accepted value. The `azure` and `gemini` stubs were
+removed; a profile still naming one fails config validation with a message
+saying the provider is no longer supported. The `TtsClient` /
+`StreamingTtsClient` seam remains the extension point for further backends.
 
 ### Startup model diagnostics
 
@@ -200,13 +249,45 @@ compares each slot's declared flags against the model's metadata:
 |---|---|---|
 | `tool_calling = true` | `supported_parameters` lacks `tools` | `ERROR` |
 | `tool_calling = false` | `supported_parameters` has `tools` | `INFO` (advisory) |
-| `multimodal` / `image_tools` `= true` | `architecture.input_modalities` lacks `image` | `ERROR` |
-| both `false` | `input_modalities` has `image` | `INFO` (advisory) |
+| `multimodal = true` (explicit) | `architecture.input_modalities` lacks `image` | `ERROR` |
+| `image_tools = true` | `input_modalities` lacks `image` | `ERROR` |
+| `image_tools = false` | `input_modalities` has `image` | `INFO` (advisory) |
+
+An omitted `multimodal` is never flagged in either direction — auto-detection
+already answers it, so there is no operator claim to contradict.
 
 Every line names the slot, the model, and the remediation. An unknown model id,
 an unreachable catalog, or an unparseable response produces one line and then
 silence — the audit is advisory and never blocks, delays, or fails startup.
 Variant suffixes (`:free`, `:nitro`, …) fall back to the base model id.
+
+#### The catalog cache
+
+Auto-detection needs the catalog at *composition* time — before the LLM clients
+exist — while boot must stay offline. The two are reconciled by a disk cache
+holding the last known good `GET /models` response:
+
+- **Read** — synchronously at boot, before `create_llm_clients`. A local file
+  read; there is no URL in the signature. Whatever it returns fills the unset
+  `multimodal` flags for this process.
+- **Refresh** — on the same detached task as the capability audit, after the
+  bus starts. It fetches, rewrites the cache, and audits. What it writes takes
+  effect on the **next** start; nothing in this process waits on it. A cache
+  still inside its TTL skips the fetch entirely and audits from disk.
+
+| | |
+|---|---|
+| Location | The platform per-user **cache** directory: `~/.cache/familiar-connect/openrouter-models.json` on Linux (honours `XDG_CACHE_HOME`), the OS-correct analog elsewhere. Falls back to a CWD-relative `data/cache/` when no home directory resolves. |
+| Why there | The file is entirely regenerable from the network. It is not state, so it must not sit under the [familiars root](../getting-started/on-disk-layout.md#where-the-familiars-root-lives) beside `history.db` — clearing caches has to stay safe, and a backup of the state tree should not carry a stale model catalog. Same `ProjectDirs` qualifier the familiars root uses. |
+| Staleness | 24 hours. OpenRouter adds models and corrects metadata on the order of days, and the worst a stale entry can do is one wrong auto-detection that an explicit `multimodal` always beats. A day also keeps a restart loop off the `/models` endpoint. |
+| Age vs. use | Age gates the **refresh**, never the **read**. A month-old cache is still used at boot — last known good beats nothing. |
+
+Failure is never fatal. A missing cache, an unreadable one, a truncated one, or
+one holding something that is not a `CachedCatalog` all read as *absent*: every
+slot keeps its configured value, which is the behaviour that predates the cache.
+A first-ever run with no cache and no network therefore behaves exactly as
+before. The next successful refresh overwrites a corrupt file; a failed refresh
+leaves the previous good one intact.
 
 ### Subscriptions
 

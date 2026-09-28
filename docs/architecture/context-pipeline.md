@@ -143,6 +143,15 @@ assistant-side replay teaches the model to open fresh replies with the
 mimicking its own apparent past output — the same mimicry trap the
 `[#id]` message-id tag avoids by being dropped from assistant turns.
 
+**Consequence for images.** The fold is unconditional, so a `view_image`
+result replays as text no matter what the slot's `multimodal` flag says:
+the picture itself is seen exactly once, on the turn it was fetched, and
+never again. Every downstream memory consumer — the fact extractor,
+rolling summaries, people dossiers, RAG — reads that folded text and
+nothing else. That is why `view_image` still writes a caption for a
+model that can see the image perfectly well; see
+[Image viewing](overview.md#image-viewing).
+
 ## Watermark-driven workers
 
 ### `SummaryWorker`
