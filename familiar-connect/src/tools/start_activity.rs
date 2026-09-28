@@ -86,7 +86,7 @@ fn start_activity_handler(
 ) -> ToolOutput {
     if engine.is_active() {
         // Calling start_activity while already out signals stay-out intent —
-        // the silent sentinel keeps meta narration off the channel.
+        // the silence result keeps meta narration off the channel.
         tracing::info!(
             "{} {}",
             ls::tag("\u{1f6b6} start_activity", ls::G),

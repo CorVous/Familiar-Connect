@@ -262,3 +262,142 @@ async fn narration_renders_at_most_six_events() {
     assert_eq!(narrated, 6, "got {rendered:?}");
     assert!(rendered.contains("u9 just joined."), "newest must survive");
 }
+
+// ---------------------------------------------------------------------------
+// Keyterm vocabulary: own names + bots + members (#198 follow-up)
+//
+// Keyterms are a *vocabulary* question ("what proper nouns get spoken"), not a
+// roster question ("who is in the call"). A live 263-transcript session missed
+// the familiar's own name twice (`Tim` for `Tam`) because the roster filter —
+// correct for the prompt line — also starved the keyterm list.
+// ---------------------------------------------------------------------------
+
+/// Roster carrying the familiar's own configured names.
+fn roster_named(own: &[&str]) -> Arc<VoiceRoster> {
+    Arc::new(VoiceRoster::new().with_own_names(own.iter().map(|s| (*s).to_owned())))
+}
+
+#[test]
+fn own_names_lead_the_keyterms() {
+    let roster = roster_named(&["Tam", "Test Familiar"]);
+    roster.member_joined(1, author("1", "Kulvar"));
+    let terms = roster.keyterms();
+    assert_eq!(
+        terms.iter().take(2).cloned().collect::<Vec<_>>(),
+        vec!["Tam".to_owned(), "Test Familiar".to_owned()],
+        "own names must survive the cap ahead of the roster"
+    );
+    assert!(terms.contains(&"Kulvar".to_owned()));
+}
+
+#[test]
+fn own_names_are_biased_with_nobody_in_the_call() {
+    let roster = roster_named(&["Tam"]);
+    assert_eq!(roster.keyterms(), vec!["Tam".to_owned()]);
+    // Vocabulary is not membership: an empty call still renders nothing.
+    assert!(roster.view().members.is_empty());
+}
+
+#[tokio::test]
+async fn a_bot_biases_keyterms_but_never_the_roster_line() {
+    let roster = roster_named(&["Tam"]);
+    roster.member_joined(1, author("1", "Kulvar"));
+    // A sibling familiar sharing the guild — said constantly, seated by nobody.
+    roster.bot_joined(2, author("2", "Sapphire"));
+
+    let terms = roster.keyterms();
+    assert!(terms.contains(&"Sapphire".to_owned()), "got {terms:?}");
+    // The human contributes to both halves.
+    assert!(terms.contains(&"Kulvar".to_owned()));
+    assert_eq!(roster.view().members, vec!["Kulvar".to_owned()]);
+
+    let rendered = VoiceRosterLayer::new(roster).build(&vctx(1)).await;
+    assert_eq!(rendered, "In the call: Kulvar.\nKulvar just joined.");
+}
+
+#[test]
+fn a_bot_narrates_nothing_and_does_not_churn_the_cache_key() {
+    let roster = roster_named(&[]);
+    let before = roster.view().revision;
+    roster.bot_joined(2, author("2", "Sapphire"));
+    let after = roster.view();
+    assert!(after.events.is_empty(), "a bot arrival is not narration");
+    assert_eq!(
+        after.revision, before,
+        "the rendered line cannot change, so the prompt cache must not drop"
+    );
+}
+
+#[test]
+fn snapshot_bots_replaces_wholesale_and_ignores_call_order() {
+    let roster = roster_named(&[]);
+    roster.snapshot_bots([(2, author("2", "Sapphire"))]);
+    // A re-join must not inherit the last call's bots.
+    roster.snapshot_bots([(3, author("3", "Cobalt"))]);
+    roster.snapshot([(1, author("1", "Kulvar"))]);
+    let terms = roster.keyterms();
+    assert!(!terms.contains(&"Sapphire".to_owned()), "got {terms:?}");
+    assert!(terms.contains(&"Cobalt".to_owned()));
+    assert!(terms.contains(&"Kulvar".to_owned()));
+}
+
+#[test]
+fn a_departing_bot_leaves_the_keyterms() {
+    let roster = roster_named(&[]);
+    roster.bot_joined(2, author("2", "Sapphire"));
+    // The gateway routes every departure through `member_left`, bot or not.
+    roster.member_left(2);
+    assert!(roster.keyterms().is_empty());
+}
+
+#[test]
+fn clear_drops_the_bots_too() {
+    let roster = roster_named(&[]);
+    roster.bot_joined(2, author("2", "Sapphire"));
+    roster.member_joined(1, author("1", "Kulvar"));
+    roster.clear();
+    assert!(
+        roster.keyterms().is_empty(),
+        "a stale bot would bias next call"
+    );
+}
+
+// The whole chain: config jargon still wins the cap, the roster's raw output
+// (own names, member names, bot names, duplicates and all) merges behind it,
+// and normalization collapses the duplicates.
+#[test]
+fn roster_keyterms_merge_behind_config_keyterms() {
+    use familiar_connect::stt::Transcriber;
+    use familiar_connect::stt::deepgram::DeepgramTranscriber;
+
+    let roster = roster_named(&["Tam", "Test Familiar"]);
+    roster.member_joined(1, author("1", "Kulvar"));
+    roster.bot_joined(2, author("2", "Sapphire"));
+    // Overlaps the config list and the member's own username — both must fold.
+    roster.member_joined(3, author("3", "Tam"));
+
+    let mut t = DeepgramTranscriber::new("test-key");
+    t.keyterms = vec!["lifecycle mesh".to_owned(), "Tam".to_owned()];
+    t.set_keyterms(roster.keyterms());
+
+    assert_eq!(
+        t.keyterms.iter().take(2).cloned().collect::<Vec<_>>(),
+        vec!["lifecycle mesh".to_owned(), "Tam".to_owned()],
+        "config keyterms come first so jargon survives the cap"
+    );
+    // Case-insensitive dedupe: one `Tam`, config spelling wins.
+    assert_eq!(
+        t.keyterms
+            .iter()
+            .filter(|k| k.eq_ignore_ascii_case("tam"))
+            .count(),
+        1
+    );
+    for expected in ["Test Familiar", "Kulvar", "Sapphire"] {
+        assert!(
+            t.keyterms.iter().any(|k| k == expected),
+            "{expected} missing from {:?}",
+            t.keyterms
+        );
+    }
+}

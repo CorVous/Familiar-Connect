@@ -282,10 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn silent_sentinel_never_emits() {
+    fn unpunctuated_tag_only_emits_on_flush() {
         let mut s = SentenceStreamer::new();
-        assert!(s.feed("<silent>").is_empty());
-        assert_eq!(s.flush(), "<silent>");
+        assert!(s.feed("<tag>").is_empty());
+        assert_eq!(s.flush(), "<tag>");
     }
 
     #[test]

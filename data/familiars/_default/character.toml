@@ -47,6 +47,22 @@ text_window_size  = 200
 # (they carry platform_message_id and never coalesce).
 coalesce_max_gap_seconds = 45.0
 
+# LLM call mirror. Every LLM request/response — the assembled system
+# prompt, the message array sent, the reply, tool calls and their
+# results, plus timings and token counts — is written to the
+# `llm_calls` table in history.db so a prompt can be inspected after
+# the fact. This is the retention cap: the newest N rows per familiar
+# are kept and older ones pruned on write. 0 switches mirroring off
+# entirely (nothing is captured and nothing is stored).
+#
+# Sizing: an assembled prompt runs ~15 KB and each row stores it twice
+# (the greppable `system_prompt` column plus the verbatim message
+# array), so budget ~30 KB per row — about 30 MB at the default, or
+# ~20 sessions of 50 calls. Raise it for longer-run analytics; the
+# rows contain every participant's messages in full, so see
+# docs/legal/privacy-policy.md before you do.
+llm_mirror_calls = 1000
+
 # --- Prompt assembly budget ------------------------------------------------
 #
 # Per-tier token caps for the prompt assembler. Each cap is a hard
@@ -363,6 +379,11 @@ greetings         = []
 # voice_tool_ack: voice-tier nudge to speak before calling a tool. Rendered
 # only when the voice slot actually has tools; blank omits it.
 #
+# shift_focus_coaching: the clause spliced onto the unread digest after an em
+# dash ("There are new messages in #x (id N) (3) — <this>"). ONE line, no
+# leading dash. Rendered only when the text slot has tools; blank leaves the
+# digest a plain statement of fact.
+#
 # start_activity_description: the when-to-go policy carried by the
 # `start_activity` tool description. Roleplay guidance, not API contract — the
 # activity enum and its availability hints stay code-built from the catalog.
@@ -390,9 +411,11 @@ greetings         = []
 post_history_instructions = """
 # Etiquette
 
-When roleplaying, do not speak much, use <silent> generously. Don't \
-interject too frequently, either. It's fine to send a message when the \
-character really wants to, of course, but prefer <silent> otherwise.
+When roleplaying, do not speak much. Silence is the default: every tool \
+call stays quiet unless you pass `silent: false`, and `silent()` is how you \
+say nothing at all. Don't interject too frequently. It's fine to send a \
+message when the character really wants to, of course, but prefer staying \
+quiet otherwise.
 """
 image_description_constraints = ""
 operating_mode_voice = """
@@ -403,16 +426,21 @@ operating_mode_text = """
 You are chatting in a text channel. Markdown and multi-line replies are fine.
 """
 voice_tool_ack = """
-Always speak at least a brief acknowledgement before calling a tool. Never \
-reply with a tool call alone.
+When you call a tool and still mean to be heard, pass `silent: false` and \
+speak at least a brief acknowledgement in the same reply. A tool call on its \
+own is silent — nothing is spoken.
+"""
+shift_focus_coaching = """
+use shift_focus if one pulls your attention: it moves you there quietly, or \
+pass silent: false to arrive and speak.
 """
 start_activity_description = """
 Head out and do something away from the screen for a while. Use when the \
 current scene has wrapped up or the channel has gone quiet. You'll be away \
 and may miss messages while out. You leave when this reply sends: with \
 people around, say your in-character goodbye in this same message; from a \
-quiet channel, call silent() too and slip away unannounced. Don't start one \
-in the middle of a conversation you have a stake in.
+quiet channel, leave the call silent and slip away unannounced. Don't start \
+one in the middle of a conversation you have a stake in.
 """
 rolling_summary_system = """
 You produce concise, retrieval-friendly summaries of a familiar's attended \
@@ -524,7 +552,11 @@ person's key.
 #   never reasons regardless. OpenRouter maps to its `reasoning`
 #   parameter (effort levels, or `exclude=true` for "off").
 #
-# tool_calling: bool — enables alarm/cancel tools + agentic loop.
+# tool_calling: bool — enables the tool registry + agentic loop.
+#   Defaults true and `false` is refused at load: every tool call is
+#   silent unless it passes `silent: false`, and the `silent` tool is
+#   how the familiar declines to reply at all, so a slot without tool
+#   calling could never stay quiet.
 # image_tools: bool — enables view_image in text registry (never voice).
 #   Deliberately manual: view_image works on a text-only model too (the
 #   description stands in for the image), so nothing about the model
@@ -570,7 +602,7 @@ max_concurrent_requests = 4
 model        = "anthropic/claude-haiku-4.5"
 temperature  = 0.7
 reasoning    = "off"
-tool_calling = false
+tool_calling = true
 # image_tools = false  # view_image excluded from voice; keep false here
 # multimodal = false   # omit to auto-detect; pin false to save image tokens
 
@@ -579,7 +611,7 @@ model          = "z-ai/glm-5.2"
 temperature    = 0.7
 provider_order = ["z-ai"]            # first-party — best caching for GLM
 reasoning      = "medium"
-tool_calling   = false
+tool_calling   = true
 # image_tools = false  # set true + configure an image model to enable
 # multimodal = false   # omit: auto-detected from the model's metadata
 

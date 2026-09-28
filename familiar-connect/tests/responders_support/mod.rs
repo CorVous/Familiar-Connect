@@ -251,6 +251,21 @@ pub fn tc_delta(call_id: &str, name: &str, args: Value) -> LlmDelta {
     }
 }
 
+/// A tool-call delta at an explicit accumulator index, so one iteration can
+/// carry several calls.
+pub fn tc_delta_at(index: i64, call_id: &str, name: &str, args: Value) -> LlmDelta {
+    LlmDelta {
+        content: String::new(),
+        tool_calls: vec![json!({
+            "index": index,
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": args.to_string()},
+        })],
+        finish_reason: None,
+    }
+}
+
 /// A terminal finish-reason delta.
 pub fn finish(reason: &str) -> LlmDelta {
     LlmDelta {

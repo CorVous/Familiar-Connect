@@ -11,8 +11,8 @@
 //! * `hash` → [`HashEmbedder`](crate::embedding::hash::HashEmbedder).
 //! * `fastembed` → fails with the `local-embed` install hint. The real ONNX
 //!   backend is Layer 2 (feature `local-embed`, `embedding::fastembed`); the
-//!   wiring injects it via `register("fastembed", …)` when the extra is present,
-//!   exactly the "re-registration overwrites" seam. Absent the extra a
+//!   wiring injects it via `register("fastembed", …)` when the feature is present,
+//!   exactly the "re-registration overwrites" seam. Absent the feature a
 //!   deploy that selects `fastembed` refuses to start rather than crashing
 //!   mid-turn.
 
@@ -25,7 +25,7 @@ use crate::embedding::hash::HashEmbedder;
 use crate::embedding::protocol::Embedder;
 
 /// A backend factory: turns config into an optional shared embedder, or an
-/// error (unavailable extra / bad dimensionality).
+/// error (unavailable feature / bad dimensionality).
 ///
 /// `Ok(None)` is the `off` outcome — the seam is disabled. The `Arc` lets one
 /// instance be shared across assemblers and the projector context.
@@ -139,7 +139,7 @@ fn fastembed_factory(
     Err(EmbeddingError::FastembedMissing)
 }
 
-/// `fastembed` backend when the `local-embed` extra is compiled: constructs the
+/// `fastembed` backend when the `local-embed` feature is compiled: constructs the
 /// real ONNX [`FastEmbedEmbedder`], overriding [`fastembed_factory`]'s stub via
 /// re-registration in [`EmbedderRegistry::with_builtins`]. An empty configured
 /// model falls back to the default (BGE-small).
@@ -186,7 +186,7 @@ pub fn create_embedder(
 mod tests {
     use super::{EmbedderRegistry, create_embedder, known_embedders};
     use crate::config::EmbeddingConfig;
-    // Only the no-extra load-failure test names the error type.
+    // Only the no-feature load-failure test names the error type.
     #[cfg(not(feature = "local-embed"))]
     use crate::embedding::EmbeddingError;
 
@@ -232,8 +232,8 @@ mod tests {
 
     #[cfg(feature = "local-embed")]
     #[test]
-    fn fastembed_with_extra_resolves_to_the_real_backend() {
-        // With the extra compiled, `with_builtins` overrides the stub with the
+    fn fastembed_with_feature_resolves_to_the_real_backend() {
+        // With the feature compiled, `with_builtins` overrides the stub with the
         // real ONNX backend, so `fastembed` resolves to a live embedder (lazy
         // model load — construction here does not download).
         let out = create_embedder(&config("fastembed", 384))
@@ -244,10 +244,10 @@ mod tests {
 
     #[cfg(not(feature = "local-embed"))]
     #[test]
-    fn fastembed_without_extra_fails_at_load() {
+    fn fastembed_without_feature_fails_at_load() {
         let err = create_embedder(&config("fastembed", 256))
             .err()
-            .expect("fastembed without the extra errors");
+            .expect("fastembed without the feature errors");
         assert!(matches!(err, EmbeddingError::FastembedMissing));
         assert!(err.to_string().contains("local-embed"));
     }

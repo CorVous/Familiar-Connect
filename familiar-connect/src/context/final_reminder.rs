@@ -2,7 +2,7 @@
 //! 05).
 //!
 //! Restates the current time (so the model doesn't drift on long-lived caches)
-//! and enumerates text-channel sentinels, the per-mode operating directive, an
+//! and enumerates text-channel input markers, the per-mode operating directive, an
 //! optional voice tool nudge, a focus + unread digest block, and any
 //! post-history etiquette. Responders render it twice per turn (head copy with
 //! `include_time=false`; tail copy with the clock, mode instruction, post-history
@@ -11,9 +11,10 @@
 //! Tool-referencing prose is gated on `tools_enabled`: a slot with tool calling
 //! off is never told to call `shift_focus` (#221).
 //!
-//! Every configurable string (mode directives, voice tool nudge, post-history
-//! block) arrives from `[prompt]` — this module keeps no in-code copy, so the
-//! reminder and `OperatingModeLayer` cannot drift (#151).
+//! Every configurable string (mode directives, voice tool nudge, unread
+//! `shift_focus` clause, post-history block) arrives from `[prompt]` — this
+//! module keeps no in-code copy, so the reminder and `OperatingModeLayer`
+//! cannot drift (#151).
 //!
 //! The block grammar is a byte-exact prompt-format contract.
 
@@ -66,19 +67,22 @@ fn fmt_when(now: DateTime<Utc>, display_tz: &str) -> String {
 /// Focus-line label. An unnamed channel says so — `#<snowflake>` would tell the
 /// model the channel is *named* after its id (#222) — and keeps the id, which
 /// `shift_focus` needs.
-fn channel_label(names: &HashMap<i64, String>, cid: i64) -> String {
+fn channel_label<S: std::hash::BuildHasher>(names: &HashMap<i64, String, S>, cid: i64) -> String {
     names.get(&cid).map_or_else(
         || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
         |name| format!("#{name}"),
     )
 }
 
-/// Unread-list item label: named channels **must** carry the numeric id so the
+/// Unread-list item label: every entry **must** carry the numeric id so the
 /// model can pass a valid `channel_id` to `shift_focus`.
 ///
 /// A channel whose `guilds` entry is [`PRIVATE_MESSAGE_GUILD_NAME`] is a DM and
-/// renders as `DM from <name> (id <cid>)` (or `DM (id <cid>)` unnamed); the id
-/// is preserved either way because `shift_focus` still needs it.
+/// renders as `DM from <name> (id <cid>)` (or `DM (id <cid>)` unnamed). A guild
+/// channel the name cache missed says so, as on the focus line — the digest ids
+/// come from staged turns, the names from the gateway, so an id with no name is
+/// routine and `#<snowflake>` would claim the channel is *named* after its id
+/// (#222).
 fn channel_label_with_id(
     names: &HashMap<i64, String>,
     guilds: &HashMap<i64, String>,
@@ -91,7 +95,48 @@ fn channel_label_with_id(
             |name| format!("DM from {name} (id {cid})"),
         );
     }
-    name.map_or_else(|| format!("#{cid}"), |name| format!("#{name} (id {cid})"))
+    name.map_or_else(
+        || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
+        |name| format!("#{name} (id {cid})"),
+    )
+}
+
+/// The wake turn's user-role notice — the wake event itself, stated as an
+/// observation.
+///
+/// A wake stages no user message, so replayed history ends on the familiar's
+/// own reply. A trailing assistant turn alongside a `tools` array reads as
+/// prefix-completion mode on some providers (DeepSeek 400s
+/// "Function call should not be used with prefix"), so the wake turn names what
+/// she noticed and the array ends on a user turn again.
+///
+/// Channel labels carry no id: the digest in the reminder just above already
+/// lists them with ids for `shift_focus`.
+#[must_use]
+pub fn wake_notice<S: std::hash::BuildHasher>(
+    digest: &[(i64, (i64, i64))],
+    channel_names: &HashMap<i64, String, S>,
+) -> String {
+    let active: Vec<(i64, i64)> = digest
+        .iter()
+        .filter(|(_, (unread, _))| *unread > 0)
+        .map(|(cid, (unread, _))| (*cid, *unread))
+        .collect();
+    if active.is_empty() {
+        return "(You notice unread messages waiting elsewhere.)".to_owned();
+    }
+    let total: i64 = active.iter().map(|(_, unread)| *unread).sum();
+    let noun = if total == 1 {
+        "a new message"
+    } else {
+        "new messages"
+    };
+    let list = active
+        .iter()
+        .map(|(cid, _)| channel_label(channel_names, *cid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("(You notice {noun} in {list}.)")
 }
 
 /// The closing "final reminder" block builder.
@@ -108,6 +153,7 @@ pub struct FinalReminder {
     mode_instructions: HashMap<String, String>,
     tools_enabled: bool,
     voice_tool_ack: String,
+    shift_focus_coaching: String,
     post_history_instructions: Option<String>,
     focus_channel_id: Option<i64>,
     unread_digest: Vec<(i64, (i64, i64))>,
@@ -130,6 +176,7 @@ impl FinalReminder {
             mode_instructions: HashMap::new(),
             tools_enabled: false,
             voice_tool_ack: String::new(),
+            shift_focus_coaching: String::new(),
             post_history_instructions: None,
             focus_channel_id: None,
             unread_digest: Vec::new(),
@@ -176,6 +223,15 @@ impl FinalReminder {
     #[must_use]
     pub fn voice_tool_ack(mut self, text: impl Into<String>) -> Self {
         self.voice_tool_ack = text.into();
+        self
+    }
+    /// Set the unread-digest `shift_focus` clause
+    /// (`[prompt].shift_focus_coaching`); blank leaves the digest a plain
+    /// statement of fact. One line — it is spliced into the digest sentence
+    /// after an em dash.
+    #[must_use]
+    pub fn shift_focus_coaching(mut self, text: impl Into<String>) -> Self {
+        self.shift_focus_coaching = text.into();
         self
     }
     /// Whether the slot can actually call tools. Gates the voice tool nudge
@@ -305,12 +361,11 @@ impl FinalReminder {
                 };
                 // Coach `shift_focus` only where it can actually be called —
                 // a tool-less slot told to use it just leaks the literal
-                // call syntax into the channel (#221).
-                if self.tools_enabled {
-                    format!(
-                        "There {verb} {noun} in {ch_list} \
-                         \u{2014} use shift_focus if it pulls your attention."
-                    )
+                // call syntax into the channel (#221). Blank coaching leaves
+                // the digest a plain statement of fact.
+                let coaching = self.shift_focus_coaching.trim();
+                if self.tools_enabled && !coaching.is_empty() {
+                    format!("There {verb} {noun} in {ch_list} \u{2014} {coaching}")
                 } else {
                     format!("There {verb} {noun} in {ch_list}.")
                 }
@@ -341,7 +396,7 @@ impl FinalReminder {
 
 #[cfg(test)]
 mod tests {
-    use super::FinalReminder;
+    use super::{FinalReminder, wake_notice};
     use crate::focus::PRIVATE_MESSAGE_GUILD_NAME;
     use chrono::{TimeZone, Utc};
     use std::collections::HashMap;
@@ -375,6 +430,56 @@ mod tests {
         .collect()
     }
 
+    // -----------------------------------------------------------------------
+    // Wake notice (the wake turn's user-role message)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wake_notice_names_the_unread_channels() {
+        let out = wake_notice(
+            &[(10, (3, 0)), (20, (1, 0))],
+            &names(&[(10, "general"), (20, "art")]),
+        );
+        assert_eq!(out, "(You notice new messages in #general, #art.)");
+    }
+
+    #[test]
+    fn wake_notice_singular_for_one_message() {
+        let out = wake_notice(&[(10, (1, 0))], &names(&[(10, "general")]));
+        assert_eq!(out, "(You notice a new message in #general.)");
+    }
+
+    /// No digest (no focus manager) still yields a sensible user turn.
+    #[test]
+    fn wake_notice_without_digest_is_generic() {
+        assert_eq!(
+            wake_notice(&[], &HashMap::new()),
+            "(You notice unread messages waiting elsewhere.)"
+        );
+    }
+
+    /// Zero-unread entries are not news — same generic line.
+    #[test]
+    fn wake_notice_skips_zero_unread_channels() {
+        assert_eq!(
+            wake_notice(&[(10, (0, 0))], &names(&[(10, "general")])),
+            "(You notice unread messages waiting elsewhere.)"
+        );
+        assert_eq!(
+            wake_notice(&[(10, (0, 0)), (20, (2, 0))], &names(&[(20, "art")])),
+            "(You notice new messages in #art.)"
+        );
+    }
+
+    /// Unnamed channel says so rather than claiming a `#<snowflake>` name (#222).
+    #[test]
+    fn wake_notice_labels_unnamed_channels() {
+        assert_eq!(
+            wake_notice(&[(123, (2, 0))], &HashMap::new()),
+            "(You notice new messages in unnamed channel (id 123).)"
+        );
+    }
+
     #[test]
     fn text_mode_lists_ping_and_reply_sentinels() {
         let out = FinalReminder::new("text")
@@ -383,14 +488,6 @@ mod tests {
         assert!(out.contains("It is now: 2026-05-04 2:30PM UTC"));
         assert!(out.contains("[@DisplayName]"));
         assert!(out.contains("[\u{21a9} <message_id>]"));
-    }
-
-    #[test]
-    fn text_mode_no_silent_sentinel() {
-        let out = FinalReminder::new("text")
-            .now(at(2026, 5, 4, 14, 30))
-            .render();
-        assert!(!out.contains("`<silent>`"));
     }
 
     #[test]
@@ -814,23 +911,28 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (3, 0)), (20, (1, 0))])
             .render();
         assert!(out.contains("new message"));
-        assert!(out.contains("#10"));
-        assert!(out.contains("#20"));
+        assert!(out.contains("(id 10)"));
+        assert!(out.contains("(id 20)"));
         assert!(out.contains("shift_focus"));
     }
 
     #[test]
     fn unread_digest_omits_shift_focus_coaching_without_tools() {
-        // #221: a tool-less slot cannot call `shift_focus`; coaching it to only
-        // invites a leaked literal call.
+        // #221: a tool-less slot cannot call `shift_focus`; coaching it only
+        // invites a leaked literal call. Configured coaching stays gated.
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (3, 0))])
             .render();
-        assert!(out.contains("There are new messages in #10 (3)."), "{out}");
+        assert!(
+            out.contains("There are new messages in unnamed channel (id 10) (3)."),
+            "{out}"
+        );
         assert!(!out.contains("shift_focus"), "{out}");
     }
 
@@ -839,12 +941,53 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (3, 0))])
             .render();
         assert!(
-            out.contains("#10 (3) \u{2014} use shift_focus if it pulls your attention."),
+            out.contains(
+                "unnamed channel (id 10) (3) \u{2014} use shift_focus if one pulls your \
+                 attention: it moves you there quietly, or pass silent: false to arrive \
+                 and speak."
+            ),
             "{out}"
         );
+    }
+
+    /// Stand-in for the `[prompt].shift_focus_coaching` the wiring supplies.
+    fn coaching() -> &'static str {
+        "use shift_focus if one pulls your attention: it moves you there \
+         quietly, or pass silent: false to arrive and speak."
+    }
+
+    #[test]
+    fn blank_shift_focus_coaching_leaves_a_plain_digest() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .shift_focus_coaching("   ")
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(
+            out.contains("There are new messages in unnamed channel (id 10) (3)."),
+            "{out}"
+        );
+        assert!(!out.contains("shift_focus"), "{out}");
+    }
+
+    // A digest entry the name cache missed used to render `#<snowflake>`,
+    // telling the model the channel is *named* after its id (#222).
+    #[test]
+    fn unnamed_unread_channel_announces_the_missing_name() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(1_502_465_463_144_415_372, (53, 0))])
+            .render();
+        assert!(
+            out.contains("unnamed channel (id 1502465463144415372) (53)"),
+            "{out}"
+        );
+        assert!(!out.contains("#1502465463144415372"), "{out}");
     }
 
     #[test]
@@ -863,9 +1006,9 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (5, 0)), (20, (0, 0)), (30, (2, 0))])
             .render();
-        assert!(out.contains("#10"));
-        assert!(out.contains("#30"));
-        assert!(!out.contains("#20"));
+        assert!(out.contains("(id 10)"));
+        assert!(out.contains("(id 30)"));
+        assert!(!out.contains("(id 20)"));
     }
 
     #[test]
@@ -887,7 +1030,7 @@ mod tests {
             .unread_digest(vec![(10, (4, 0))])
             .render();
         assert!(out.contains("attention is currently on #general"));
-        assert!(out.contains("#10 (4)"));
+        assert!(out.contains("unnamed channel (id 10) (4)"));
     }
 
     #[test]
@@ -895,9 +1038,10 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (3, 1))])
             .render();
-        assert!(out.contains("#10 (3, 1 ping)"));
+        assert!(out.contains("(id 10) (3, 1 ping)"));
         assert!(out.contains("shift_focus"));
     }
 
@@ -907,7 +1051,7 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (1, 1))])
             .render();
-        assert!(out.contains("#10 (1 ping)"));
+        assert!(out.contains("(id 10) (1 ping)"));
     }
 
     #[test]
@@ -916,7 +1060,7 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (3, 2))])
             .render();
-        assert!(out.contains("#10 (3, 2 pings)"));
+        assert!(out.contains("(id 10) (3, 2 pings)"));
     }
 
     #[test]
@@ -925,7 +1069,7 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (2, 0))])
             .render();
-        assert!(out.contains("#10 (2)"));
+        assert!(out.contains("(id 10) (2)"));
     }
 
     #[test]
@@ -933,10 +1077,11 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (1, 0))])
             .render();
-        assert!(out.contains("#10 \u{2014}"));
-        assert!(!out.contains("#10 ("));
+        assert!(out.contains("unnamed channel (id 10) \u{2014}"));
+        assert!(!out.contains("(id 10) ("));
     }
 
     #[test]
@@ -944,6 +1089,7 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(422_137_955_130_408_970, (2, 0))])
             .channel_names(names(&[(422_137_955_130_408_970, "the-annex")]))
             .render();
@@ -1028,13 +1174,13 @@ mod tests {
             .render();
         assert!(named.contains("#general (id 20)"));
         assert!(!named.contains("DM from"));
-        // A DM channel with no guild_names map falls through to the old
-        // no-name #{cid} rendering.
+        // A DM channel with no guild_names map falls through to the plain
+        // unnamed-channel rendering.
         let fallback = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(123, (1, 0))])
             .render();
-        assert!(fallback.contains("#123"));
+        assert!(fallback.contains("unnamed channel (id 123)"));
         assert!(!fallback.contains("DM"));
     }
 }

@@ -65,12 +65,13 @@ const DEFAULT_PROJECTORS: [&str; 5] = [
     "reflection",
     "fact_supersede",
 ];
-const PROMPT_FIELDS: [&str; 14] = [
+const PROMPT_FIELDS: [&str; 15] = [
     "post_history_instructions",
     "image_description_constraints",
     "operating_mode_voice",
     "operating_mode_text",
     "voice_tool_ack",
+    "shift_focus_coaching",
     "start_activity_description",
     "rolling_summary_system",
     "reflection_system",
@@ -131,7 +132,9 @@ pub struct LLMSlotConfig {
     pub provider_allow_fallbacks: bool,
     /// OpenRouter reasoning effort; `None` = model default (`"default"` → None).
     pub reasoning: Option<String>,
-    /// Surface-only tool-calling flag.
+    /// Surface-only tool-calling flag. Defaults `true` and `false` is refused
+    /// at load: silence is a tool call, so a tool-less slot cannot decline to
+    /// reply.
     pub tool_calling: bool,
     /// Gate for `view_image` registration.
     ///
@@ -171,7 +174,7 @@ impl Default for LLMSlotConfig {
             provider_order: None,
             provider_allow_fallbacks: true,
             reasoning: None,
-            tool_calling: false,
+            tool_calling: true,
             image_tools: false,
             multimodal: None,
         }
@@ -684,6 +687,8 @@ pub struct CharacterConfig {
     pub recent_history_coalesce_max_gap_seconds: f64,
     /// Fold text turns before a silence gap this large into summary; 0 disables.
     pub text_silence_gap_fold_seconds: f64,
+    /// Rows the `llm_calls` mirror keeps per familiar; 0 disables mirroring.
+    pub llm_mirror_calls: i64,
     /// IANA timezone name (validated at load, stored as the string).
     pub display_tz: String,
     /// Sleep window `(start, end)` (may wrap midnight); `None` disarmed.
@@ -721,6 +726,8 @@ pub struct CharacterConfig {
     pub operating_mode_text: String,
     /// Voice-tier nudge to speak before calling a tool.
     pub voice_tool_ack: String,
+    /// `shift_focus` clause spliced onto the unread digest.
+    pub shift_focus_coaching: String,
     /// Roleplay guidance carried by `start_activity`'s tool description.
     pub start_activity_description: String,
     /// Static rolling-summary instruction text.
@@ -769,6 +776,7 @@ impl Default for CharacterConfig {
             text_window_size: 200,
             recent_history_coalesce_max_gap_seconds: 45.0,
             text_silence_gap_fold_seconds: 0.0,
+            llm_mirror_calls: DEFAULT_LLM_MIRROR_CALLS,
             display_tz: "UTC".to_owned(),
             sleep_window: None,
             sleep_grace_minutes: 30,
@@ -787,6 +795,7 @@ impl Default for CharacterConfig {
             operating_mode_voice: String::new(),
             operating_mode_text: String::new(),
             voice_tool_ack: String::new(),
+            shift_focus_coaching: String::new(),
             start_activity_description: String::new(),
             rolling_summary_system: String::new(),
             reflection_system: String::new(),
@@ -808,6 +817,15 @@ impl Default for CharacterConfig {
         }
     }
 }
+
+/// Default `llm_calls` retention: rows kept per familiar.
+///
+/// An assembled prompt runs ~15 KB and the mirror stores it twice (the
+/// `system_prompt` projection plus the verbatim message array), so a row costs
+/// ~30 KB — roughly 30 MB at this cap, or ~20 sessions of 50 calls. Enough to
+/// answer "what did the prompt contain on turn X" days later without the table
+/// outgrowing the history it annotates.
+pub const DEFAULT_LLM_MIRROR_CALLS: i64 = 1000;
 
 /// Tier → LLM slot mapping (matches the responder wiring).
 fn tier_to_slot(tier: &str) -> Option<&'static str> {
@@ -956,6 +974,7 @@ fn parse_character_config(
     let (voice_window_size, text_window_size) = parse_history_windows(history_section)?;
     let recent_history_coalesce_max_gap_seconds = parse_coalesce_gap(history_section)?;
     let text_silence_gap_fold_seconds = parse_text_silence(history_section)?;
+    let llm_mirror_calls = parse_llm_mirror_calls(history_section)?;
 
     let display_tz = data
         .get("display_tz")
@@ -1095,6 +1114,7 @@ fn parse_character_config(
         text_window_size,
         recent_history_coalesce_max_gap_seconds,
         text_silence_gap_fold_seconds,
+        llm_mirror_calls,
         display_tz,
         sleep_window,
         sleep_grace_minutes,
@@ -1113,6 +1133,7 @@ fn parse_character_config(
         operating_mode_voice: prompt.operating_mode_voice,
         operating_mode_text: prompt.operating_mode_text,
         voice_tool_ack: prompt.voice_tool_ack,
+        shift_focus_coaching: prompt.shift_focus_coaching,
         start_activity_description: prompt.start_activity_description,
         rolling_summary_system: prompt.rolling_summary_system,
         reflection_system: prompt.reflection_system,
@@ -1443,6 +1464,24 @@ fn parse_history_windows(raw: &Table) -> Result<(i64, i64), ConfigError> {
     Ok((voice, text))
 }
 
+/// `[providers.history].llm_mirror_calls` — rows the `llm_calls` mirror keeps.
+///
+/// `0` switches mirroring off; anything negative is a mistake, not a synonym for
+/// unbounded (an unbounded mirror is not offered).
+fn parse_llm_mirror_calls(raw: &Table) -> Result<i64, ConfigError> {
+    match raw.get("llm_mirror_calls") {
+        None => Ok(DEFAULT_LLM_MIRROR_CALLS),
+        Some(Value::Integer(n)) if *n >= 0 => Ok(*n),
+        Some(Value::Integer(n)) => Err(ConfigError(format!(
+            "[providers.history].llm_mirror_calls must be >= 0, got {n}"
+        ))),
+        Some(other) => Err(ConfigError(format!(
+            "[providers.history].llm_mirror_calls must be a non-negative integer, got {}",
+            value_type_name(other)
+        ))),
+    }
+}
+
 fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
     match raw.get("coalesce_max_gap_seconds") {
         None => Ok(45.0),
@@ -1632,7 +1671,27 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
                 )));
             }
         };
-        let tool_calling = field_bool(section, &prefix, "tool_calling", false)?;
+        let tool_calling = field_bool(section, &prefix, "tool_calling", true)?;
+        if !tool_calling {
+            return Err(ConfigError(format!(
+                "[llm.{name}].tool_calling = false is unsupported: silence and \
+                 every other decision the familiar declines to speak for are \
+                 tool calls, so a slot without tool calling can never stay \
+                 quiet — remove the key (it defaults to true) or set \
+                 [llm.{name}].tool_calling = true"
+            )));
+        }
+        // Deliberate prefix mode, and tools are no longer optional — the pair
+        // 400s ("Function call should not be used with prefix").
+        if think_prepend {
+            return Err(ConfigError(format!(
+                "[llm.{name}].think_prepend = true is unsupported: it appends a \
+                 trailing assistant message, which providers read as prefix \
+                 completion, and prefix completion cannot be combined with the \
+                 tools array every slot now sends — remove the key (it defaults \
+                 to false) or set [llm.{name}].think_prepend = false"
+            )));
+        }
         let image_tools = field_bool(section, &prefix, "image_tools", false)?;
         let multimodal = field_bool_opt(section, &prefix, "multimodal")?;
         slots.insert(
@@ -2460,6 +2519,7 @@ struct PromptFields {
     operating_mode_voice: String,
     operating_mode_text: String,
     voice_tool_ack: String,
+    shift_focus_coaching: String,
     start_activity_description: String,
     rolling_summary_system: String,
     reflection_system: String,
@@ -2489,6 +2549,7 @@ fn parse_prompt_config(raw: &Table) -> Result<PromptFields, ConfigError> {
         operating_mode_voice: get("operating_mode_voice")?,
         operating_mode_text: get("operating_mode_text")?,
         voice_tool_ack: get("voice_tool_ack")?,
+        shift_focus_coaching: get("shift_focus_coaching")?,
         start_activity_description: get("start_activity_description")?,
         rolling_summary_system: get("rolling_summary_system")?,
         reflection_system: get("reflection_system")?,

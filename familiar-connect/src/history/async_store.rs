@@ -27,9 +27,10 @@ use chrono::{DateTime, Utc};
 
 use super::StoreError;
 use super::store::{
-    AccountProfile, ActivityRecord, AlarmRow, AppendFact, AppendTurn, ChannelUnread, Fact,
-    FocusPointers, HistoryStore, HistoryTurn, NewFact, OtherChannelInfo, PeopleDossierEntry,
-    Promotion, Reflection, SleepWatermark, SummaryEntry, SupersedeResult, WatermarkEntry,
+    AccountProfile, ActivityRecord, AlarmRow, AppendFact, AppendLlmCall, AppendTurn, ChannelUnread,
+    Fact, FocusPointers, HistoryStore, HistoryTurn, LlmCallRow, NewFact, OtherChannelInfo,
+    PeopleDossierEntry, Promotion, Reflection, SleepWatermark, SummaryEntry, SupersedeResult,
+    WatermarkEntry,
 };
 use crate::identity::Author;
 
@@ -939,6 +940,43 @@ impl AsyncHistoryStore {
     ) -> Result<Option<ActivityRecord>, StoreError> {
         self.run(move |s| s.latest_activity(&familiar_id, &type_id))
             .await
+    }
+
+    // -- LLM call mirror -------------------------------------------------
+
+    /// See [`HistoryStore::append_llm_call`].
+    pub async fn append_llm_call(
+        &self,
+        p: AppendLlmCall,
+        max_rows: i64,
+    ) -> Result<i64, StoreError> {
+        self.run(move |s| s.append_llm_call(p, max_rows)).await
+    }
+
+    /// See [`HistoryStore::llm_calls_for_turn`].
+    pub async fn llm_calls_for_turn(
+        &self,
+        familiar_id: String,
+        turn_id: i64,
+    ) -> Result<Vec<LlmCallRow>, StoreError> {
+        self.run(move |s| s.llm_calls_for_turn(&familiar_id, turn_id))
+            .await
+    }
+
+    /// See [`HistoryStore::recent_llm_calls`].
+    pub async fn recent_llm_calls(
+        &self,
+        familiar_id: String,
+        slot: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<LlmCallRow>, StoreError> {
+        self.run(move |s| s.recent_llm_calls(&familiar_id, slot.as_deref(), limit))
+            .await
+    }
+
+    /// See [`HistoryStore::count_llm_calls`].
+    pub async fn count_llm_calls(&self, familiar_id: String) -> Result<i64, StoreError> {
+        self.run(move |s| s.count_llm_calls(&familiar_id)).await
     }
 
     // -- FTS-backed reads ------------------------------------------------

@@ -294,16 +294,42 @@ async fn user_turn_persisted_before_llm_stream() {
 }
 
 // ---------------------------------------------------------------------------
-// Silent sentinel
+// Silence
 // ---------------------------------------------------------------------------
 
+/// The tool-less path's only route to silence: a `silent` call the model leaked
+/// as plain text. There is no text sentinel — tool-driven silence is covered in
+/// `responders_tools.rs`.
+const SILENT_LEAK: &str = "silent(reasoning=\"not addressed to me\")";
+
+/// `<silent>` used to gate the whole reply. It is ordinary prose now.
 #[tokio::test]
-async fn silent_sentinel_skips_send_and_assistant_turn() {
+async fn literal_silent_string_is_spoken_like_any_other_text() {
     let s = store();
     let send = Arc::new(CapturingSend::new());
     let (r, _) = responder(
         Arc::clone(&s),
         Arc::new(ScriptedLlm::new(&["<silent>"])),
+        send.clone(),
+    );
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(
+        send.calls(),
+        vec![(42, "<silent>".to_owned(), None, vec![])]
+    );
+    let turns = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert!(turns.iter().any(|t| t.role == "assistant"));
+}
+
+#[tokio::test]
+async fn leaked_silent_call_skips_send_and_assistant_turn() {
+    let s = store();
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         send.clone(),
     );
     r.handle(
@@ -325,10 +351,10 @@ async fn silent_sentinel_skips_send_and_assistant_turn() {
 /// Issue #220: the silent decision abandons the stream, but the transport must
 /// hear `silent`, not the default `cancelled` (barge-in).
 #[tokio::test]
-async fn silent_sentinel_notes_silent_abandon_status() {
+async fn leaked_silent_call_notes_silent_abandon_status() {
     let s = store();
     let send = Arc::new(CapturingSend::new());
-    let llm = Arc::new(ScriptedLlm::new(&["<silent>"]));
+    let llm = Arc::new(ScriptedLlm::new(&[SILENT_LEAK]));
     let (r, _) = responder(Arc::clone(&s), llm.clone(), send.clone());
     r.handle(
         &discord_text_event(text_payload(42, "hi nobody"), "e-1"),
@@ -340,11 +366,11 @@ async fn silent_sentinel_notes_silent_abandon_status() {
 }
 
 #[tokio::test]
-async fn silent_sentinel_with_leading_whitespace() {
+async fn leaked_silent_call_with_leading_whitespace() {
     let send = Arc::new(CapturingSend::new());
     let (r, _) = responder(
         store(),
-        Arc::new(ScriptedLlm::new(&["  ", "<silent>"])),
+        Arc::new(ScriptedLlm::new(&["  ", SILENT_LEAK])),
         send.clone(),
     );
     r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
@@ -390,12 +416,13 @@ async fn leaked_invoke_block_suppressed_on_bare_text_path() {
     assert!(send.calls().is_empty());
 }
 
+/// A leak token only gates when it *leads*; mid-prose it is content.
 #[tokio::test]
-async fn sentinel_mid_reply_is_not_a_gate() {
+async fn leak_token_mid_reply_is_not_a_gate() {
     let send = Arc::new(CapturingSend::new());
     let (r, _) = responder(
         store(),
-        Arc::new(ScriptedLlm::new(&["Sure! ", "<silent>", " — kidding."])),
+        Arc::new(ScriptedLlm::new(&["Sure! ", "silent(x)", " — kidding."])),
         send.clone(),
     );
     r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
@@ -403,7 +430,7 @@ async fn sentinel_mid_reply_is_not_a_gate() {
         .unwrap();
     assert_eq!(
         send.calls(),
-        vec![(42, "Sure! <silent> — kidding.".to_owned(), None, vec![])]
+        vec![(42, "Sure! silent(x) — kidding.".to_owned(), None, vec![])]
     );
 }
 
@@ -460,7 +487,7 @@ async fn typing_skipped_on_silent_reply() {
     let send = Arc::new(CapturingSend::new());
     let (r, _) = responder(
         store(),
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         send.clone(),
     );
     let r = r.with_trigger_typing(typing.clone());
@@ -990,7 +1017,7 @@ async fn trailing_renders_configured_timezone() {
 async fn trailing_carries_post_history_instructions_deepest() {
     let llm = Arc::new(CapturingLlm::new("ok"));
     let (r, _) = responder(store(), llm.clone(), Arc::new(CapturingSend::new()));
-    let r = r.with_post_history_instructions("# Etiquette\n\nPrefer <silent>.");
+    let r = r.with_post_history_instructions("# Etiquette\n\nKeep it brief.");
     r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
         .await
         .unwrap();
@@ -1195,7 +1222,7 @@ async fn silent_outcome_still_applies_deferred_start() {
     let send = Arc::new(CapturingSend::new());
     let (r, _) = responder(
         store(),
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         send.clone(),
     );
     let r = r.with_activity_engine(engine.clone());
@@ -1313,7 +1340,7 @@ async fn judgment_silent_means_stay_out() {
     let send = Arc::new(CapturingSend::new());
     let (r, _) = responder(
         store(),
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&[SILENT_LEAK])),
         send.clone(),
     );
     let r = r.with_activity_engine(engine.clone());

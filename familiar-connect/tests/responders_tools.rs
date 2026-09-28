@@ -62,7 +62,7 @@ async fn runs_agentic_loop_full_turn() {
             tc_delta(
                 "c1",
                 "set_alarm",
-                json!({"reason": "ping", "delay_seconds": 30}),
+                json!({"reason": "ping", "delay_seconds": 30, "silent": false}),
             ),
             finish("tool_calls"),
         ],
@@ -79,7 +79,7 @@ async fn runs_agentic_loop_full_turn() {
 
     assert_eq!(
         *seen.lock().unwrap(),
-        vec![json!({"reason": "ping", "delay_seconds": 30})]
+        vec![json!({"reason": "ping", "delay_seconds": 30, "silent": false})]
     );
     let calls = send.calls();
     assert_eq!(calls.len(), 1);
@@ -190,7 +190,11 @@ async fn image_tools_only_enters_loop() {
     let llm = Arc::new(
         ScriptedToolLlm::new(vec![
             vec![
-                tc_delta("c1", "view_image", json!({"image_id": "img_0"})),
+                tc_delta(
+                    "c1",
+                    "view_image",
+                    json!({"image_id": "img_0", "silent": false}),
+                ),
                 finish("tool_calls"),
             ],
             vec![text_delta("Looks like a cat."), finish("stop")],
@@ -207,6 +211,65 @@ async fn image_tools_only_enters_loop() {
     .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1);
     assert_eq!(send.calls()[0].1, "Looks like a cat.");
+}
+
+/// The inversion, end to end: a tool call with no `silent` argument suppresses
+/// the reply — nothing is sent, and no assistant prose turn is written.
+#[tokio::test]
+async fn tool_call_without_silent_argument_suppresses_the_reply() {
+    let s = store();
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut reg = ToolRegistry::new();
+    reg.register(args_recording_tool("set_alarm", Arc::clone(&seen)))
+        .unwrap();
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            tc_delta("c1", "set_alarm", json!({"reason": "ping"})),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("Alarm set."), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let r = responder_with_tools(Arc::clone(&s), llm, send.clone(), Arc::new(reg));
+    r.handle(
+        &discord_text_event(text_payload(42, "set an alarm"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1, "the tool still runs");
+    assert!(send.calls().is_empty());
+    // The call itself is still history; only the reply is suppressed.
+    let turns = s.sync().recent("fam", 42, 20, None, None).unwrap();
+    let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+    assert_eq!(roles, ["user", "assistant", "tool"]);
+}
+
+/// The `silent` tool alone: nothing runs, nothing is said, and neither the call
+/// nor its private reasoning reaches history.
+#[tokio::test]
+async fn silent_tool_alone_yields_a_silent_turn() {
+    let s = store();
+    let mut reg = ToolRegistry::new();
+    reg.register(familiar_connect::tools::silent::build_silent_tool())
+        .unwrap();
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        tc_delta("c1", "silent", json!({"reasoning": "not for me"})),
+        finish("tool_calls"),
+    ]]));
+    let send = Arc::new(CapturingSend::new());
+    let r = responder_with_tools(Arc::clone(&s), llm, send.clone(), Arc::new(reg));
+    r.handle(
+        &discord_text_event(text_payload(42, "chatter"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    assert!(send.calls().is_empty());
+    let turns = s.sync().recent("fam", 42, 20, None, None).unwrap();
+    let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+    assert_eq!(roles, ["user"]);
+    assert!(turns.iter().all(|t| !t.content.contains("not for me")));
 }
 
 #[tokio::test]

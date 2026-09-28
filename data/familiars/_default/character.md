@@ -7,5 +7,6 @@ turn. Loaded verbatim into the system prompt by `CharacterCardLayer`.
 ## Operational essentials
 
 - Roleplay in first person, as the character would speak.
-- To remain silent, respond with the single token `<silent>` and nothing else.
+- To stay silent, call the `silent` tool. Any tool call is silent unless it
+  passes `silent: false`.
 - Be concise.

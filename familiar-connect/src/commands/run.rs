@@ -57,7 +57,7 @@ pub struct RunArgs {
 /// in a repo checkout can no longer wipe live familiars — the reported foot-gun
 /// (issue #201). The legacy CWD-relative `data/familiars` survives only as the
 /// last-resort fallback when no home directory resolves.
-fn default_familiars_root() -> PathBuf {
+pub(crate) fn default_familiars_root() -> PathBuf {
     resolve_familiars_root(std::env::var("FAMILIARS_ROOT").ok(), home_familiars_root())
 }
 
@@ -148,7 +148,7 @@ pub fn resolve_familiar_root(
 ///
 /// The composition root calls this BEFORE opening the history store / FTS: a
 /// misconfigured embedding backend (e.g. `fastembed` without the `local-embed`
-/// extra) must refuse to start rather than wipe the FTS and then die deep in
+/// feature) must refuse to start rather than wipe the FTS and then die deep in
 /// `create_projectors` under a misleading Discord-token hint. The backend error
 /// (which already names the real fix) is propagated, never swallowed into
 /// `None`.
@@ -535,7 +535,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     // rebuilds the history store / FTS). A misconfigured backend must refuse to
     // start here, while nothing has been mutated — not fail deep in
     // `create_projectors` after the store is already open. Its error names the
-    // real fix (e.g. the `local-embed` extra), so surface it verbatim.
+    // real fix (e.g. the `local-embed` feature), so surface it verbatim.
     let embedder = match resolve_embedder(&config.embedding) {
         Ok(embedder) => embedder,
         Err(err) => {
@@ -560,6 +560,21 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             return 1;
         }
     };
+    // Point the process-wide LLM call mirror at this familiar's store. The
+    // composition root, not `load_from_disk`: a DI-bundle constructor should not
+    // reach out and mutate a process global (and the unit tests that build a
+    // bundle would fight each other over it). `llm_mirror_calls = 0` leaves no
+    // sink installed, and the transport then skips capturing prompts entirely.
+    if familiar.config.llm_mirror_calls > 0 {
+        crate::diagnostics::llm_mirror::set_llm_call_sink(Arc::new(
+            crate::history::llm_mirror::HistoryLlmMirror::new(
+                Arc::clone(&familiar.history_store),
+                familiar.id.clone(),
+                familiar.config.llm_mirror_calls,
+            ),
+        ));
+    }
+
     // `load_from_disk` re-parses the same TOML, so its copy needs the same
     // resolution (silently — the lines were already logged above).
     crate::model_diagnostics::cache::resolve_from_cache_quietly(
@@ -934,9 +949,18 @@ async fn async_main(
     let bot_user_id = Arc::new(Mutex::new(None::<i64>));
     // One roster, two readers: the gateway writes membership through the handle,
     // the voice assembler's roster layer renders it.
+    //
+    // Own names are keyterm vocabulary, not membership: the familiar's own name
+    // is the most-uttered proper noun in any call, and the roster filter
+    // deliberately never holds it (#198). `display_name()` leads (it *is*
+    // `aliases[0]` when set, so the duplicate folds in `set_keyterms`).
     let voice_roster = Arc::new(
         VoiceRoster::new()
-            .with_event_window_seconds(familiar.config.voice.roster_event_window_seconds),
+            .with_event_window_seconds(familiar.config.voice.roster_event_window_seconds)
+            .with_own_names(
+                std::iter::once(familiar.display_name())
+                    .chain(familiar.config.aliases.iter().cloned()),
+            ),
     );
     let (handle, client) = create_bot(CreateBotDeps {
         token: token.clone(),
@@ -1173,6 +1197,7 @@ async fn async_main(
     )
     .with_tools(text_tool_registry, text_factory)
     .with_post_history_instructions(familiar.config.post_history_instructions.clone())
+    .with_shift_focus_coaching(familiar.config.shift_focus_coaching.clone())
     .with_mode_instructions(operating_modes(&familiar.config))
     .with_display_tz(familiar.config.display_tz.clone())
     .with_focus_manager(focus_manager.clone() as Arc<dyn FocusManagerApi>)
@@ -1483,17 +1508,17 @@ mod tests {
     /// The composition root must surface the embedder feature-gap as an error
     /// (which names the `local-embed` fix), not swallow it into `None` and let
     /// startup proceed to mutate the store. The default test build lacks the
-    /// `local-embed` extra, so `fastembed` genuinely has no backend here.
+    /// `local-embed` feature, so `fastembed` genuinely has no backend here.
     #[cfg(not(feature = "local-embed"))]
     #[test]
-    fn resolve_embedder_fastembed_without_extra_errors() {
+    fn resolve_embedder_fastembed_without_feature_errors() {
         let config = EmbeddingConfig {
             backend: "fastembed".to_owned(),
             ..EmbeddingConfig::default()
         };
         let err = resolve_embedder(&config)
             .err()
-            .expect("fastembed without the local-embed extra must fail fast");
+            .expect("fastembed without the local-embed feature must fail fast");
         assert!(
             err.to_string().contains("local-embed"),
             "error must name the real fix, got: {err}"

@@ -6,11 +6,13 @@
 //! [`collector::SpanCollector`] ring +
 //! singleton, the [`voice_budget::VoiceBudgetRecorder`] funnel, the
 //! [`cold_cache`] signal detectors, the [`llm_calls`] prompt-cache log
-//! aggregation, and [`report`]'s renderers.
+//! aggregation, the [`llm_mirror`] call/response capture seam, and [`report`]'s
+//! renderers.
 
 pub mod cold_cache;
 pub mod collector;
 pub mod llm_calls;
+pub mod llm_mirror;
 pub mod report;
 pub mod spans;
 pub mod voice_budget;

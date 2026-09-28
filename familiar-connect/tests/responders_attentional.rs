@@ -11,6 +11,7 @@ use familiar_connect::bus::router::TurnRouter;
 use familiar_connect::bus::topics::TOPIC_DISCORD_TEXT;
 use familiar_connect::focus::FocusManager;
 use familiar_connect::history::async_store::AsyncHistoryStore;
+use familiar_connect::history::store::AppendTurn;
 use familiar_connect::processors::text_responder::TextResponder;
 use familiar_connect::processors::voice_responder::VoiceResponder;
 use familiar_connect::processors::{
@@ -24,8 +25,8 @@ use serde_json::json;
 
 use support::{
     CapturingLlm, CapturingSend, RecordingBus, ScriptedLlm, ScriptedToolLlm, TestFocusManager,
-    activity_start, discord_text_event, finish, make_assembler, store, tc_delta, text_delta,
-    text_payload, voice_final,
+    activity_start, discord_text_event, finish, make_assembler, store, tc_delta, tc_delta_at,
+    text_delta, text_payload, voice_final,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -313,13 +314,14 @@ async fn voice_no_focus_manager_backward_compat() {
 
 #[tokio::test]
 async fn voice_end_turn_not_called_on_silent() {
+    // A leaked `silent(…)` call is the bare path's only route to silence now.
     let s = store();
     let fm = Arc::new(TestFocusManager::focused(200));
     let player = Arc::new(MockTTSPlayer::new(1, 5));
     let assembler = make_assembler(Arc::clone(&s));
     let r = VoiceResponder::new(
         assembler,
-        Arc::new(ScriptedLlm::new(&["<silent>"])),
+        Arc::new(ScriptedLlm::new(&["silent(reasoning=\"not for me\")"])),
         player.clone(),
         s,
         Arc::new(TurnRouter::new()),
@@ -364,6 +366,8 @@ fn real_focus_responder(
 
     let mut reg = ToolRegistry::new();
     reg.register(build_shift_focus_tool()).unwrap();
+    reg.register(familiar_connect::tools::silent::build_silent_tool())
+        .unwrap();
 
     let fm_ctx = Arc::clone(&fm);
     let store_ctx = Arc::clone(&s);
@@ -388,15 +392,67 @@ fn real_focus_responder(
     (r, fm, s)
 }
 
+/// Drive one tool-enabled text turn with an unread sibling channel and return
+/// the trailing system message (the one carrying the unread digest).
+async fn trailing_with_coaching(coaching: &str) -> String {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        text_delta("ok"),
+        finish("stop"),
+    ]]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, _fm, _s) = real_focus_responder(Arc::clone(&llm), send);
+    let r = r.with_shift_focus_coaching(coaching);
+    // Stage traffic in the unfocused sibling so the digest is non-empty.
+    r.handle(
+        &discord_text_event(text_payload(200, "chatter"), "e-0"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    llm.calls()[0].last().unwrap().content_str()
+}
+
+#[tokio::test]
+async fn shipped_default_shift_focus_coaching_reaches_the_trailing_reminder() {
+    let trailing = trailing_with_coaching(&support::default_config().shift_focus_coaching).await;
+    assert!(
+        trailing.contains(
+            "\u{2014} use shift_focus if one pulls your attention: it moves you \
+             there quietly, or pass silent: false to arrive and speak."
+        ),
+        "{trailing}"
+    );
+}
+
+#[tokio::test]
+async fn overridden_shift_focus_coaching_reaches_the_trailing_reminder() {
+    let trailing = trailing_with_coaching("COACH_MARKER").await;
+    assert!(trailing.contains("COACH_MARKER"), "{trailing}");
+    assert!(!trailing.contains("pulls your attention"), "{trailing}");
+}
+
+/// A silent `shift_focus` call — no `silent: false`, so the turn stays quiet.
 fn shift_tc(channel_id: i64) -> familiar_connect::llm::LlmDelta {
     tc_delta("sf-1", "shift_focus", json!({ "channel_id": channel_id }))
+}
+
+/// `shift_focus` that also opts the turn into speaking.
+fn shift_tc_speaking(channel_id: i64) -> familiar_connect::llm::LlmDelta {
+    tc_delta(
+        "sf-1",
+        "shift_focus",
+        json!({ "channel_id": channel_id, "silent": false }),
+    )
 }
 
 #[tokio::test]
 async fn silent_shift_focus_moves_immediately() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
         vec![shift_tc(200), finish("tool_calls")],
-        vec![text_delta("<silent>"), finish("stop")],
+        vec![text_delta("moved"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
     let (r, fm, _) = real_focus_responder(llm, send.clone());
@@ -414,7 +470,7 @@ async fn silent_shift_focus_moves_immediately() {
 async fn silent_peek_then_old_channel_stages() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
         vec![shift_tc(200), finish("tool_calls")],
-        vec![text_delta("<silent>"), finish("stop")],
+        vec![text_delta("peeked"), finish("stop")],
         vec![text_delta("should not send"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
@@ -443,10 +499,41 @@ async fn silent_peek_then_old_channel_stages() {
     assert!(ping.consumed_at.is_none());
 }
 
+/// The #221 regression: a response calling `shift_focus` AND `silent` shifted
+/// focus globally and then discarded the whole iteration, so the move left no
+/// trace in history. The shift must be recorded even though the turn is silent.
+#[tokio::test]
+async fn shift_focus_plus_silent_moves_focus_and_records_the_shift() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        tc_delta("sf-1", "shift_focus", json!({ "channel_id": 200 })),
+        tc_delta_at(1, "si-1", "silent", json!({"reasoning": "slip away"})),
+        finish("tool_calls"),
+    ]]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, s) = real_focus_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    assert!(send.calls().is_empty());
+
+    let turns = s.sync().recent("fam", 100, 20, None, None).unwrap();
+    assert!(
+        turns.iter().any(|t| t.role == "assistant"),
+        "the shift's assistant turn is recorded: {turns:?}"
+    );
+    let tool_turns: Vec<&_> = turns.iter().filter(|t| t.role == "tool").collect();
+    assert_eq!(tool_turns.len(), 1, "only the shift result: {tool_turns:?}");
+    assert!(tool_turns[0].content.contains("\"channel_id\":200"));
+    // The silent tool's own call and private reasoning stay out of history.
+    assert!(turns.iter().all(|t| !t.content.contains("slip away")));
+    assert!(turns.iter().all(|t| !t.content.contains("__SILENT__")));
+}
+
 #[tokio::test]
 async fn shift_focus_with_reply_posts_to_new_channel() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
-        vec![shift_tc(200), finish("tool_calls")],
+        vec![shift_tc_speaking(200), finish("tool_calls")],
         vec![text_delta("hello over here"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
@@ -465,7 +552,7 @@ async fn wake_reply_after_shift_posts_to_shifted_channel() {
     // Wake = shift-or-silent (#170): a wake turn that DOES shift focus this turn
     // is delivered — to the channel it shifted to (per-turn routing).
     let llm = Arc::new(ScriptedToolLlm::new(vec![
-        vec![shift_tc(200), finish("tool_calls")],
+        vec![shift_tc_speaking(200), finish("tool_calls")],
         vec![text_delta("over here now"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
@@ -492,6 +579,135 @@ async fn wake_reply_after_shift_posts_to_shifted_channel() {
     assert_eq!(send.calls().len(), 1);
     assert_eq!(send.calls()[0].0, 200);
     assert_eq!(send.calls()[0].1, "over here now");
+}
+
+// ---------------------------------------------------------------------------
+// Wake-turn message shape: never ends on an assistant turn
+// ---------------------------------------------------------------------------
+
+/// A wake event on `channel_id`.
+fn wake_event(channel_id: i64) -> Event {
+    Event {
+        event_id: "wake-shape".to_owned(),
+        turn_id: "unread-wake-shape".to_owned(),
+        session_id: format!("discord:{channel_id}"),
+        parent_event_ids: Vec::new(),
+        topic: TOPIC_DISCORD_TEXT.to_owned(),
+        timestamp: chrono::Utc::now(),
+        sequence_number: 0,
+        payload: wrap_payload(DiscordTextPayload {
+            familiar_id: "fam".to_owned(),
+            channel_id,
+            content: "[unread messages waiting elsewhere]".to_owned(),
+            author: None,
+            wake: true,
+            ..Default::default()
+        }),
+    }
+}
+
+/// A wake stages no user message, so replayed history ends on her own reply.
+/// Trailing assistant + `tools` reads as prefix completion on some providers
+/// ("Function call should not be used with prefix"), so the wake event itself
+/// closes the array as a user turn.
+#[tokio::test]
+async fn wake_turn_appends_a_user_notice_after_history() {
+    let s = store();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "user", "hi"))
+        .unwrap();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "assistant", "her last reply"))
+        .unwrap();
+    // Unread traffic elsewhere — what the wake is about.
+    s.sync()
+        .stage_turn(AppendTurn::new("fam", 200, "user", "over here"))
+        .unwrap();
+    s.sync()
+        .stage_turn(AppendTurn::new("fam", 200, "user", "and here"))
+        .unwrap();
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let fm = Arc::new(TestFocusManager::focused(100).with_channel_name(200, "art"));
+    let r = text_responder(
+        Arc::clone(&s),
+        llm.clone(),
+        Arc::new(CapturingSend::new()),
+        Some(fm),
+    );
+    r.handle(&wake_event(100), &bus()).await.unwrap();
+
+    let cap = llm.captured();
+    let msgs = &cap[0];
+    let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles.last().copied(), Some("system"));
+    // The last conversational turn is the wake notice, not her own reply.
+    assert_eq!(roles[roles.len() - 2], "user");
+    assert_eq!(roles[roles.len() - 3], "assistant");
+    assert_eq!(
+        msgs[msgs.len() - 2].content_str(),
+        "(You notice new messages in #art.)"
+    );
+}
+
+/// No focus manager -> no digest; the notice still reads sensibly.
+#[tokio::test]
+async fn wake_turn_notice_is_generic_without_a_digest() {
+    let s = store();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "assistant", "her last reply"))
+        .unwrap();
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let r = text_responder(
+        Arc::clone(&s),
+        llm.clone(),
+        Arc::new(CapturingSend::new()),
+        None,
+    );
+    r.handle(&wake_event(100), &bus()).await.unwrap();
+
+    let cap = llm.captured();
+    let msgs = &cap[0];
+    assert_eq!(msgs[msgs.len() - 2].role, "user");
+    assert_eq!(
+        msgs[msgs.len() - 2].content_str(),
+        "(You notice unread messages waiting elsewhere.)"
+    );
+}
+
+/// Guard against re-broadening: an ordinary turn's array is byte-identical to
+/// what it was before the wake notice existed — `[system, <history>, system]`
+/// with nothing appended.
+#[tokio::test]
+async fn normal_turn_message_shape_is_unchanged() {
+    let s = store();
+    s.sync()
+        .append_turn(AppendTurn::new("fam", 100, "assistant", "her last reply"))
+        .unwrap();
+    s.sync()
+        .stage_turn(AppendTurn::new("fam", 200, "user", "over here"))
+        .unwrap();
+    let llm = Arc::new(CapturingLlm::new("ok"));
+    let fm = Arc::new(TestFocusManager::focused(100).with_channel_name(200, "art"));
+    let r = text_responder(
+        Arc::clone(&s),
+        llm.clone(),
+        Arc::new(CapturingSend::new()),
+        Some(fm),
+    );
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+
+    let cap = llm.captured();
+    let msgs = &cap[0];
+    let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, vec!["system", "assistant", "user", "system"]);
+    // Last conversational turn is the real user message, verbatim history.
+    assert!(msgs[2].content_str().ends_with("hi"), "{:?}", msgs[2]);
+    assert!(
+        !msgs.iter().any(|m| m.content_str().contains("You notice")),
+        "wake notice leaked into a normal turn"
+    );
 }
 
 // ---------------------------------------------------------------------------

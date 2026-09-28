@@ -3,7 +3,9 @@
 //! checked-in `_default/character.toml`, per-section validation, and the
 //! byte-stable `ConfigError` message contract.
 
-use familiar_connect::config::{CharacterConfig, ConfigError, load_character_config};
+use familiar_connect::config::{
+    CharacterConfig, ConfigError, DEFAULT_LLM_MIRROR_CALLS, load_character_config,
+};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -291,16 +293,75 @@ fn reasoning_omitted_means_none() {
     assert!(cfg.llm.get("prose").unwrap().reasoning.is_none());
 }
 
+// -- tool_calling is mandatory ----------------------------------------------
+
+#[test]
+fn tool_calling_defaults_true() {
+    let cfg = load_missing_target();
+    for slot in ["fast", "prose", "background"] {
+        assert!(
+            cfg.llm.get(slot).unwrap().tool_calling,
+            "slot {slot} defaulted tool calling off"
+        );
+    }
+}
+
+/// Silence is a tool call now, so a tool-less slot can never decline to reply.
+/// The refusal is explicit rather than a silent degradation.
+#[test]
+fn tool_calling_false_is_refused() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"m\"\ntool_calling = false\n"),
+        "[llm.prose].tool_calling = false is unsupported: silence and every \
+         other decision the familiar declines to speak for are tool calls, so \
+         a slot without tool calling can never stay quiet — remove the key (it \
+         defaults to true) or set [llm.prose].tool_calling = true",
+    );
+}
+
+#[test]
+fn tool_calling_true_is_accepted() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\ntool_calling = true\n");
+    assert!(cfg.llm.get("prose").unwrap().tool_calling);
+}
+
 #[test]
 fn sampling_params_parsed() {
-    let cfg = load_ok(
-        "[llm.fast]\nmodel = \"m\"\ntop_p = 0.8\ntop_k = 20\npresence_penalty = 1.5\nthink_prepend = true\n",
-    );
+    let cfg =
+        load_ok("[llm.fast]\nmodel = \"m\"\ntop_p = 0.8\ntop_k = 20\npresence_penalty = 1.5\n");
     let slot = cfg.llm.get("fast").unwrap();
     approx(slot.top_p.unwrap(), 0.8);
     assert_eq!(slot.top_k, Some(20));
     approx(slot.presence_penalty.unwrap(), 1.5);
-    assert!(slot.think_prepend);
+    assert!(!slot.think_prepend);
+}
+
+// -- think_prepend is incompatible with the mandatory tools array ------------
+
+/// `think_prepend` is deliberate prefix mode; every slot sends tools now, and
+/// no provider accepts both.
+#[test]
+fn think_prepend_true_is_refused() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"m\"\nthink_prepend = true\n"),
+        "[llm.prose].think_prepend = true is unsupported: it appends a trailing \
+         assistant message, which providers read as prefix completion, and \
+         prefix completion cannot be combined with the tools array every slot \
+         now sends — remove the key (it defaults to false) or set \
+         [llm.prose].think_prepend = false",
+    );
+}
+
+#[test]
+fn think_prepend_unset_loads() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\n");
+    assert!(!cfg.llm.get("prose").unwrap().think_prepend);
+}
+
+#[test]
+fn think_prepend_false_loads() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\nthink_prepend = false\n");
+    assert!(!cfg.llm.get("prose").unwrap().think_prepend);
 }
 
 #[test]
@@ -371,20 +432,11 @@ fn reasoning_must_be_string() {
 }
 
 #[test]
-fn tool_calling_parsed() {
-    let cfg = load_ok(
-        "[llm.background]\nmodel = \"m\"\ntool_calling = true\n[llm.fast]\nmodel = \"m\"\ntool_calling = false\n",
-    );
-    assert!(cfg.llm.get("background").unwrap().tool_calling);
-    assert!(!cfg.llm.get("fast").unwrap().tool_calling);
-}
-
-#[test]
-fn tool_calling_omitted_defaults_false() {
+fn tool_calling_omitted_defaults_true() {
     let defaults =
         "[llm.fast]\nmodel = \"x\"\n[llm.prose]\nmodel = \"x\"\n[llm.background]\nmodel = \"x\"\n";
     let cfg = load_custom(None, defaults).unwrap();
-    assert!(!cfg.llm.get("prose").unwrap().tool_calling);
+    assert!(cfg.llm.get("prose").unwrap().tool_calling);
 }
 
 #[test]
@@ -407,7 +459,7 @@ fn unknown_tts_provider_rejected() {
 #[test]
 fn post_history_instructions_default_from_profile() {
     let cfg = load_ok("");
-    assert!(cfg.post_history_instructions.contains("<silent>"));
+    assert!(cfg.post_history_instructions.contains("silent()"));
     assert!(!cfg.post_history_instructions.trim().is_empty());
 }
 
@@ -492,8 +544,9 @@ fn voice_tool_ack_default_from_profile() {
     let cfg = load_ok("");
     assert_eq!(
         cfg.voice_tool_ack,
-        "Always speak at least a brief acknowledgement before calling a tool. \
-         Never reply with a tool call alone."
+        "When you call a tool and still mean to be heard, pass `silent: false` \
+         and speak at least a brief acknowledgement in the same reply. A tool \
+         call on its own is silent \u{2014} nothing is spoken."
     );
 }
 
@@ -501,6 +554,22 @@ fn voice_tool_ack_default_from_profile() {
 fn voice_tool_ack_override() {
     let cfg = load_ok("[prompt]\nvoice_tool_ack = \"say something first\"\n");
     assert_eq!(cfg.voice_tool_ack, "say something first");
+}
+
+#[test]
+fn shift_focus_coaching_default_from_profile() {
+    let cfg = load_ok("");
+    assert_eq!(
+        cfg.shift_focus_coaching,
+        "use shift_focus if one pulls your attention: it moves you there \
+         quietly, or pass silent: false to arrive and speak."
+    );
+}
+
+#[test]
+fn shift_focus_coaching_override() {
+    let cfg = load_ok("[prompt]\nshift_focus_coaching = \"go look\"\n");
+    assert_eq!(cfg.shift_focus_coaching, "go look");
 }
 
 #[test]
@@ -572,6 +641,7 @@ fn relocated_prompts_absent_default_empty() {
     assert!(cfg.operating_mode_voice.is_empty());
     assert!(cfg.operating_mode_text.is_empty());
     assert!(cfg.voice_tool_ack.is_empty());
+    assert!(cfg.shift_focus_coaching.is_empty());
     assert!(cfg.start_activity_description.is_empty());
     assert!(cfg.rolling_summary_system.is_empty());
     assert!(cfg.reflection_system.is_empty());
@@ -663,6 +733,43 @@ fn text_window_must_be_positive_int() {
     assert_err(
         load("[providers.history]\ntext_window_size = -1\n"),
         "text_window_size",
+    );
+}
+
+#[test]
+fn llm_mirror_calls_defaults_from_the_shipped_profile() {
+    // The `_default` profile is the sole source of the default; an empty target
+    // inherits it.
+    assert_eq!(load_ok("").llm_mirror_calls, DEFAULT_LLM_MIRROR_CALLS);
+}
+
+#[test]
+fn llm_mirror_calls_override_wins() {
+    let cfg = load_ok("[providers.history]\nllm_mirror_calls = 50\n");
+    assert_eq!(cfg.llm_mirror_calls, 50);
+}
+
+#[test]
+fn llm_mirror_calls_zero_disables_mirroring() {
+    assert_eq!(
+        load_ok("[providers.history]\nllm_mirror_calls = 0\n").llm_mirror_calls,
+        0
+    );
+}
+
+#[test]
+fn llm_mirror_calls_rejects_negative() {
+    assert_err_eq(
+        load("[providers.history]\nllm_mirror_calls = -1\n"),
+        "[providers.history].llm_mirror_calls must be >= 0, got -1",
+    );
+}
+
+#[test]
+fn llm_mirror_calls_rejects_non_integer() {
+    assert_err_eq(
+        load("[providers.history]\nllm_mirror_calls = \"lots\"\n"),
+        "[providers.history].llm_mirror_calls must be a non-negative integer, got str",
     );
 }
 
