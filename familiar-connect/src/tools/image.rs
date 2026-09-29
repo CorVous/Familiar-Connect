@@ -186,13 +186,18 @@ async fn describe_leg(
 }
 
 /// The turn's own image map first, then the persisted-history fallback, which
-/// only sees images recorded in this channel.
+/// only sees images recorded in the channels this turn spans.
 async fn resolve_image_url(ctx: &ToolContext, img_id: &str) -> Option<String> {
     if let Some(url) = ctx.images.get(img_id) {
         return Some(url.clone());
     }
     let resolver = ctx.image_resolver.as_ref()?;
-    resolver.resolve(ctx.channel_id, img_id).await
+    for channel_id in ctx.turn_channel_ids() {
+        if let Some(url) = resolver.resolve(channel_id, img_id).await {
+            return Some(url);
+        }
+    }
+    None
 }
 
 async fn view_image_handler(

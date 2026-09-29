@@ -981,6 +981,7 @@ impl TextResponder {
                 shifted_to: Arc::clone(shift_target),
             }) as Arc<dyn FocusControl>);
         }
+        ctx.shift_target = Some(Arc::clone(shift_target));
         let hooks = TextToolHooks {
             responder: self,
             scope,
