@@ -277,6 +277,15 @@ fn reasoning_levels_parsed() {
 }
 
 #[test]
+fn reasoning_minimal_level_parsed() {
+    let cfg = load_ok("[llm.fast]\nmodel = \"m\"\nreasoning = \"minimal\"\n");
+    assert_eq!(
+        cfg.llm.get("fast").unwrap().reasoning.as_deref(),
+        Some("minimal")
+    );
+}
+
+#[test]
 fn reasoning_none_level_parsed() {
     let cfg = load_ok("[llm.fast]\nmodel = \"m\"\nreasoning = \"none\"\n");
     assert_eq!(
@@ -1618,6 +1627,21 @@ fn image_description_model_parsed_at_llm_level() {
 #[test]
 fn image_description_model_defaults_empty() {
     assert!(load_ok("").image_description_model.is_empty());
+}
+
+#[test]
+fn image_description_reasoning_parsed_and_validated() {
+    let cfg = load_ok("[llm]\nimage_description_reasoning = \"minimal\"\n");
+    assert_eq!(cfg.image_description_reasoning.as_deref(), Some("minimal"));
+    assert_err(
+        load("[llm]\nimage_description_reasoning = \"ultra\"\n"),
+        "image_description_reasoning",
+    );
+}
+
+#[test]
+fn image_description_reasoning_defaults_to_none() {
+    assert!(load_ok("").image_description_reasoning.is_none());
 }
 
 #[test]

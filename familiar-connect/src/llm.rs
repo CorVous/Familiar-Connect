@@ -1740,16 +1740,18 @@ mod client {
             log_slot_config(slot_name, slot);
             clients.insert(slot_name.to_string(), client);
         }
-        for (key, slot_label, model) in [
+        for (key, slot_label, model, reasoning) in [
             (
                 "__image_description__",
                 "image_description",
                 &config.image_description_model,
+                config.image_description_reasoning.clone(),
             ),
             (
                 "__image_caption__",
                 "image_caption",
                 &config.image_caption_model,
+                None,
             ),
         ] {
             if model.is_empty() {
@@ -1757,6 +1759,7 @@ mod client {
             }
             let client = OpenRouterClient::builder(api_key, model)
                 .slot(slot_label)
+                .reasoning(reasoning)
                 .semaphore(semaphore.clone())
                 .build();
             let line = format!(
@@ -1977,7 +1980,7 @@ mod client {
 
         #[test]
         fn payload_reasoning_effort_levels() {
-            for level in ["low", "medium", "high"] {
+            for level in ["minimal", "low", "medium", "high"] {
                 let c = OpenRouterClient::builder("k", "m")
                     .reasoning(Some(level.into()))
                     .build();
@@ -3193,6 +3196,18 @@ mod client {
             let clients = create_llm_clients("sk", &cfg).unwrap();
             assert!(clients.contains_key("__image_description__"));
             assert_eq!(clients["__image_description__"].model(), "openai/gpt-4o");
+        }
+
+        #[tokio::test]
+        async fn description_client_carries_configured_reasoning() {
+            let mut cfg = config_with_slots();
+            cfg.image_description_model = "z-ai/glm-5.3-flash".into();
+            cfg.image_description_reasoning = Some("minimal".into());
+            let clients = create_llm_clients("sk", &cfg).unwrap();
+            assert_eq!(
+                clients["__image_description__"].reasoning(),
+                Some("minimal")
+            );
         }
 
         #[tokio::test]
