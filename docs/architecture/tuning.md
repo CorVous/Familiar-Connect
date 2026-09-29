@@ -923,7 +923,8 @@ keys, unset fields default to `1.0`. `CharacterConfig.budget_for()`
 applies the curve when the tier's active slot uses that model
 (tier→slot: `voice→fast`, `text→prose`, `background→background`).
 There is no `total_tokens` multiplier — the derived total scales
-automatically when the per-section caps scale.
+automatically when the per-section caps scale. A scaled cap never falls
+below `1`, except a cap of `0`, which means "none at all" and stays `0`.
 
 ```toml
 [budget.model_curves."claude-opus-4-7"]
