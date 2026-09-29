@@ -20,8 +20,8 @@ use familiar_connect::tools::registry::{FnHandler, Tool, ToolContext, ToolOutput
 use serde_json::{Value, json};
 
 use support::{
-    CapturingSend, ScriptedToolLlm, discord_text_event, finish, make_assembler, simple_ctx_factory,
-    store, tc_delta, text_delta, text_payload,
+    CapturingSend, ScriptedLlm, ScriptedToolLlm, TestFocusManager, discord_text_event, finish,
+    make_assembler, simple_ctx_factory, store, tc_delta, text_delta, text_payload,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -176,6 +176,37 @@ async fn images_threaded_into_tool_context() {
     assert_eq!(
         cap[0].get("img_0").map(String::as_str),
         Some("http://cdn.example.com/cat.png")
+    );
+}
+
+#[tokio::test]
+async fn staged_message_images_are_persisted() {
+    let s = store();
+    let assembler = make_assembler(Arc::clone(&s));
+    let r = TextResponder::new(
+        assembler,
+        Arc::new(ScriptedLlm::new(&["should not be called"])),
+        Arc::new(CapturingSend::new()),
+        Arc::clone(&s),
+        Arc::new(TurnRouter::new()),
+        "fam",
+    )
+    .with_focus_manager(Arc::new(TestFocusManager::unfocused()));
+
+    let mut payload = text_payload(42, "look [image: img_abc123de (cat.png)]");
+    payload.images.insert(
+        "img_abc123de".to_owned(),
+        "http://cdn.example.com/cat.png".to_owned(),
+    );
+    r.handle(&discord_text_event(payload, "e-1"), &bus())
+        .await
+        .unwrap();
+
+    let turn = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert!(turn[0].consumed_at.is_none());
+    assert_eq!(
+        s.image_url(42, "img_abc123de").await.unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
     );
 }
 

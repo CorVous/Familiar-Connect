@@ -394,7 +394,8 @@ impl TextResponder {
         if !is_wake {
             let mut append = AppendTurn::new(&self.familiar_id, channel_id, "user", &content)
                 .consumed(focused && !suppressed)
-                .pings_bot(pings_bot);
+                .pings_bot(pings_bot)
+                .images(images.clone());
             if let Some(a) = &author {
                 append = append.author(a.clone());
             }
@@ -980,6 +981,7 @@ impl TextResponder {
                 shifted_to: Arc::clone(shift_target),
             }) as Arc<dyn FocusControl>);
         }
+        ctx = ctx.with_shift_target(Arc::clone(shift_target));
         let hooks = TextToolHooks {
             responder: self,
             scope,
