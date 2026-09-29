@@ -852,6 +852,20 @@ fn shipped_default_voice_budget() {
 }
 
 #[test]
+fn max_rag_turns_zero_disables_turn_retrieval() {
+    let cfg = load_ok("[budget.text]\nmax_rag_turns = 0\n");
+    assert_eq!(cfg.budgets.get("text").unwrap().max_rag_turns, 0);
+    assert_err(
+        load("[budget.text]\nmax_rag_turns = -1\n"),
+        "must be non-negative",
+    );
+    assert_err(
+        load("[budget.text]\nmax_rag_facts = 0\n"),
+        "must be positive",
+    );
+}
+
+#[test]
 fn shipped_default_text_and_background() {
     let cfg = load_ok("");
     let text = cfg.budgets.get("text").unwrap();

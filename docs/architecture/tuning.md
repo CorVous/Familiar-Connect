@@ -1088,7 +1088,7 @@ per group before the latency split means anything.
 | `RecentHistoryLayer.coalesce_max_gap_seconds` | `45.0` | `[providers.history].coalesce_max_gap_seconds` |
 | `RecentHistoryLayer.silence_gap_fold_seconds` (text tier) | `0` (disabled) | `[providers.history].text_silence_gap_fold_seconds` |
 | `RecentHistoryLayer.max_tokens` | `1500` (voice) | `[budget.<tier>].recent_history_tokens` |
-| `RagContextLayer.max_results` | `5` (voice) | `[budget.<tier>].max_rag_turns` |
+| `RagContextLayer.max_results` | `5` (voice) | `[budget.<tier>].max_rag_turns` (`0` disables the verbatim earlier-turns section; facts still retrieved) |
 | `RagContextLayer.max_facts` | `3` (voice) | `[budget.<tier>].max_rag_facts` |
 | `RagContextLayer.max_tokens` | `450` (voice) | `[budget.<tier>].rag_tokens` |
 | `RagContextLayer.recent_window_size` | matches history window | constructor arg |
