@@ -39,10 +39,13 @@ including addresses only the operator's machine can route to.
 An id outlives its turn: the append path records it in the `channel_images`
 table, keyed on `(channel_id, img_id)`, and `view_image` falls back to that table
 for markers whose payload map is gone (`HistoryStore::image_url`). The fallback
-is **scoped to the channel that recorded the image**, so an id that retrieval
-lifts out of a DM into a guild prompt resolves to nothing there; the same image
-posted in both channels is a row in each. A row lives as long as the history
-database, so an id stays fetchable for the life of the URL behind it.
+resolves in exactly two channels — **the channel the turn was triggered from, and
+the channel this turn's own `shift_focus` moved to** (the turn-local sink the
+reply is routed by, never the global focus pointer). Nothing else resolves: an id
+that retrieval lifts out of a DM into an unrelated guild prompt is not fetchable
+there. The same image posted in two channels is a row in each. A row lives as
+long as the history database, so an id stays fetchable for the life of the URL
+behind it.
 
 The gate lives at the fetch boundary (`tools::image_policy::UrlGuard`), not at
 collection, so every source — the three collectors, the `channel_images` fallback,
