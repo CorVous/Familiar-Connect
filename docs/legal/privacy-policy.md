@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated: 2026-08-20**
+**Last updated: 2026-09-27**
 
 Familiar-Connect is a self-hosted, open-source Discord bot. This page
 describes what the software records, where it puts it, and which
@@ -121,13 +121,14 @@ project. Review their policies yourself.
 | **Discord** | Everything, inherently — it is the transport. Plus the bot's replies, typing indicators, presence, and synthesized voice. | Always. |
 | **OpenRouter** (`openrouter.ai`) | The assembled prompt: recent conversation across channels, summaries, dossiers, facts, reflections, your Discord display name, a `discord_<user id>` identifier, and any images. OpenRouter then routes it to whichever model provider the operator picked, so it reaches that provider too. | Every reply, plus every background memory pass (fact extraction, dossiers, summaries, reflections, sleep). |
 | **Deepgram** (`api.deepgram.com`) | Raw voice audio, streamed live per speaker. The connection URL also carries the display names, usernames, and nicknames of everyone in the voice channel, as recognition hints. | Whenever the bot is in a voice channel. |
-| **Cartesia** (`api.cartesia.ai`) | The text the bot is about to speak. No user names or ids — though the bot's reply can of course quote you. | Whenever the bot speaks. |
+| **Cartesia** (`api.cartesia.ai`) | The text the bot is about to speak. No user names or ids — though the bot's reply can of course quote you. | Whenever the bot speaks, if the operator selected Cartesia (the default). |
+| **Microsoft Azure Speech** (`<region>.tts.speech.microsoft.com`, or the `azure.cn` / `azure.us` host for those clouds) | The text the bot is about to speak, wrapped in SSML naming the configured voice, plus the operator's Azure subscription key. No user names or ids — though the bot's reply can of course quote you. | Whenever the bot speaks, if the operator selected Azure instead of Cartesia. |
 | **Image hosts on the allowlist** (Discord's CDNs plus a short list of image CDNs — `[tools].trusted_image_hosts`) | An HTTP request from the operator's machine, exposing its IP address to that host. | When the model uses `view_image` on an attachment, an embed, or a pasted URL. Hosts outside the allowlist are refused without any request being made, unless the operator sets `[tools].allow_untrusted_image_urls = true`, which permits any public host. Fetched images are then sent to OpenRouter. |
 
-Cartesia is the only text-to-speech provider. Azure Speech and Google
-Gemini were previously selectable in configuration but never had working
-backends; they have been removed, and no audio or text has ever been sent
-to either.
+Only one text-to-speech provider is active at a time, so spoken text goes
+to Cartesia or to Azure, never both. Google Gemini was previously
+selectable in configuration but never had a working backend; it has been
+removed, and nothing has ever been sent to it.
 
 Embeddings are computed on the operator's own machine — there is no
 remote embedding provider. Optional local models (the ONNX turn detector,
@@ -180,7 +181,7 @@ To have data removed, ask the operator. They can delete rows or drop
 rebuild from what is left. Whether they do so, and how fast, is between
 you and them.
 
-Data already sent to OpenRouter, Deepgram, or Cartesia is governed by
+Data already sent to OpenRouter, Deepgram, Cartesia, or Azure is governed by
 those providers' own retention practices and cannot be recalled from
 here.
 

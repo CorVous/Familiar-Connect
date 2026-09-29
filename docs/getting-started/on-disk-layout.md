@@ -106,7 +106,7 @@ reasoning    = "medium"
 tool_calling = true
 
 [tts]
-provider          = "cartesia"   # the only implemented backend
+provider          = "cartesia"   # or "azure" (azure-tts build)
 cartesia_voice_id = "..."
 cartesia_model    = "sonic-3"
 ```

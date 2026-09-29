@@ -1,4 +1,4 @@
-//! Cartesia TTS client + greeting cache (subsystem 09).
+//! Cartesia + Azure TTS clients + greeting cache (subsystem 09).
 //!
 //! Every provider returns the uniform [`TTSResult`] (raw PCM audio + per-word
 //! timestamps). Two seams the rest of the system types against, kept
@@ -11,8 +11,9 @@
 //!   the [`JitterHints`] the player duck-typed as `stream_prebuffer_bytes` /
 //!   `stream_pad_underrun`.
 //!
-//! Timestamps are milliseconds. Cartesia is the only implemented backend; its
-//! WebSocket rides `tokio-tungstenite` behind the default `net` feature.
+//! Timestamps are milliseconds. Cartesia (default) rides `tokio-tungstenite`
+//! behind the default `net` feature; Azure ([`azure`]) rides the `azure-speech`
+//! SDK behind `azure-tts`.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -29,6 +30,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::config::TTSConfig;
 use crate::log_style as ls;
+
+pub mod azure;
+pub use azure::{AzureBackend, AzureEvent, AzureEventStream, AzureRequest, AzureTTSClient};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -156,7 +160,7 @@ pub trait TtsClient: Send + Sync {
     }
 }
 
-/// The incremental synth surface (Cartesia).
+/// The incremental synth surface (Cartesia, Azure).
 pub trait StreamingTtsClient: Send + Sync {
     /// Open a fresh stream of PCM chunks. The transport connects lazily on first
     /// poll.
@@ -193,7 +197,7 @@ fn log_buffered_synth(provider: &str, audio: &[u8], timestamps: &[WordTimestamp]
     );
 }
 
-/// Per-stream Cartesia telemetry: total bytes + first/last chunk arrival for
+/// Per-stream telemetry: total bytes + first/last chunk arrival for
 /// the `span_ms` INFO line emitted on clean stream end. Timing uses wall-clock
 /// deltas between chunk arrivals.
 #[derive(Default)]
@@ -212,8 +216,8 @@ impl StreamTel {
         self.last_at = Some(now);
     }
 
-    /// Emit `🔉 TTS Cartesia/stream audio=..b span_ms=..` (clean-end only).
-    fn log(&self) {
+    /// Emit `🔉 TTS <provider> audio=..b span_ms=..` (clean-end only).
+    fn log(&self, provider: &str) {
         let span_ms = match (self.first_at, self.last_at) {
             (Some(first), Some(last)) => (last - first).as_secs_f64() * 1000.0,
             _ => 0.0,
@@ -222,7 +226,7 @@ impl StreamTel {
             target: TTS_TARGET,
             "{} {} {} {}",
             ls::tag("🔉 TTS", ls::C),
-            ls::word("Cartesia/stream", ls::C),
+            ls::word(provider, ls::C),
             ls::kv_styled("audio", &format!("{}b", self.total_bytes), ls::W, ls::LW),
             ls::kv_styled("span_ms", &format!("{span_ms:.0}"), ls::W, ls::LW),
         );
@@ -541,7 +545,7 @@ async fn cartesia_drive_sending(mut conn: Box<dyn CartesiaConn>, payload: Value)
         }
         CartesiaStep::End => {
             conn.close().await;
-            StreamTel::default().log();
+            StreamTel::default().log("Cartesia/stream");
             None
         }
         CartesiaStep::Fail(e) => {
@@ -574,7 +578,7 @@ fn cartesia_stream_from_state(state: CartesiaStreamState) -> TtsStream {
                     }
                     CartesiaStep::End => {
                         conn.close().await;
-                        tel.log();
+                        tel.log("Cartesia/stream");
                         None
                     }
                     CartesiaStep::Fail(e) => {
@@ -780,12 +784,14 @@ async fn get_cached_greeting_audio_in(
 // Factory
 // ---------------------------------------------------------------------------
 
-/// The concrete TTS client for the active provider. One variant today; the
-/// enum is the widening point for further backends behind [`TtsClient`].
+/// The concrete TTS client for the active provider; the widening point for
+/// further backends behind [`TtsClient`].
 #[derive(Debug)]
 pub enum TtsClientKind {
     /// Cartesia WS client.
     Cartesia(CartesiaTTSClient),
+    /// Azure Speech SDK client.
+    Azure(AzureTTSClient),
 }
 
 impl TtsClientKind {
@@ -794,6 +800,7 @@ impl TtsClientKind {
     pub fn into_dyn(self) -> Arc<dyn TtsClient> {
         match self {
             Self::Cartesia(c) => Arc::new(c),
+            Self::Azure(c) => Arc::new(c),
         }
     }
 }
@@ -808,8 +815,12 @@ pub fn create_tts_client(cfg: &TTSConfig) -> Result<TtsClientKind, TtsError> {
     build_tts_client(cfg, |key| std::env::var(key).ok())
 }
 
+/// Providers whose factory error refuses startup instead of degrading to
+/// text-only: explicit opt-ins, unlike the shipped-default Cartesia.
+pub const STRICT_TTS_PROVIDERS: [&str; 1] = ["azure"];
+
 /// [`create_tts_client`] with an injectable env lookup (testable, race-free).
-fn build_tts_client(
+pub(crate) fn build_tts_client(
     cfg: &TTSConfig,
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<TtsClientKind, TtsError> {
@@ -846,12 +857,39 @@ fn build_tts_client(
                 api_key, voice_id, model,
             )))
         }
+        "azure" => build_azure_client(cfg, env),
         // The message quotes the provider repr-style:
         // single-quotes the string; `{:?}` (Debug) would double-quote it.
         other => Err(TtsError::Config(format!(
-            "Unknown TTS provider '{other}'; expected 'cartesia'"
+            "Unknown TTS provider '{other}'; expected 'azure' or 'cartesia'"
         ))),
     }
+}
+
+/// `provider = "azure"`: feature first (credentials are moot without the SDK),
+/// then `AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION`.
+#[cfg(feature = "azure-tts")]
+fn build_azure_client(
+    cfg: &TTSConfig,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<TtsClientKind, TtsError> {
+    let (key, region) = azure::azure_credentials(env)?;
+    Ok(TtsClientKind::Azure(AzureTTSClient::new(
+        key,
+        region,
+        cfg.azure_voice.clone(),
+    )))
+}
+
+/// `provider = "azure"` without the SDK compiled in.
+#[cfg(not(feature = "azure-tts"))]
+fn build_azure_client(
+    _cfg: &TTSConfig,
+    _env: impl Fn(&str) -> Option<String>,
+) -> Result<TtsClientKind, TtsError> {
+    Err(TtsError::Config(
+        azure::AZURE_TTS_FEATURE_MISSING.to_owned(),
+    ))
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@
   ([portal](https://discord.com/developers/applications)) with the
   `message_content`, `messages`, and `voice_states` intents enabled
 - An OpenRouter API key
-- *(optional, voice only)* A Cartesia API key for speech synthesis
+- *(optional, voice only)* A Cartesia API key, or an Azure Speech key + region, for speech synthesis
 - *(optional, voice only)* A Deepgram API key for speech transcription
 - *(voice builds only)* CMake — the `discord-voice` feature compiles libopus
   from source (`songbird → opus2 → libopus_sys`). Windows especially needs it
@@ -39,8 +39,14 @@ OPENROUTER_API_KEY=<openrouter key>
 # pick the familiar to load (or pass --familiar on the CLI)
 FAMILIAR_ID=aria
 
-# TTS credential — Cartesia is the default and only implemented backend
+# TTS credentials — set the one matching [tts].provider in character.toml
+
+# Cartesia (provider="cartesia", the default):
 CARTESIA_API_KEY=<cartesia key>
+
+# Azure Speech (provider="azure"; build with --features ...,azure-tts):
+AZURE_SPEECH_KEY=<azure speech key>
+AZURE_SPEECH_REGION=<azure region, e.g. eastus>
 
 # optional — Deepgram speech transcription (voice channels only)
 DEEPGRAM_API_KEY=<deepgram key>
@@ -102,6 +108,9 @@ cargo build --release --features discord,discord-voice,stt-deepgram
 
 # Local ML extras (ONNX turn detection, local embeddings)
 cargo build --release --features local-turn,local-embed
+
+# Azure Speech TTS ([tts].provider = "azure"), added to a voice build
+cargo build --release --features discord,discord-voice,stt-deepgram,azure-tts
 ```
 
 ## CLI reference

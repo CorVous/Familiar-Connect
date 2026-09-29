@@ -28,7 +28,7 @@ use crate::activities::engine::{
 };
 use crate::bot::{BotHandle, build_activity_presence_cb};
 use crate::budget::TierBudget;
-use crate::config::EmbeddingConfig;
+use crate::config::{EmbeddingConfig, TTSConfig};
 use crate::context::layers::ChannelResolver;
 use crate::context::{
     Assembler, CharacterCardLayer, ConversationSummaryLayer, LorebookLayer, OperatingModeLayer,
@@ -38,6 +38,7 @@ use crate::embedding::{Embedder, EmbeddingError};
 use crate::familiar::Familiar;
 use crate::focus::FocusManager;
 use crate::sleep::maintenance::SleepPromptText;
+use crate::tts::{TtsClient, TtsError};
 use crate::voice_roster::VoiceRoster;
 
 /// `run` arguments.
@@ -166,6 +167,40 @@ pub fn resolve_familiar_root(
 )]
 fn resolve_embedder(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
     crate::embedding::create_embedder(config)
+}
+
+/// Resolve the startup TTS client, degrading or refusing per provider.
+///
+/// Cartesia (shipped default) degrades: a fresh install without its key still
+/// runs text-only, with a warning. Azure is explicit opt-in, so a missing
+/// `azure-tts` feature or credential refuses startup — never a mid-conversation
+/// synthesis failure (#233).
+///
+/// # Errors
+/// The factory's [`TtsError`] for a provider in
+/// [`STRICT_TTS_PROVIDERS`](crate::tts::STRICT_TTS_PROVIDERS).
+#[cfg_attr(
+    not(feature = "discord"),
+    allow(
+        dead_code,
+        reason = "the only non-test caller is the `discord`-gated `run_inner`; \
+                  the fail-fast contract is unit-tested under default features"
+    )
+)]
+fn resolve_tts_client(
+    config: &TTSConfig,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<Arc<dyn TtsClient>>, TtsError> {
+    match crate::tts::build_tts_client(config, env) {
+        Ok(kind) => Ok(Some(kind.into_dyn())),
+        Err(err) if crate::tts::STRICT_TTS_PROVIDERS.contains(&config.provider.as_str()) => {
+            Err(err)
+        }
+        Err(err) => {
+            tracing::warn!("TTS client unavailable: {err}");
+            Ok(None)
+        }
+    }
 }
 
 /// The per-mode operating directives, keyed by viewer mode.
@@ -510,12 +545,14 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             }
         };
 
-    // Degrade-not-fail: TTS / STT / local turn detector unavailability warns.
-    let tts_client = match crate::tts::create_tts_client(&config.tts) {
-        Ok(kind) => Some(kind.into_dyn()),
+    // Degrade-not-fail: TTS / STT / local turn detector unavailability warns —
+    // except an opt-in TTS provider (Azure), which refuses startup rather than
+    // failing mid-conversation (#233).
+    let tts_client = match resolve_tts_client(&config.tts, |key| std::env::var(key).ok()) {
+        Ok(client) => client,
         Err(err) => {
-            tracing::warn!("TTS client unavailable: {err}");
-            None
+            tracing::error!("TTS provider unavailable: {err}");
+            return 1;
         }
     };
     let transcriber = match crate::stt::create_transcriber(&config.stt) {
@@ -1423,7 +1460,7 @@ mod tests {
     use super::{
         ShutdownController, ShutdownStage, build_activity_engine, default_assembler,
         home_familiars_root, operating_modes, resolve_defaults_root, resolve_embedder,
-        resolve_familiar_root, resolve_familiars_root,
+        resolve_familiar_root, resolve_familiars_root, resolve_tts_client,
     };
     use crate::activities::engine::ActivityEngine;
     use crate::bot::{BotHandle, Presence, PresenceSink};
@@ -1534,6 +1571,64 @@ mod tests {
             ..EmbeddingConfig::default()
         };
         assert!(resolve_embedder(&config).unwrap().is_none());
+    }
+
+    // --- resolve_tts_client (composition-root fail-fast, #233) ---
+
+    fn azure_tts() -> crate::config::TTSConfig {
+        crate::config::TTSConfig {
+            provider: "azure".to_owned(),
+            ..crate::config::TTSConfig::default()
+        }
+    }
+
+    #[cfg(not(feature = "azure-tts"))]
+    #[test]
+    fn resolve_tts_azure_without_feature_refuses_startup() {
+        let err = resolve_tts_client(&azure_tts(), |k| Some(format!("{k}-set")))
+            .err()
+            .expect("azure without the azure-tts feature must refuse startup");
+        assert_eq!(
+            err.to_string(),
+            crate::tts::azure::AZURE_TTS_FEATURE_MISSING
+        );
+    }
+
+    #[cfg(feature = "azure-tts")]
+    #[test]
+    fn resolve_tts_azure_missing_key_refuses_startup() {
+        let err = resolve_tts_client(&azure_tts(), |k| {
+            (k == "AZURE_SPEECH_REGION").then(|| "eastus".to_owned())
+        })
+        .err()
+        .expect("azure without AZURE_SPEECH_KEY must refuse startup");
+        assert_eq!(
+            err.to_string(),
+            "AZURE_SPEECH_KEY environment variable is required for Azure TTS"
+        );
+    }
+
+    #[cfg(feature = "azure-tts")]
+    #[test]
+    fn resolve_tts_azure_with_credentials_builds() {
+        let client = resolve_tts_client(&azure_tts(), |k| match k {
+            "AZURE_SPEECH_KEY" => Some("k".to_owned()),
+            "AZURE_SPEECH_REGION" => Some("eastus".to_owned()),
+            _ => None,
+        })
+        .expect("configured azure builds");
+        assert!(client.is_some_and(|c| c.as_streaming().is_some()));
+    }
+
+    /// Shipped default keeps degrade-not-fail: no key → text-only, no refusal.
+    #[test]
+    fn resolve_tts_cartesia_without_key_degrades() {
+        let config = crate::config::TTSConfig {
+            cartesia_voice_id: Some("v".to_owned()),
+            cartesia_model: Some("m".to_owned()),
+            ..crate::config::TTSConfig::default()
+        };
+        assert!(resolve_tts_client(&config, |_| None).unwrap().is_none());
     }
 
     // --- resolve_familiar_root ---
