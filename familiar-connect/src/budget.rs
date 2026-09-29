@@ -508,13 +508,17 @@ impl Default for ModelBudgetCurve {
 }
 
 /// Scale one integer cap by a curve multiplier: `max(1, round(base * mult))`,
-/// with banker's rounding (half-to-even).
+/// with banker's rounding (half-to-even). A base of zero means "none at all" and
+/// scales to zero.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     reason = "budget caps are small positive ints; scaled values never approach i64/f64 precision limits"
 )]
 fn scale(base: i64, multiplier: f64) -> i64 {
+    if base == 0 {
+        return 0;
+    }
     let scaled = half_even(base as f64 * multiplier) as i64;
     scaled.max(1)
 }
