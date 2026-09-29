@@ -2,6 +2,8 @@
 //! attentional stream, activities — plus the FTS-independent parts of the
 //! attentional store.
 
+use std::collections::HashMap;
+
 use chrono::{TimeZone, Utc};
 use familiar_connect::history::db::Value;
 use familiar_connect::history::{AppendTurn, Author, ChannelUnread, HistoryStore, HistoryTurn};
@@ -132,6 +134,86 @@ fn persistent_across_reopens() {
     let turns = reopened.recent(FAMILIAR, CHANNEL, 10, None, None).unwrap();
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].content, "persisted");
+}
+
+// --- turn images ----------------------------------------------------------
+
+#[test]
+fn appended_turn_images_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.db");
+    let store = HistoryStore::open(&path).unwrap();
+    store
+        .append_turn(
+            AppendTurn::new(
+                FAMILIAR,
+                CHANNEL,
+                "user",
+                "look [image: img_abc123de (cat.png)]",
+            )
+            .images(HashMap::from([(
+                "img_abc123de".to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .unwrap();
+    store.close();
+    drop(store);
+
+    let reopened = HistoryStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.image_url("img_abc123de").unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
+}
+
+/// Each turn's images must survive the next turn's — the id space is global, so
+/// per-message ids (the old `img_0, img_1, …`) would overwrite each other.
+#[test]
+fn images_from_different_turns_each_keep_their_own_url() {
+    let store = mem();
+    for (img_id, url) in [
+        ("img_1111aaaa2222bbbb", "http://cdn.example.com/cat.png"),
+        ("img_3333cccc4444dddd", "http://cdn.example.com/dog.png"),
+    ] {
+        store
+            .append_turn(
+                AppendTurn::new(FAMILIAR, CHANNEL, "user", "look")
+                    .images(HashMap::from([(img_id.to_owned(), url.to_owned())])),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.image_url("img_1111aaaa2222bbbb").unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
+    assert_eq!(
+        store.image_url("img_3333cccc4444dddd").unwrap(),
+        Some("http://cdn.example.com/dog.png".to_owned())
+    );
+}
+
+#[test]
+fn image_url_is_none_for_an_unknown_id() {
+    assert_eq!(mem().image_url("img_deadbeef").unwrap(), None);
+}
+
+#[test]
+fn re_appending_the_same_image_id_keeps_one_row() {
+    let store = mem();
+    let images = HashMap::from([(
+        "img_abc123de".to_owned(),
+        "http://cdn.example.com/cat.png".to_owned(),
+    )]);
+    for _ in 0..2 {
+        store
+            .append_turn(AppendTurn::new(FAMILIAR, CHANNEL, "user", "look").images(images.clone()))
+            .unwrap();
+    }
+    assert_eq!(
+        store.image_url("img_abc123de").unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
 }
 
 // --- recent ---------------------------------------------------------------

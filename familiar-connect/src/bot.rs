@@ -712,7 +712,26 @@ fn url_last_segment(url: &str, strip_query: bool) -> &str {
     }
 }
 
-/// Dedupe-aware image registration: assign `img_N`, append a marker.
+/// `img_` + the first 16 hex digits of the URL's sha256.
+///
+/// Hashing the URL (rather than counting per message) keeps an id stable across
+/// restarts and unique across messages, so a staged turn's marker still resolves
+/// once the turn is promoted into a later prompt. The width buys collision
+/// headroom: ids key `turn_images` rows, and a collision would silently hand
+/// `view_image` the wrong picture.
+fn image_id(url: &str) -> String {
+    use std::fmt::Write as _;
+
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(url.as_bytes());
+    let mut id = String::from("img_");
+    for byte in &digest[..8] {
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
+}
+
+/// Dedupe-aware image registration: assign the URL's id, append a marker.
 fn add_image(
     url: &str,
     filename: &str,
@@ -723,7 +742,7 @@ fn add_image(
     if !seen.insert(url.to_owned()) {
         return;
     }
-    let img_id = format!("img_{}", images.len());
+    let img_id = image_id(url);
     markers.push(format!("[image: {img_id} ({filename})]"));
     images.push((img_id, url.to_owned()));
 }
@@ -731,9 +750,9 @@ fn add_image(
 /// Return `(content_with_placeholders, img_id -> url)`.
 ///
 /// Sources, in order: image attachments, `embed.image` (preferring `proxy_url`),
-/// inline image URLs in `content`. Ids assigned `img_0, img_1, …` in discovery
-/// order; deduped by exact URL (first source wins). `[image: img_N (filename)]`
-/// markers are appended one-per-line after the content.
+/// inline image URLs in `content`. Ids are [`image_id`] hashes of the URL;
+/// deduped by exact URL (first source wins). `[image: <id> (filename)]` markers
+/// are appended one-per-line after the content.
 ///
 /// The inline source is attacker-controlled — anyone in the channel picks the
 /// host. Registration is deliberately unfiltered; the scheme / allowlist /
@@ -3945,23 +3964,14 @@ mod tests {
 
     #[test]
     fn collects_attachment_and_injects_placeholder() {
-        let (content, images) = collect_images(
-            "hello",
-            &[attachment(
-                "http://cdn.example.com/cat.png",
-                "cat.png",
-                "image/png",
-            )],
-            &[],
-        );
+        let url = "http://cdn.example.com/cat.png";
+        let (content, images) =
+            collect_images("hello", &[attachment(url, "cat.png", "image/png")], &[]);
         assert_eq!(
             images,
-            HashMap::from([(
-                "img_0".to_owned(),
-                "http://cdn.example.com/cat.png".to_owned()
-            )])
+            HashMap::from([(super::image_id(url), url.to_owned())])
         );
-        assert!(content.contains("[image: img_0 (cat.png)]"));
+        assert!(content.contains(&format!("[image: {} (cat.png)]", super::image_id(url))));
     }
 
     #[test]
@@ -3988,7 +3998,7 @@ mod tests {
         );
         assert_eq!(images.len(), 1);
         assert!(images.values().next().unwrap().contains("preview.jpg"));
-        assert!(content.contains("[image: img_0"));
+        assert!(content.contains(&format!("[image: {}", images.keys().next().unwrap())));
     }
 
     #[test]
@@ -4004,7 +4014,7 @@ mod tests {
         let (content, images) = collect_images(&format!("check this {url}"), &[], &[]);
         assert_eq!(images.len(), 1);
         assert!(images.values().any(|v| v == url));
-        assert!(content.contains("[image: img_0 (abc.jpg)]"));
+        assert!(content.contains(&format!("[image: {} (abc.jpg)]", super::image_id(url))));
     }
 
     #[test]
@@ -4027,19 +4037,72 @@ mod tests {
     }
 
     #[test]
-    fn multiple_images_get_sequential_ids() {
+    fn multiple_images_get_distinct_ids() {
+        let (a_url, b_url) = (
+            "http://cdn.example.com/a.png",
+            "http://cdn.example.com/b.jpeg",
+        );
         let (content, images) = collect_images(
             "hello",
             &[
-                attachment("http://cdn.example.com/a.png", "a.png", "image/png"),
-                attachment("http://cdn.example.com/b.jpeg", "b.jpeg", "image/png"),
+                attachment(a_url, "a.png", "image/png"),
+                attachment(b_url, "b.jpeg", "image/png"),
             ],
             &[],
         );
         let keys: std::collections::HashSet<&str> = images.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["img_0", "img_1"].into_iter().collect());
-        assert!(content.contains("[image: img_0 (a.png)]"));
-        assert!(content.contains("[image: img_1 (b.jpeg)]"));
+        assert_eq!(
+            keys,
+            [super::image_id(a_url), super::image_id(b_url)]
+                .iter()
+                .map(String::as_str)
+                .collect()
+        );
+        assert!(content.contains(&format!("[image: {} (a.png)]", super::image_id(a_url))));
+        assert!(content.contains(&format!("[image: {} (b.jpeg)]", super::image_id(b_url))));
+    }
+
+    #[test]
+    fn ids_do_not_collide_across_messages() {
+        let (first_content, first) = collect_images(
+            "one",
+            &[attachment(
+                "http://cdn.example.com/a.png",
+                "a.png",
+                "image/png",
+            )],
+            &[],
+        );
+        let (second_content, second) = collect_images(
+            "two",
+            &[attachment(
+                "http://cdn.example.com/b.png",
+                "b.png",
+                "image/png",
+            )],
+            &[],
+        );
+        let a_id = first.keys().next().unwrap();
+        let b_id = second.keys().next().unwrap();
+        assert_ne!(a_id, b_id);
+        assert!(first_content.contains(&format!("[image: {a_id} (a.png)]")));
+        assert!(second_content.contains(&format!("[image: {b_id} (b.png)]")));
+    }
+
+    #[test]
+    fn id_is_a_stable_hash_of_the_url() {
+        let url = "http://cdn.example.com/a.png";
+        let (_, first) = collect_images("", &[attachment(url, "a.png", "image/png")], &[]);
+        let (_, second) = collect_images("later", &[attachment(url, "a.png", "image/png")], &[]);
+        let id = first.keys().next().unwrap();
+        assert_eq!(second.keys().next().unwrap(), id);
+        assert_eq!(id.len(), "img_".len() + 16);
+        assert!(
+            id.strip_prefix("img_")
+                .unwrap()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     // --- apply_message_edit (B-RX17) with a real store ---------------------

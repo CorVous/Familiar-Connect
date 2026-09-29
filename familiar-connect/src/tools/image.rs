@@ -185,6 +185,15 @@ async fn describe_leg(
     describe_image(llm, &desc_b64, "image/jpeg", constraints).await
 }
 
+/// The turn's own image map first, then the persisted-history fallback.
+async fn resolve_image_url(ctx: &ToolContext, img_id: &str) -> Option<String> {
+    if let Some(url) = ctx.images.get(img_id) {
+        return Some(url.clone());
+    }
+    let resolver = ctx.image_resolver.as_ref()?;
+    resolver.resolve(img_id).await
+}
+
 async fn view_image_handler(
     fetcher: &dyn ImageFetcher,
     constraints: &str,
@@ -194,11 +203,11 @@ async fn view_image_handler(
     let Some(img_id) = args.get("image_id").and_then(Value::as_str) else {
         return text_error("image_id must be a string");
     };
-    let Some(url) = ctx.images.get(img_id) else {
+    let Some(url) = resolve_image_url(ctx, img_id).await else {
         return text_error(&format!("unknown image id '{img_id}'"));
     };
 
-    let raw = match fetcher.fetch(url).await {
+    let raw = match fetcher.fetch(&url).await {
         Ok(r) => r,
         Err(e) => {
             // Policy refusals never reached the network — say so, and say it once.
@@ -275,15 +284,16 @@ pub fn build_view_image_tool_with_fetcher(
     let constraints = describe_constraints.to_owned();
     Tool::new(
         "view_image",
-        "Fetch and look at an image referenced by its [image: img_N (filename)] \
-         placeholder. Pass the `image_id` exactly as shown (e.g. `img_0`). Returns \
-         a description and the image itself when the model supports vision.",
+        "Fetch and look at an image referenced by its [image: <id> (filename)] \
+         placeholder. Pass the `image_id` exactly as shown (e.g. \
+         `img_3fa9c2d1e77b4056`). \
+         Returns a description and the image itself when the model supports vision.",
         json!({
             "type": "object",
             "properties": {
                 "image_id": {
                     "type": "string",
-                    "description": "Image id from the [image: img_N] placeholder.",
+                    "description": "Image id from the [image: <id>] placeholder.",
                 },
             },
             "required": ["image_id"],

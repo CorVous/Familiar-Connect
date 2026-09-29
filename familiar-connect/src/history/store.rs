@@ -129,6 +129,14 @@ CREATE TABLE IF NOT EXISTS turn_mentions (
 CREATE INDEX IF NOT EXISTS idx_turn_mentions_canonical
     ON turn_mentions (canonical_key, turn_id);
 
+CREATE TABLE IF NOT EXISTS turn_images (
+    img_id      TEXT    PRIMARY KEY,
+    url         TEXT    NOT NULL,
+    filename    TEXT,
+    channel_id  INTEGER,
+    created_at  TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS summaries (
     familiar_id         TEXT    NOT NULL,
     channel_id          INTEGER NOT NULL DEFAULT 0,
@@ -639,6 +647,7 @@ pub struct AppendTurn {
     arrived_at: Option<DateTime<Utc>>,
     consumed: bool,
     pings_bot: bool,
+    images: HashMap<String, String>,
 }
 
 impl AppendTurn {
@@ -664,6 +673,7 @@ impl AppendTurn {
             arrived_at: None,
             consumed: true,
             pings_bot: false,
+            images: HashMap::new(),
         }
     }
 
@@ -715,6 +725,13 @@ impl AppendTurn {
     #[must_use]
     pub const fn pings_bot(mut self, pings_bot: bool) -> Self {
         self.pings_bot = pings_bot;
+        self
+    }
+    /// The turn's `img_id` → URL map, persisted so `view_image` can still
+    /// resolve a marker after the turn re-enters a prompt as history text.
+    #[must_use]
+    pub fn images(mut self, images: HashMap<String, String>) -> Self {
+        self.images = images;
         self
     }
 }
@@ -1295,6 +1312,9 @@ impl HistoryStore {
             params,
         )?;
         Self::safe_fts_add(self.fts_turns.as_ref(), turn_id, &p.content, "turn");
+        if let Err(err) = self.record_images(p.channel_id, &p.images, timestamp) {
+            tracing::warn!(target: "familiar_connect.history", turn_id, %err, "turn images skipped");
+        }
         Ok(HistoryTurn {
             id: turn_id,
             timestamp,
@@ -1315,6 +1335,50 @@ impl HistoryStore {
     /// `append_turn` with `consumed = false` (staged).
     pub fn stage_turn(&self, p: AppendTurn) -> Result<HistoryTurn, StoreError> {
         self.append_turn(p.consumed(false))
+    }
+
+    /// Persist a turn's `img_id` → URL map (idempotent; empty no-op).
+    ///
+    /// Ids hash the URL, so a repeat is the same row rewritten. `filename` stays
+    /// NULL: the marker in the turn content already carries it.
+    fn record_images(
+        &self,
+        channel_id: i64,
+        images: &HashMap<String, String>,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        if images.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<(String, String)> = images
+            .iter()
+            .map(|(id, url)| (id.clone(), url.clone()))
+            .collect();
+        let created_at = iso_utc(created_at);
+        self.db.run(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            for (img_id, url) in &rows {
+                tx.execute(
+                    "INSERT OR REPLACE INTO turn_images \
+                        (img_id, url, filename, channel_id, created_at) \
+                     VALUES (?1, ?2, NULL, ?3, ?4)",
+                    params![img_id, url, channel_id, created_at],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// The URL behind an `img_id`, or `None` when it was never recorded (legacy
+    /// `img_N` markers predate the table).
+    pub fn image_url(&self, img_id: &str) -> Result<Option<String>, StoreError> {
+        let rows = self.db.query_map(
+            "SELECT url FROM turn_images WHERE img_id = ?",
+            vec![v_str(img_id)],
+            |r| r.get::<_, String>("url"),
+        )?;
+        Ok(rows.into_iter().next())
     }
 
     /// Find the turn carrying `platform_message_id` (highest id on duplicates).
@@ -3788,9 +3852,29 @@ enum FactInsert {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_keys_from_subjects_json, normalize_fact_text, parse_subjects, placeholders,
+        AppendTurn, HistoryStore, canonical_keys_from_subjects_json, normalize_fact_text,
+        parse_subjects, placeholders,
     };
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+
+    /// The turn row is already committed when the image rows are written, so an
+    /// image failure must not swallow the message — the familiar would go mute
+    /// with nothing persisted to explain it.
+    #[test]
+    fn append_turn_survives_an_image_write_failure() {
+        let store = HistoryStore::open(":memory:").unwrap();
+        store.db.execute_batch("DROP TABLE turn_images").unwrap();
+
+        let turn = store
+            .append_turn(
+                AppendTurn::new("fam", 7, "user", "look").images(HashMap::from([(
+                    "img_abc123de45f6789a".to_owned(),
+                    "http://cdn.example.com/cat.png".to_owned(),
+                )])),
+            )
+            .expect("turn persists even when its images cannot");
+        assert_eq!(turn.content, "look");
+    }
 
     #[test]
     fn placeholders_emits_bound_marks() {

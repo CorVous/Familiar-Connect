@@ -179,6 +179,28 @@ impl ChannelReadStore for AsyncHistoryStore {
     }
 }
 
+/// Resolves an `img_id` a turn's own payload no longer carries — the marker
+/// persists in history text long after the triggering event is gone.
+/// [`AsyncHistoryStore`] implements it; tests inject a map.
+#[async_trait]
+pub trait ImageUrlResolver: Send + Sync {
+    /// The URL behind `img_id`, or `None` when it is unknown.
+    async fn resolve(&self, img_id: &str) -> Option<String>;
+}
+
+#[async_trait]
+impl ImageUrlResolver for AsyncHistoryStore {
+    async fn resolve(&self, img_id: &str) -> Option<String> {
+        match self.image_url(img_id).await {
+            Ok(url) => url,
+            Err(err) => {
+                tracing::warn!(target: "familiar_connect.tools", img_id, %err, "image url lookup failed");
+                None
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ToolContext
 // ---------------------------------------------------------------------------
@@ -208,6 +230,8 @@ pub struct ToolContext {
     pub scheduler: Option<Arc<AlarmScheduler>>,
     /// `img_id` → URL placeholder map injected per-turn (for `view_image`).
     pub images: HashMap<String, String>,
+    /// Fallback lookup for `img_id`s absent from `images` (staged history).
+    pub image_resolver: Option<Arc<dyn ImageUrlResolver>>,
     /// **Substitution** vision client: describes the image for a calling model
     /// that cannot see it. Never consulted when [`multimodal`](Self::multimodal)
     /// is set — the model gets the image itself.
@@ -243,6 +267,7 @@ impl ToolContext {
             bus: None,
             scheduler: None,
             images: HashMap::new(),
+            image_resolver: None,
             description_llm: None,
             caption_llm: None,
             multimodal: false,
@@ -276,6 +301,13 @@ impl ToolContext {
     #[must_use]
     pub fn with_images(mut self, images: HashMap<String, String>) -> Self {
         self.images = images;
+        self
+    }
+
+    /// Builder: attach the fallback `img_id` resolver.
+    #[must_use]
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageUrlResolver>) -> Self {
+        self.image_resolver = Some(resolver);
         self
     }
 

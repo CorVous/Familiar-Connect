@@ -33,6 +33,26 @@ async fn persists_discord_text_event() {
 }
 
 #[tokio::test]
+async fn persists_the_payload_images() {
+    let s = store();
+    let writer = HistoryWriter::new(Arc::clone(&s), "fam");
+    let mut payload = text_payload(42, "look [image: img_abc123de (cat.png)]");
+    payload.images.insert(
+        "img_abc123de".to_owned(),
+        "http://cdn.example.com/cat.png".to_owned(),
+    );
+    writer
+        .handle(&discord_text_event(payload, "e-1"), &bus())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        s.image_url("img_abc123de").await.unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
+}
+
+#[tokio::test]
 async fn dedups_on_event_id() {
     let s = store();
     let writer = HistoryWriter::new(Arc::clone(&s), "fam");
