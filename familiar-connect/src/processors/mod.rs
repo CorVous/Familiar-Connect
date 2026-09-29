@@ -63,7 +63,7 @@ pub struct DiscordTextPayload {
     pub reply_to_message_id: Option<String>,
     /// Resolved mentioned authors.
     pub mentions: Vec<Author>,
-    /// `img_N` → URL map threaded into the tool context.
+    /// `img_id` → URL map threaded into the tool context.
     pub images: HashMap<String, String>,
     /// Whether the incoming message pinged the bot.
     pub pings_bot: bool,

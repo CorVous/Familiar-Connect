@@ -708,6 +708,53 @@ fn responder_llm(
     Arc::new(ResponderLlmAdapter { inner, image_tools })
 }
 
+/// The long-lived collaborators every per-turn [`ToolContext`] draws on.
+///
+/// [`ToolContext`]: crate::tools::registry::ToolContext
+#[cfg(feature = "discord")]
+struct ToolContextDeps {
+    familiar_id: String,
+    channel_kind: &'static str,
+    history: Arc<crate::history::async_store::AsyncHistoryStore>,
+    bus: Arc<dyn crate::bus::protocols::EventBus>,
+    scheduler: Arc<crate::tools::scheduler::AlarmScheduler>,
+    focus: Arc<dyn crate::tools::registry::FocusControl>,
+    description_llm: Option<Arc<dyn crate::llm::LlmClient>>,
+    caption_llm: Option<Arc<dyn crate::llm::LlmClient>>,
+    multimodal: bool,
+}
+
+/// Build one turn's tool context.
+#[cfg(feature = "discord")]
+fn build_tool_context(
+    deps: &ToolContextDeps,
+    channel_id: i64,
+    turn_id: &str,
+    images: HashMap<String, String>,
+) -> crate::tools::registry::ToolContext {
+    let mut ctx = crate::tools::registry::ToolContext::new(
+        deps.familiar_id.clone(),
+        channel_id,
+        deps.channel_kind,
+        turn_id,
+    )
+    .with_history(deps.history.clone())
+    .with_bus(deps.bus.clone())
+    .with_scheduler(deps.scheduler.clone())
+    .with_images(images)
+    .with_image_resolver(deps.history.clone())
+    .with_focus_manager(deps.focus.clone())
+    .with_store(deps.history.clone())
+    .with_multimodal(deps.multimodal);
+    if let Some(description) = &deps.description_llm {
+        ctx = ctx.with_description_llm(description.clone());
+    }
+    if let Some(caption) = &deps.caption_llm {
+        ctx = ctx.with_caption_llm(caption.clone());
+    }
+    ctx
+}
+
 /// Debug-logger observed topics.
 #[cfg(feature = "discord")]
 const DEBUG_TOPICS: [&str; 4] = [
@@ -939,7 +986,6 @@ async fn async_main(
     use crate::processors::{ActivityGate, FocusManagerApi, MemberResolver};
     use crate::subscriptions::SubscriptionRegistry;
     use crate::tools::builtins::{build_text_registry, build_voice_registry};
-    use crate::tools::registry::{ChannelReadStore, FocusControl, ToolContext};
     use crate::tools::scheduler::AlarmScheduler;
     use crate::tools::start_activity::StartActivityEngine;
     use crate::tools::waker::AlarmWaker;
@@ -1137,11 +1183,6 @@ async fn async_main(
 
     // Per-turn ToolContext factory.
     let make_factory = |channel_kind: &'static str, with_description: bool| {
-        let familiar_id = familiar.id.clone();
-        let history = familiar.history_store.clone();
-        let bus = familiar.bus.clone();
-        let scheduler = alarm_scheduler.clone();
-        let fm = focus_manager.clone();
         let (description, caption, multimodal) = if with_description {
             (
                 description_llm.clone(),
@@ -1151,26 +1192,20 @@ async fn async_main(
         } else {
             (None, None, false)
         };
+        let deps = ToolContextDeps {
+            familiar_id: familiar.id.clone(),
+            channel_kind,
+            history: familiar.history_store.clone(),
+            bus: familiar.bus.clone(),
+            scheduler: alarm_scheduler.clone(),
+            focus: focus_manager.clone(),
+            description_llm: description,
+            caption_llm: caption,
+            multimodal,
+        };
         let factory: crate::processors::ToolContextFactory = Arc::new(
             move |channel_id: i64, turn_id: &str, images: HashMap<String, String>| {
-                let focus_control: Arc<dyn FocusControl> = fm.clone();
-                let read_store: Arc<dyn ChannelReadStore> = history.clone();
-                let mut ctx =
-                    ToolContext::new(familiar_id.clone(), channel_id, channel_kind, turn_id)
-                        .with_history(history.clone())
-                        .with_bus(bus.clone())
-                        .with_scheduler(scheduler.clone())
-                        .with_images(images)
-                        .with_focus_manager(focus_control)
-                        .with_store(read_store)
-                        .with_multimodal(multimodal);
-                if let Some(description) = &description {
-                    ctx = ctx.with_description_llm(description.clone());
-                }
-                if let Some(caption) = &caption {
-                    ctx = ctx.with_caption_llm(caption.clone());
-                }
-                ctx
+                build_tool_context(&deps, channel_id, turn_id, images)
             },
         );
         factory
@@ -2008,6 +2043,67 @@ mod tests {
         assert!(!waiter.is_finished());
         controller.signal();
         waiter.await.unwrap();
+    }
+
+    // --- per-turn ToolContext assembly -------------------------------------
+
+    #[cfg(feature = "discord")]
+    mod tool_context {
+        use super::super::{ToolContextDeps, build_tool_context};
+        use crate::bus::in_process::InProcessEventBus;
+        use crate::focus::FocusManager;
+        use crate::history::async_store::AsyncHistoryStore;
+        use crate::history::store::{AppendTurn, HistoryStore};
+        use crate::subscriptions::SubscriptionRegistry;
+        use crate::tools::scheduler::AlarmScheduler;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        /// `view_image` can only reach a staged turn's images if the composition
+        /// root hands every context the store-backed resolver — with none
+        /// attached, the fallback silently never fires in production.
+        #[tokio::test]
+        async fn built_context_resolves_image_ids_through_the_history_store() {
+            let dir = TempDir::new().unwrap();
+            let history = Arc::new(AsyncHistoryStore::new(
+                HistoryStore::open(":memory:").unwrap(),
+            ));
+            let bus = Arc::new(InProcessEventBus::new());
+            let subscriptions = Arc::new(Mutex::new(
+                SubscriptionRegistry::new(dir.path().join("subscriptions.toml")).unwrap(),
+            ));
+            history
+                .append_turn(
+                    AppendTurn::new("fam", 42, "user", "look").images(HashMap::from([(
+                        "img_1111aaaa2222bbbb".to_owned(),
+                        "http://cdn.example.com/cat.png".to_owned(),
+                    )])),
+                )
+                .await
+                .unwrap();
+
+            let deps = ToolContextDeps {
+                familiar_id: "fam".to_owned(),
+                channel_kind: "text",
+                history: history.clone(),
+                bus: bus.clone(),
+                scheduler: Arc::new(AlarmScheduler::new(history.clone(), bus, "fam")),
+                focus: Arc::new(FocusManager::new("fam", history, subscriptions)),
+                description_llm: None,
+                caption_llm: None,
+                multimodal: false,
+            };
+            let ctx = build_tool_context(&deps, 42, "turn-1", HashMap::new());
+
+            let resolver = ctx
+                .image_resolver
+                .expect("every tool context needs the image resolver");
+            assert_eq!(
+                resolver.resolve(42, "img_1111aaaa2222bbbb").await,
+                Some("http://cdn.example.com/cat.png".to_owned())
+            );
+        }
     }
 
     // --- boot DM subscription validation + naming (PR #194) ----------------

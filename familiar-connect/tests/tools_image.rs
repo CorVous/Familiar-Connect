@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::Value;
 
+use familiar_connect::bot::{AttachmentView, collect_images};
+use familiar_connect::history::async_store::AsyncHistoryStore;
+use familiar_connect::history::{AppendTurn, HistoryStore};
 use familiar_connect::llm::{Content, LlmClient, Message};
 use familiar_connect::tools::agentic::{serialize_image_result, tool_content_as_text};
 use familiar_connect::tools::image::{
@@ -15,7 +18,7 @@ use familiar_connect::tools::image::{
 };
 use familiar_connect::tools::image_describe::{DESCRIBE_PROMPT, describe_image};
 use familiar_connect::tools::image_policy::{HostResolver, ImageUrlPolicy, UrlGuard};
-use familiar_connect::tools::registry::{ToolContext, ToolOutput};
+use familiar_connect::tools::registry::{ImageUrlResolver, ToolContext, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Doubles
@@ -72,6 +75,35 @@ struct CannedFetcher {
 impl ImageFetcher for CannedFetcher {
     async fn fetch(&self, _url: &str) -> anyhow::Result<Vec<u8>> {
         Ok(self.bytes.clone())
+    }
+}
+
+struct MapResolver {
+    urls: HashMap<String, String>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl MapResolver {
+    fn new(urls: &[(&str, &str)]) -> Self {
+        Self {
+            urls: urls
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ImageUrlResolver for MapResolver {
+    async fn resolve(&self, _channel_id: i64, img_id: &str) -> Option<String> {
+        self.asked.lock().unwrap().push(img_id.to_owned());
+        self.urls.get(img_id).cloned()
     }
 }
 
@@ -353,6 +385,184 @@ async fn a_text_only_caller_falls_back_to_the_caption_model() {
         .with_multimodal(false);
     assert_eq!(view(&ctx).await.description, "a cat");
     assert_eq!(caption.calls(), 1);
+}
+
+#[tokio::test]
+async fn view_image_falls_back_to_the_resolver_when_context_misses() {
+    let resolver = Arc::new(MapResolver::new(&[(
+        "img_abc123de",
+        "http://cdn.example.com/cat.png",
+    )]));
+    let ctx = ctx_with_images(&[], None).with_image_resolver(resolver.clone());
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let out = tool
+        .handler
+        .call(serde_json::json!({"image_id": "img_abc123de"}), &ctx)
+        .await
+        .unwrap();
+    let ToolOutput::Image(img) = out else {
+        panic!("expected image result");
+    };
+    assert!(!img.jpeg_base64.is_empty());
+    assert_eq!(resolver.asked(), vec!["img_abc123de".to_owned()]);
+}
+
+#[tokio::test]
+async fn view_image_prefers_the_context_map_over_the_resolver() {
+    let resolver = Arc::new(MapResolver::new(&[]));
+    let ctx = ctx_with_images(&[("img_abc123de", "http://cdn.example.com/cat.png")], None)
+        .with_image_resolver(resolver.clone());
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let out = tool
+        .handler
+        .call(serde_json::json!({"image_id": "img_abc123de"}), &ctx)
+        .await
+        .unwrap();
+    assert!(matches!(out, ToolOutput::Image(_)));
+    assert!(resolver.asked().is_empty());
+}
+
+#[tokio::test]
+async fn view_image_unknown_to_both_returns_error() {
+    let ctx = ctx_with_images(&[], None).with_image_resolver(Arc::new(MapResolver::new(&[])));
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let out = tool
+        .handler
+        .call(serde_json::json!({"image_id": "img_deadbeef"}), &ctx)
+        .await
+        .unwrap();
+    let ToolOutput::Text(s) = out else {
+        panic!("expected text error");
+    };
+    let data: Value = serde_json::from_str(&s).unwrap();
+    assert!(data["error"].as_str().unwrap().contains("unknown image id"));
+}
+
+/// A message staged in an unfocused channel carries no payload image map, so the
+/// promoted turn's marker resolves through history alone.
+#[tokio::test]
+async fn staged_turn_image_resolves_from_history_alone() {
+    let url = "http://cdn.example.com/cat.png";
+    let (content, images) = collect_images(
+        "look at this",
+        &[AttachmentView {
+            url: Some(url.to_owned()),
+            filename: Some("cat.png".to_owned()),
+            content_type: Some("image/png".to_owned()),
+        }],
+        &[],
+    );
+    let store = Arc::new(AsyncHistoryStore::new(
+        HistoryStore::open(":memory:").unwrap(),
+    ));
+    store
+        .stage_turn(AppendTurn::new("fam", 42, "user", &content).images(images))
+        .await
+        .unwrap();
+
+    let history_text = store.sync().recent("fam", 42, 10, None, None).unwrap()[0]
+        .content
+        .clone();
+    let img_id = history_text
+        .split("[image: ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap();
+
+    let ctx = ctx_with_images(&[], None)
+        .with_image_resolver(Arc::clone(&store) as Arc<dyn ImageUrlResolver>);
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let out = tool
+        .handler
+        .call(serde_json::json!({ "image_id": img_id }), &ctx)
+        .await
+        .unwrap();
+    assert!(matches!(out, ToolOutput::Image(_)));
+}
+
+/// An id retrieved into another channel's prompt must not be fetchable there:
+/// a DM image surfaced by RAG stays out of the guild it was quoted into.
+#[tokio::test]
+async fn view_image_resolves_only_in_the_channel_that_recorded_it() {
+    let dm_channel = 42;
+    let guild_channel = 99;
+    let store = Arc::new(AsyncHistoryStore::new(
+        HistoryStore::open(":memory:").unwrap(),
+    ));
+    let img_id = "img_1111aaaa2222bbbb";
+    store
+        .append_turn(
+            AppendTurn::new("fam", dm_channel, "user", "look").images(HashMap::from([(
+                img_id.to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .await
+        .unwrap();
+
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let resolver = Arc::clone(&store) as Arc<dyn ImageUrlResolver>;
+    let call = async |channel_id: i64| {
+        let ctx = ToolContext::new("fam", channel_id, "text", "turn-1")
+            .with_image_resolver(Arc::clone(&resolver));
+        tool.handler
+            .call(serde_json::json!({ "image_id": img_id }), &ctx)
+            .await
+            .unwrap()
+    };
+
+    assert!(matches!(call(dm_channel).await, ToolOutput::Image(_)));
+    let ToolOutput::Text(s) = call(guild_channel).await else {
+        panic!("expected a text error in the other channel");
+    };
+    let data: Value = serde_json::from_str(&s).unwrap();
+    assert!(data["error"].as_str().unwrap().contains("unknown image id"));
+}
+
+/// The turn's own `shift_focus` target counts as its channel: the recorded
+/// target is where the reply lands, and where the previewed markers came from.
+#[tokio::test]
+async fn view_image_resolves_an_image_from_this_turns_shift_target() {
+    let started_in = 42;
+    let shifted_to = 99;
+    let store = Arc::new(AsyncHistoryStore::new(
+        HistoryStore::open(":memory:").unwrap(),
+    ));
+    let img_id = "img_1111aaaa2222bbbb";
+    store
+        .append_turn(
+            AppendTurn::new("fam", shifted_to, "user", "look").images(HashMap::from([(
+                img_id.to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .await
+        .unwrap();
+
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let shift_target: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+    let ctx = ToolContext::new("fam", started_in, "text", "turn-1")
+        .with_image_resolver(Arc::clone(&store) as Arc<dyn ImageUrlResolver>)
+        .with_shift_target(Arc::clone(&shift_target));
+
+    let unshifted = tool
+        .handler
+        .call(serde_json::json!({ "image_id": img_id }), &ctx)
+        .await
+        .unwrap();
+    let ToolOutput::Text(s) = unshifted else {
+        panic!("expected a text error before the shift");
+    };
+    let data: Value = serde_json::from_str(&s).unwrap();
+    assert!(data["error"].as_str().unwrap().contains("unknown image id"));
+
+    *shift_target.lock().unwrap() = Some(shifted_to);
+    let after_shift = tool
+        .handler
+        .call(serde_json::json!({ "image_id": img_id }), &ctx)
+        .await
+        .unwrap();
+    assert!(matches!(after_shift, ToolOutput::Image(_)));
 }
 
 #[tokio::test]
