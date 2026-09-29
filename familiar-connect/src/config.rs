@@ -2571,9 +2571,13 @@ fn parse_tier_budget(
 ) -> Result<TierBudget, ConfigError> {
     check_unknown_keys(raw, &BUDGET_FIELDS, &format!("[budget.{tier}]"))?;
     let get = |key: &str, fallback: i64| -> Result<i64, ConfigError> {
+        let allow_zero = key == "max_rag_turns";
         match raw.get(key) {
             None => Ok(fallback),
-            Some(Value::Integer(n)) if *n > 0 => Ok(*n),
+            Some(Value::Integer(n)) if *n > 0 || (allow_zero && *n == 0) => Ok(*n),
+            Some(Value::Integer(n)) if allow_zero => Err(ConfigError(format!(
+                "[budget.{tier}].{key} must be non-negative, got {n}"
+            ))),
             Some(Value::Integer(n)) => Err(ConfigError(format!(
                 "[budget.{tier}].{key} must be positive, got {n}"
             ))),
