@@ -368,14 +368,24 @@ fn real_focus_responder(
     reg.register(build_shift_focus_tool()).unwrap();
     reg.register(familiar_connect::tools::silent::build_silent_tool())
         .unwrap();
+    #[cfg(feature = "images")]
+    reg.register(
+        familiar_connect::tools::image::build_view_image_tool_with_fetcher(
+            "",
+            Arc::new(CannedFetcher),
+        ),
+    )
+    .unwrap();
 
     let fm_ctx = Arc::clone(&fm);
     let store_ctx = Arc::clone(&s);
+    let resolver_store = Arc::clone(&s);
     let factory: ToolContextFactory = Arc::new(move |channel_id, turn_id, images| {
         ToolContext::new("fam", channel_id, "text", turn_id)
             .with_images(images)
             .with_focus_manager(Arc::clone(&fm_ctx) as _)
             .with_store(Arc::clone(&store_ctx) as _)
+            .with_image_resolver(Arc::clone(&resolver_store) as _)
     });
 
     let assembler = make_assembler(Arc::clone(&s));
@@ -432,6 +442,78 @@ async fn overridden_shift_focus_coaching_reaches_the_trailing_reminder() {
     let trailing = trailing_with_coaching("COACH_MARKER").await;
     assert!(trailing.contains("COACH_MARKER"), "{trailing}");
     assert!(!trailing.contains("pulls your attention"), "{trailing}");
+}
+
+/// Serves the same PNG for any URL, so `view_image` never touches the network.
+#[cfg(feature = "images")]
+struct CannedFetcher;
+
+#[cfg(feature = "images")]
+#[async_trait::async_trait]
+impl familiar_connect::tools::image::ImageFetcher for CannedFetcher {
+    async fn fetch(&self, _url: &str) -> anyhow::Result<Vec<u8>> {
+        use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+        let img = RgbImage::from_pixel(10, 10, Rgb([100, 150, 200]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, ImageFormat::Png)
+            .unwrap();
+        Ok(buf.into_inner())
+    }
+}
+
+/// `shift_focus` previews the target channel's `[image: …]` markers, so the same
+/// turn has to be able to look at one: the image lives in the channel the turn
+/// shifted to, not the channel the turn started in.
+#[cfg(feature = "images")]
+#[tokio::test]
+async fn view_image_resolves_a_marker_from_this_turns_shift_target() {
+    const IMG_ID: &str = "img_1111aaaa2222bbbb";
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![shift_tc(200), finish("tool_calls")],
+        vec![
+            tc_delta("vi-1", "view_image", json!({ "image_id": IMG_ID })),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("looked"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, _fm, s) = real_focus_responder(Arc::clone(&llm), send);
+    s.append_turn(
+        AppendTurn::new(
+            "fam",
+            200,
+            "user",
+            format!("look [image: {IMG_ID} (cat.png)]"),
+        )
+        .images(std::collections::HashMap::from([(
+            IMG_ID.to_owned(),
+            "http://cdn.example.com/cat.png".to_owned(),
+        )])),
+    )
+    .await
+    .unwrap();
+
+    r.handle(
+        &discord_text_event(text_payload(100, "peek"), "e-1"),
+        &bus(),
+    )
+    .await
+    .unwrap();
+
+    let after_tools = llm
+        .calls()
+        .get(2)
+        .expect("the view_image result should feed a third call")
+        .iter()
+        .map(familiar_connect::llm::Message::content_str)
+        .collect::<Vec<String>>()
+        .join("\n");
+    assert!(!after_tools.contains("unknown image id"), "{after_tools}");
+    assert!(
+        after_tools.contains("no description model configured"),
+        "{after_tools}"
+    );
 }
 
 /// A silent `shift_focus` call — no `silent: false`, so the turn stays quiet.

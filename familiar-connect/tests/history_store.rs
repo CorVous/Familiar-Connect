@@ -167,7 +167,7 @@ fn appended_turn_images_survive_a_reopen() {
     );
 }
 
-/// The id space is global, so each turn's images must survive the next turn's.
+/// Ids hash the URL, so two turns' images never collide.
 #[test]
 fn images_from_different_turns_each_keep_their_own_url() {
     let store = mem();

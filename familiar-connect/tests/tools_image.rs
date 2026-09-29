@@ -519,6 +519,52 @@ async fn view_image_resolves_only_in_the_channel_that_recorded_it() {
     assert!(data["error"].as_str().unwrap().contains("unknown image id"));
 }
 
+/// The turn's own `shift_focus` target counts as its channel: the recorded
+/// target is where the reply lands, and where the previewed markers came from.
+#[tokio::test]
+async fn view_image_resolves_an_image_from_this_turns_shift_target() {
+    let started_in = 42;
+    let shifted_to = 99;
+    let store = Arc::new(AsyncHistoryStore::new(
+        HistoryStore::open(":memory:").unwrap(),
+    ));
+    let img_id = "img_1111aaaa2222bbbb";
+    store
+        .append_turn(
+            AppendTurn::new("fam", shifted_to, "user", "look").images(HashMap::from([(
+                img_id.to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .await
+        .unwrap();
+
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let shift_target: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+    let ctx = ToolContext::new("fam", started_in, "text", "turn-1")
+        .with_image_resolver(Arc::clone(&store) as Arc<dyn ImageUrlResolver>)
+        .with_shift_target(Arc::clone(&shift_target));
+
+    let unshifted = tool
+        .handler
+        .call(serde_json::json!({ "image_id": img_id }), &ctx)
+        .await
+        .unwrap();
+    let ToolOutput::Text(s) = unshifted else {
+        panic!("expected a text error before the shift");
+    };
+    let data: Value = serde_json::from_str(&s).unwrap();
+    assert!(data["error"].as_str().unwrap().contains("unknown image id"));
+
+    *shift_target.lock().unwrap() = Some(shifted_to);
+    let after_shift = tool
+        .handler
+        .call(serde_json::json!({ "image_id": img_id }), &ctx)
+        .await
+        .unwrap();
+    assert!(matches!(after_shift, ToolOutput::Image(_)));
+}
+
 #[tokio::test]
 async fn view_image_no_description_llm_degrades() {
     let ctx = ctx_with_images(&[("img_0", "http://cdn.example.com/img.png")], None);
