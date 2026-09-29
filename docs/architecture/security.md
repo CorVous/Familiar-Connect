@@ -26,19 +26,27 @@ Trust model is single-operator: the admin running the bot has full access to eve
 
 ## Outbound image fetches (`view_image`)
 
-The model never passes a URL. It passes an `image_id` (`img_0`, `img_1`, …)
-that the bot minted while reading the message, and `collect_images`
-(`src/bot.rs`) builds that map from three sources: attachments, embeds
-(preferring Discord's re-hosted `proxy_url`), and **a regex scrape of image
-URLs out of the message text**. The third source is attacker-controlled — anyone
-in the channel can paste `https://attacker.example/x.png` and it becomes a
-fetchable image id. A fetch discloses the operator's IP to that host and
-reaches whatever the host is, including addresses only the operator's machine
-can route to.
+The model never passes a URL. It passes an `image_id` — `img_` + the first 16
+hex digits of the URL's SHA-256 — that the bot minted while reading the message.
+`collect_images` (`src/bot.rs`) builds the per-turn map from three sources:
+attachments, embeds (preferring Discord's re-hosted `proxy_url`), and **a regex
+scrape of image URLs out of the message text**. The third source is
+attacker-controlled — anyone in the channel can paste
+`https://attacker.example/x.png` and it becomes a fetchable image id. A fetch
+discloses the operator's IP to that host and reaches whatever the host is,
+including addresses only the operator's machine can route to.
+
+An id outlives its turn: the append path records it in the `turn_images` table,
+and `view_image` falls back to that table for markers whose payload map is gone
+(`HistoryStore::image_url`). The fallback is **scoped to the channel that
+recorded the image**, so an id that retrieval lifts out of a DM into a guild prompt
+resolves to nothing there. A row lives as long as the history database, so an id
+stays fetchable for the life of the URL behind it.
 
 The gate lives at the fetch boundary (`tools::image_policy::UrlGuard`), not at
-collection, so all three sources — and any fourth added later — pass through
-one check. Two rules apply before a socket opens:
+collection, so every source — the three collectors, the `turn_images` fallback,
+and any added later — passes through one check. Two rules apply before a socket
+opens:
 
 1. **Unconditional.** Scheme must be `http` or `https`, and every address the
    host resolves to must be public unicast. Loopback, RFC1918, link-local
