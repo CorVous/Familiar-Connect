@@ -129,11 +129,12 @@ CREATE TABLE IF NOT EXISTS turn_mentions (
 CREATE INDEX IF NOT EXISTS idx_turn_mentions_canonical
     ON turn_mentions (canonical_key, turn_id);
 
-CREATE TABLE IF NOT EXISTS turn_images (
-    img_id      TEXT    PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS channel_images (
+    channel_id  INTEGER NOT NULL,
+    img_id      TEXT    NOT NULL,
     url         TEXT    NOT NULL,
-    channel_id  INTEGER,
-    created_at  TEXT    NOT NULL
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (channel_id, img_id)
 );
 
 CREATE TABLE IF NOT EXISTS summaries (
@@ -1336,9 +1337,11 @@ impl HistoryStore {
         self.append_turn(p.consumed(false))
     }
 
-    /// Persist a turn's `img_id` → URL map (idempotent; empty no-op).
+    /// Persist a turn's `img_id` → URL map for its channel (idempotent; empty
+    /// no-op).
     ///
-    /// Ids hash the URL, so a repeat is the same row rewritten.
+    /// Ids hash the URL, so a repeat within the channel is the same row
+    /// rewritten, and the same image in another channel is its own row.
     fn record_images(
         &self,
         channel_id: i64,
@@ -1357,10 +1360,10 @@ impl HistoryStore {
             let tx = conn.unchecked_transaction()?;
             for (img_id, url) in &rows {
                 tx.execute(
-                    "INSERT OR REPLACE INTO turn_images \
-                        (img_id, url, channel_id, created_at) \
+                    "INSERT OR REPLACE INTO channel_images \
+                        (channel_id, img_id, url, created_at) \
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![img_id, url, channel_id, created_at],
+                    params![channel_id, img_id, url, created_at],
                 )?;
             }
             tx.commit()?;
@@ -1375,8 +1378,8 @@ impl HistoryStore {
     /// to fetch: an image from a DM must not be reachable from a guild prompt.
     pub fn image_url(&self, channel_id: i64, img_id: &str) -> Result<Option<String>, StoreError> {
         let rows = self.db.query_map(
-            "SELECT url FROM turn_images WHERE img_id = ? AND channel_id = ?",
-            vec![v_str(img_id), v_int(channel_id)],
+            "SELECT url FROM channel_images WHERE channel_id = ? AND img_id = ?",
+            vec![v_int(channel_id), v_str(img_id)],
             |r| r.get::<_, String>("url"),
         )?;
         Ok(rows.into_iter().next())
@@ -3864,7 +3867,7 @@ mod tests {
     #[test]
     fn append_turn_survives_an_image_write_failure() {
         let store = HistoryStore::open(":memory:").unwrap();
-        store.db.execute_batch("DROP TABLE turn_images").unwrap();
+        store.db.execute_batch("DROP TABLE channel_images").unwrap();
 
         let turn = store
             .append_turn(
@@ -3896,7 +3899,7 @@ mod tests {
         let rows: Vec<i64> = store
             .db
             .query_map(
-                "SELECT COUNT(*) AS n FROM turn_images WHERE img_id = ?",
+                "SELECT COUNT(*) AS n FROM channel_images WHERE img_id = ?",
                 vec![super::v_str("img_abc123de45f6789a")],
                 |r| r.get::<_, i64>("n"),
             )

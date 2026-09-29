@@ -717,7 +717,7 @@ fn url_last_segment(url: &str, strip_query: bool) -> &str {
 /// Hashing the URL (rather than counting per message) keeps an id stable across
 /// restarts and unique across messages, so a staged turn's marker still resolves
 /// once the turn is promoted into a later prompt. The width buys collision
-/// headroom: ids key `turn_images` rows, and a collision would silently hand
+/// headroom: ids key `channel_images` rows, and a collision would silently hand
 /// `view_image` the wrong picture.
 fn image_id(url: &str) -> String {
     use std::fmt::Write as _;
