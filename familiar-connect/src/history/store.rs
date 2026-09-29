@@ -132,7 +132,6 @@ CREATE INDEX IF NOT EXISTS idx_turn_mentions_canonical
 CREATE TABLE IF NOT EXISTS turn_images (
     img_id      TEXT    PRIMARY KEY,
     url         TEXT    NOT NULL,
-    filename    TEXT,
     channel_id  INTEGER,
     created_at  TEXT    NOT NULL
 );
@@ -1339,8 +1338,7 @@ impl HistoryStore {
 
     /// Persist a turn's `img_id` → URL map (idempotent; empty no-op).
     ///
-    /// Ids hash the URL, so a repeat is the same row rewritten. `filename` stays
-    /// NULL: the marker in the turn content already carries it.
+    /// Ids hash the URL, so a repeat is the same row rewritten.
     fn record_images(
         &self,
         channel_id: i64,
@@ -1360,8 +1358,8 @@ impl HistoryStore {
             for (img_id, url) in &rows {
                 tx.execute(
                     "INSERT OR REPLACE INTO turn_images \
-                        (img_id, url, filename, channel_id, created_at) \
-                     VALUES (?1, ?2, NULL, ?3, ?4)",
+                        (img_id, url, channel_id, created_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
                     params![img_id, url, channel_id, created_at],
                 )?;
             }
