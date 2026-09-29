@@ -40,7 +40,7 @@ An id outlives its turn: the append path records it in the `channel_images`
 table, keyed on `(channel_id, img_id)`, and `view_image` falls back to that table
 for markers whose payload map is gone (`HistoryStore::image_url`). The fallback
 resolves in exactly two channels — **the channel the turn was triggered from, and
-the channel this turn's own `shift_focus` moved to** (the turn-local sink the
+the channel this turn's `shift_focus` most recently moved to** (the turn-local sink the
 reply is routed by, never the global focus pointer). Nothing else resolves: an id
 that retrieval lifts out of a DM into an unrelated guild prompt is not fetchable
 there. The same image posted in two channels is a row in each. A row lives as
