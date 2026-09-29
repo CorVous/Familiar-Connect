@@ -61,6 +61,37 @@ async fn fact_only_when_no_matching_turns() {
 }
 
 #[tokio::test]
+async fn max_results_zero_drops_the_earlier_turns_section() {
+    let store = store();
+    store
+        .sync()
+        .append_turn(AppendTurn::new(
+            "fam",
+            1,
+            "user",
+            "Mentioned strawberries in passing.",
+        ))
+        .unwrap();
+    store
+        .sync()
+        .append_fact(AppendFact::new(
+            "fam",
+            Some(1),
+            "Aria likes strawberries.",
+            vec![1],
+        ))
+        .unwrap();
+    let layer = RagContextLayer::builder(store)
+        .max_results(0)
+        .max_facts(3)
+        .build();
+    layer.set_current_cue("strawberry");
+    let out = layer.build(&vctx(1)).await;
+    assert!(out.contains("Aria likes strawberries"));
+    assert!(!out.contains("earlier turns"));
+}
+
+#[tokio::test]
 async fn key_reflects_fact_watermark() {
     let store = store();
     let layer = RagContextLayer::builder(store.clone()).build();

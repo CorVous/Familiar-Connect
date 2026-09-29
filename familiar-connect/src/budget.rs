@@ -1205,6 +1205,19 @@ mod tests {
     }
 
     #[test]
+    fn scale_keeps_a_zero_cap_zero() {
+        let b = TierBudget {
+            max_rag_turns: 0,
+            ..TierBudget::default()
+        };
+        let scaled = b.apply_curve(&ModelBudgetCurve {
+            max_rag_turns: 2.0,
+            ..ModelBudgetCurve::default()
+        });
+        assert_eq!(scaled.max_rag_turns, 0);
+    }
+
+    #[test]
     fn derived_total_follows_scaled_sections() {
         let b = TierBudget {
             recent_history_tokens: 2000,

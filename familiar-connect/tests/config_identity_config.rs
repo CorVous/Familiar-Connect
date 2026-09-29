@@ -1254,6 +1254,14 @@ fn budget_for_applies_curve_when_model_matches() {
 }
 
 #[test]
+fn budget_for_keeps_a_zero_cap_zero_under_a_curve() {
+    let cfg = load_ok(
+        "[budget.voice]\nmax_rag_turns = 0\n\n[llm.fast]\nmodel = \"claude-opus-4-7\"\napi_key_env = \"X\"\n\n[budget.model_curves.\"claude-opus-4-7\"]\nmax_rag_turns = 2.0\n",
+    );
+    assert_eq!(cfg.budget_for("voice").max_rag_turns, 0);
+}
+
+#[test]
 fn budget_for_no_curve_returns_base() {
     let cfg = load_ok("");
     let base = *cfg.budgets.get("voice").unwrap();
