@@ -36,15 +36,16 @@ attacker-controlled — anyone in the channel can paste
 discloses the operator's IP to that host and reaches whatever the host is,
 including addresses only the operator's machine can route to.
 
-An id outlives its turn: the append path records it in the `turn_images` table,
-and `view_image` falls back to that table for markers whose payload map is gone
-(`HistoryStore::image_url`). The fallback is **scoped to the channel that
-recorded the image**, so an id that retrieval lifts out of a DM into a guild prompt
-resolves to nothing there. A row lives as long as the history database, so an id
-stays fetchable for the life of the URL behind it.
+An id outlives its turn: the append path records it in the `channel_images`
+table, keyed on `(channel_id, img_id)`, and `view_image` falls back to that table
+for markers whose payload map is gone (`HistoryStore::image_url`). The fallback
+is **scoped to the channel that recorded the image**, so an id that retrieval
+lifts out of a DM into a guild prompt resolves to nothing there; the same image
+posted in both channels is a row in each. A row lives as long as the history
+database, so an id stays fetchable for the life of the URL behind it.
 
 The gate lives at the fetch boundary (`tools::image_policy::UrlGuard`), not at
-collection, so every source — the three collectors, the `turn_images` fallback,
+collection, so every source — the three collectors, the `channel_images` fallback,
 and any added later — passes through one check. Two rules apply before a socket
 opens:
 
