@@ -222,6 +222,32 @@ fn image_url_is_scoped_to_the_recording_channel() {
     );
 }
 
+/// Ids hash the URL, so the same image posted in two channels shares an id.
+/// Each channel keeps its own row: recording the second must not unresolve the
+/// first.
+#[test]
+fn the_same_url_in_two_channels_resolves_in_both() {
+    let store = mem();
+    let images = HashMap::from([(
+        "img_1111aaaa2222bbbb".to_owned(),
+        "http://cdn.example.com/cat.png".to_owned(),
+    )]);
+    for channel_id in [CHANNEL, CHANNEL + 1] {
+        store
+            .append_turn(
+                AppendTurn::new(FAMILIAR, channel_id, "user", "look").images(images.clone()),
+            )
+            .unwrap();
+    }
+    for channel_id in [CHANNEL, CHANNEL + 1] {
+        assert_eq!(
+            store.image_url(channel_id, "img_1111aaaa2222bbbb").unwrap(),
+            Some("http://cdn.example.com/cat.png".to_owned()),
+            "channel {channel_id} lost its image row"
+        );
+    }
+}
+
 // --- recent ---------------------------------------------------------------
 
 #[test]
