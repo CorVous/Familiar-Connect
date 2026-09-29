@@ -1,5 +1,5 @@
-//! Agentic tool-execution loop (subsystem 08; Python `tools/loop.py` — renamed
-//! because `loop` is a Rust keyword, DESIGN D21).
+//! Agentic tool-execution loop (subsystem 08). Named `agentic` because
+//! `loop` is a Rust keyword.
 //!
 //! Drives [`LlmClient::stream_completion`] through one or more iterations: stream
 //! deltas, accumulate `content` + `tool_calls`, execute tools, append results,
@@ -7,6 +7,11 @@
 //! is reached. A leak guard strips tool-calls the model occasionally emits as
 //! plain text (they would otherwise ship to the user / seed a mimicry cascade);
 //! a leaked `silent` call is honoured as silence.
+//!
+//! **Silence is the default of any tool call.** A turn that called a tool is
+//! silent unless some call passed `silent: false` ([`calls_opt_into_speech`]) —
+//! the model declares "and say something" the same way it declares any other
+//! argument, so a model that only calls tools never has to invent a reply.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -20,13 +25,13 @@ use serde_json::{Value, json};
 use crate::llm::{Content, LlmClient, LlmDelta, Message};
 use crate::log_style as ls;
 use crate::silence::{LeadingLeak, classify_leading_leak};
-use crate::tools::registry::{Tool, ToolContext, ToolOutput, ToolRegistry};
+use crate::tools::registry::{Tool, ToolContext, ToolOutput, ToolRegistry, opts_into_speech};
 use crate::tools::silent::SILENT_RESULT;
 
-// Re-exported here so callers can reach it at the Python `tools.loop` path.
+// Re-exported here so callers can reach it from the `tools::agentic` path.
 pub use crate::tools::registry::serialize_image_result;
 
-/// Library-default iteration cap (spec 08 §T15 / DESIGN D17).
+/// Library-default iteration cap.
 pub const DEFAULT_MAX_ITERATIONS: usize = 5;
 
 /// Outcome of an [`agentic_loop`] run.
@@ -40,7 +45,8 @@ pub struct AgenticResult {
     pub tool_calls_made: usize,
     /// The full transcript (a snapshot of `messages` at return).
     pub transcript: Vec<Message>,
-    /// Set when a `silent` tool (or leaked `silent` call) ended the turn.
+    /// Set when the turn stays quiet: a `silent` tool (or leaked `silent`
+    /// call), or any tool call at all with no `silent: false` opt-in.
     pub is_silent: bool,
 }
 
@@ -86,8 +92,8 @@ fn strip_leaked_tool_calls(content: &str) -> (String, bool) {
             let cleaned = INVOKE_BLOCK_RE.replace_all(content, "").trim().to_owned();
             (cleaned, silent)
         }
-        Some(LeadingLeak::PythonSilent) => (String::new(), true),
-        Some(LeadingLeak::PythonTool) => (String::new(), false),
+        Some(LeadingLeak::CallSilent) => (String::new(), true),
+        Some(LeadingLeak::CallTool) => (String::new(), false),
         None => (content.to_owned(), false),
     }
 }
@@ -101,6 +107,26 @@ fn strip_leaked_tool_calls(content: &str) -> (String, bool) {
 pub(crate) fn guard_leaked_content(content: &str) -> String {
     let stripped = strip_think_artifacts(content);
     strip_leaked_tool_calls(&stripped).0
+}
+
+/// The iteration's tool calls as a JSON array, for the call mirror.
+fn tool_calls_wire(tool_calls: &[Value]) -> String {
+    Value::Array(tool_calls.to_vec()).to_string()
+}
+
+/// The iteration's tool results as a JSON array of `{tool_call_id, content}`,
+/// for the call mirror. Image results project to their text part.
+fn tool_results_wire(tool_msgs: &[Message]) -> String {
+    let rows: Vec<Value> = tool_msgs
+        .iter()
+        .map(|m| {
+            json!({
+                "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": tool_content_as_text(&m.content),
+            })
+        })
+        .collect();
+    Value::Array(rows).to_string()
 }
 
 /// Project a tool-message content to plain text for history persistence.
@@ -120,6 +146,23 @@ pub fn tool_content_as_text(content: &Content) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
     }
+}
+
+/// Whether any call in `tool_calls` (wire shape, arguments still a JSON
+/// string) passed `silent: false` — the turn's opt-in to speaking.
+///
+/// Arguments that do not decode to a JSON object cannot claim the opt-in;
+/// silence is the default and stays it.
+#[must_use]
+pub fn calls_opt_into_speech(tool_calls: &[Value]) -> bool {
+    tool_calls.iter().any(|tc| {
+        tc.get("function")
+            .and_then(|f| f.get("arguments"))
+            .and_then(Value::as_str)
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .as_ref()
+            .is_some_and(opts_into_speech)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -187,13 +230,12 @@ fn finalize_tool_calls(pending: &BTreeMap<i64, PendingCall>) -> Vec<Value> {
 // Tool execution
 // ---------------------------------------------------------------------------
 
-/// Render an `f64` the way Python's `str(float)` does, so the timeout wire
-/// string matches the reference byte-for-byte: an integer-valued float keeps a
-/// trailing `.0` (`"10.0"`, not Rust's default `"10"`), while a fractional
-/// value uses the shortest round-tripping form (`"0.05"`). Scoped to the small
-/// positive timeouts tools carry; the extreme magnitudes where Python switches
-/// to exponent notation are unreachable here.
-fn py_float_str(v: f64) -> String {
+/// Render an `f64` for the timeout wire string: an integer-valued float keeps
+/// a trailing `.0` (`"10.0"`, not Rust's default `"10"`), while a fractional
+/// value uses the shortest round-tripping form (`"0.05"`). Scoped to the
+/// small positive timeouts tools carry; the extreme magnitudes that would
+/// switch to exponent notation are unreachable here.
+fn float_wire_str(v: f64) -> String {
     let s = format!("{v}");
     if v.is_finite() && !s.contains(['.', 'e', 'E']) {
         format!("{s}.0")
@@ -222,7 +264,7 @@ async fn execute_tool(tool: &Tool, args: Value, ctx: &ToolContext) -> ToolOutput
         Ok(Ok(out)) => out,
         Ok(Err(e)) => ToolOutput::Text(json!({ "error": format!("{e}") }).to_string()),
         Err(_) => ToolOutput::Text(
-            json!({ "error": format!("timeout after {}s", py_float_str(tool.timeout_s)) })
+            json!({ "error": format!("timeout after {}s", float_wire_str(tool.timeout_s)) })
                 .to_string(),
         ),
     }
@@ -276,6 +318,25 @@ async fn run_tool_call(
     }
 }
 
+/// Call ids whose tool message is the `silent` sentinel.
+fn silent_call_ids(tool_msgs: &[Message]) -> Vec<String> {
+    tool_msgs
+        .iter()
+        .filter(|m| matches!(&m.content, Content::Text(s) if s == SILENT_RESULT))
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect()
+}
+
+/// Whether `id` is one of `silent_ids`.
+fn matches_call_id(id: Option<&str>, silent_ids: &[String]) -> bool {
+    id.is_some_and(|id| silent_ids.iter().any(|s| s == id))
+}
+
+/// Whether the wire tool call `tc` is one of the `silent` sentinel calls.
+fn is_silent_call(tc: &Value, silent_ids: &[String]) -> bool {
+    matches_call_id(tc.get("id").and_then(Value::as_str), silent_ids)
+}
+
 // ---------------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------------
@@ -288,7 +349,7 @@ async fn run_tool_call(
 ///
 /// # Errors
 /// Propagates stream-open / mid-stream errors from `stream_completion`; handler
-/// faults are captured as `{"error": ...}` tool results (never `Err`).
+/// faults are captured as `{"error":...}` tool results (never `Err`).
 #[allow(
     clippy::too_many_lines,
     reason = "single cohesive stream→tools→recall loop"
@@ -309,6 +370,10 @@ pub async fn agentic_loop(
     let mut last_content = String::new();
     let mut iterations = 0usize;
     let mut tool_calls_made = 0usize;
+    // Silence bookkeeping: any call at all silences the turn; one `silent:
+    // false` anywhere in it opts back into speech, and the opt-in latches.
+    let mut any_tool_call = false;
+    let mut speak_opt_in = false;
 
     while iterations < max_iterations {
         iterations += 1;
@@ -347,6 +412,8 @@ pub async fn agentic_loop(
         messages.push(assistant_msg.clone());
 
         if !tool_calls.is_empty() {
+            any_tool_call = true;
+            speak_opt_in |= calls_opt_into_speech(&tool_calls);
             if let Some(h) = hooks {
                 h.on_before_tools(&assistant_msg).await;
             }
@@ -360,14 +427,41 @@ pub async fn agentic_loop(
             messages.push(tool_msg.clone());
             tool_msgs.push(tool_msg);
         }
+        // Fold this iteration's tool calls + results back into the call that
+        // requested them, while `stream` still holds its metrics. The transport
+        // mirrors one row per call at drop; without this the row would carry
+        // half the story. `tracing_tools` is false with no mirror installed, so
+        // an unmirrored tool turn never serializes its results.
+        if !tool_calls.is_empty() && stream.traces_tools() {
+            stream.note_tool_trace(tool_calls_wire(&tool_calls), tool_results_wire(&tool_msgs));
+        }
 
-        // Detect the silent sentinel BEFORE on_iteration_end so the call + its
-        // reasoning aren't persisted to history (which would re-seed the model's
-        // rationale for silence next turn).
-        if tool_msgs
-            .iter()
-            .any(|m| matches!(&m.content, Content::Text(s) if s == SILENT_RESULT))
-        {
+        // The `silent` tool ends the turn here — no re-prompt. Its own call and
+        // its private reasoning stay out of history (persisting them re-seeds
+        // the model's rationale for silence next turn), but every OTHER call in
+        // the same iteration goes through the normal hook: a `shift_focus` that
+        // already committed must leave a trace.
+        let silent_ids = silent_call_ids(&tool_msgs);
+        if !silent_ids.is_empty() {
+            if let Some(h) = hooks {
+                let kept_calls: Vec<Value> = tool_calls
+                    .iter()
+                    .filter(|tc| !is_silent_call(tc, &silent_ids))
+                    .cloned()
+                    .collect();
+                if !kept_calls.is_empty() {
+                    let kept_msgs: Vec<Message> = tool_msgs
+                        .iter()
+                        .filter(|m| !matches_call_id(m.tool_call_id.as_deref(), &silent_ids))
+                        .cloned()
+                        .collect();
+                    let assistant_kept = Message {
+                        tool_calls: Some(kept_calls),
+                        ..assistant_msg.clone()
+                    };
+                    h.on_iteration_end(&assistant_kept, &kept_msgs).await;
+                }
+            }
             return Ok(AgenticResult {
                 final_content: String::new(),
                 iterations,
@@ -412,9 +506,11 @@ pub async fn agentic_loop(
             ls::kv_styled("silent", &silent_leak.to_string(), ls::W, ls::LY),
         );
     }
-    let is_silent = silent_leak && cleaned.is_empty();
+    let is_silent = (silent_leak && cleaned.is_empty()) || (any_tool_call && !speak_opt_in);
     Ok(AgenticResult {
-        final_content: cleaned,
+        // `is_silent` implies empty content, so a caller cannot speak by
+        // reading the text and forgetting the flag.
+        final_content: if is_silent { String::new() } else { cleaned },
         iterations,
         tool_calls_made,
         transcript: messages.clone(),
@@ -427,15 +523,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn py_float_str_matches_python_str_float() {
-        // Integer-valued floats keep the trailing `.0` (Python `str(10.0)`),
+    fn float_wire_str_keeps_trailing_zero() {
+        // Integer-valued floats keep the trailing `.0`,
         // where Rust's default `{}` would drop it to `"10"`.
-        assert_eq!(py_float_str(10.0), "10.0");
-        assert_eq!(py_float_str(30.0), "30.0");
-        // Fractional values use the shortest round-tripping form, matching
-        // Python for the realistic timeout range.
-        assert_eq!(py_float_str(0.05), "0.05");
-        assert_eq!(py_float_str(0.5), "0.5");
+        assert_eq!(float_wire_str(10.0), "10.0");
+        assert_eq!(float_wire_str(30.0), "30.0");
+        // Fractional values use the shortest round-tripping form.
+        assert_eq!(float_wire_str(0.05), "0.05");
+        assert_eq!(float_wire_str(0.5), "0.5");
     }
 
     #[test]
@@ -488,14 +583,14 @@ mod tests {
     }
 
     #[test]
-    fn leak_python_silent_case_insensitive() {
+    fn leak_call_silent_case_insensitive() {
         let (cleaned, silent) = strip_leaked_tool_calls("Silent(reasoning=\"x\")");
         assert!(silent);
         assert!(cleaned.is_empty());
     }
 
     #[test]
-    fn leak_python_read_channel_not_silent() {
+    fn leak_call_read_channel_not_silent() {
         let (cleaned, silent) = strip_leaked_tool_calls("read_channel(limit=10)");
         assert!(!silent);
         assert!(cleaned.is_empty());

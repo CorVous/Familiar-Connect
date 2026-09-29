@@ -1,5 +1,4 @@
-//! Vision-based image description using an [`LlmClient`] (subsystem 08; Python
-//! `tools/image_describe.py`).
+//! Vision-based image description using an [`LlmClient`] (subsystem 08).
 //!
 //! Neutral base prompt; per-familiar `constraints` (from
 //! `[prompt].image_description_constraints`) append to it, so authors add one

@@ -1,9 +1,24 @@
 #!/bin/sh
 # Runs the formatter so nobody has to remember to.
-# Enable once per clone: git config core.hooksPath rust/.githooks
+# Enable once per clone: git config core.hooksPath .githooks
 # (drops the template's gen-docs step — the docs generator is not ported).
 set -eu
-cd "$(git rev-parse --show-toplevel)/rust"
+# Workspace root is the repo root; the port's old `rust/` subdir is gone.
+cd "$(git rev-parse --show-toplevel)"
+
+# GUI clients, IDE commit buttons, and shells older than the rustup install hand
+# hooks a minimal PATH. Recover cargo from rustup's env script before giving up.
+if ! command -v cargo >/dev/null 2>&1; then
+    cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+    if [ -r "$cargo_env" ]; then
+        . "$cargo_env"
+    fi
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not on PATH (tried ${CARGO_HOME:-\$HOME/.cargo}/env)." >&2
+    echo "  Install rustup, or 'source ~/.cargo/env' in the shell you commit from." >&2
+    exit 1
+fi
 
 before=$(git diff | git hash-object --stdin)
 cargo fmt --all

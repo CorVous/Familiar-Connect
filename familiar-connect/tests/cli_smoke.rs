@@ -1,5 +1,4 @@
-//! CLI subprocess smoke tests (subsystem 10; Python `test_cli.py` /
-//! `test_version.py` subprocess halves).
+//! CLI subprocess smoke tests (subsystem 10).
 //!
 //! These drive the real `familiar-connect` binary end-to-end for the
 //! discord-free subcommands (`version`, `diagnose`, bare-invocation help),
@@ -8,13 +7,13 @@
 //! in-module unit tests, not here.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[test]
 fn version_subcommand_prints_version() {
-    // Ported from test_version.py::test_version_subcommand.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
         .arg("version")
@@ -25,7 +24,6 @@ fn version_subcommand_prints_version() {
 
 #[test]
 fn version_flag_prints_version() {
-    // Ported from test_version.py::test_version_flag.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
         .arg("--version")
@@ -36,7 +34,7 @@ fn version_flag_prints_version() {
 
 #[test]
 fn bare_invocation_shows_usage() {
-    // Ported from test_cli.py::test_parser_no_subcommand_shows_help — a bare
+    //  bare
     // invocation prints help and exits 0.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
@@ -49,7 +47,7 @@ fn bare_invocation_shows_usage() {
 #[test]
 fn diagnose_reads_stdin_and_shows_placeholder() {
     // `diagnose -` reads stdin; a line with no span markers yields the "no spans"
-    // placeholder (test_diagnose_cmd.py::test_empty_log_shows_placeholder shape).
+    // laceholder.
     Command::cargo_bin("familiar-connect")
         .expect("binary")
         .args(["diagnose", "-"])
@@ -70,4 +68,54 @@ fn diagnose_aggregates_span_lines_from_stdin() {
         .assert()
         .success()
         .stdout(contains("llm"));
+}
+
+#[test]
+fn diagnose_span_only_log_prints_no_cache_tables() {
+    // The #206 tables are additive: a span-only log is unchanged.
+    Command::cargo_bin("familiar-connect")
+        .expect("binary")
+        .args(["diagnose", "-"])
+        .write_stdin("INFO [span] span=llm ms=100 status=ok\n")
+        .assert()
+        .success()
+        .stdout(contains("LLM calls by slot / model").not());
+}
+
+#[test]
+fn prompts_reports_a_missing_database() {
+    // `--familiar` + `FAMILIARS_ROOT` pin resolution, so the test never depends
+    // on the developer's own familiars root or a checked-out `.env`.
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(root.path().join("aria")).expect("familiar dir");
+    Command::cargo_bin("familiar-connect")
+        .expect("binary")
+        .args(["prompts", "--familiar", "aria"])
+        .env("FAMILIARS_ROOT", root.path())
+        .assert()
+        .failure()
+        .stderr(contains("No history.db"));
+}
+
+#[test]
+fn diagnose_reports_prompt_cache_from_llm_call_lines() {
+    // Two `[LLM call]` lines, one cached and one cold (#206).
+    let input = "INFO [LLM call] slot=fast model=anthropic/claude-haiku-4.5 status=ok \
+         chars=8000 ttfb_ms=800 ttft_ms=850 total_ms=1200 provider=anthropic \
+         est_in_tokens=2000 in_tokens=2100 out_tokens=80 cached=0 cal_ratio=1.050\n\
+         INFO [LLM call] slot=prose model=z-ai/glm-5.2 status=ok \
+         chars=8000 ttfb_ms=300 ttft_ms=350 total_ms=1200 provider=z-ai \
+         est_in_tokens=2000 in_tokens=2100 out_tokens=80 cached=1890 cal_ratio=1.050\n";
+    Command::cargo_bin("familiar-connect")
+        .expect("binary")
+        .args(["diagnose", "-"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(contains("LLM calls by slot / model"))
+        .stdout(contains("cache hit vs miss latency (ms)"))
+        .stdout(contains("token estimator accuracy by model"))
+        .stdout(contains("anthropic/claude-haiku-4.5"))
+        // prose reused 1890 of 2100 prompt tokens.
+        .stdout(contains("90.0"));
 }

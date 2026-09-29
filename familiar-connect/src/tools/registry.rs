@@ -1,5 +1,4 @@
-//! In-process tool registry + the per-call [`ToolContext`] (subsystem 08;
-//! Python `tools/registry.py`).
+//! In-process tool registry + the per-call [`ToolContext`] (subsystem 08).
 //!
 //! A [`ToolRegistry`] is a name-indexed, insertion-ordered bag of [`Tool`]s.
 //! Each tool carries a JSON-Schema `parameters` object and an async
@@ -7,8 +6,8 @@
 //! [`ToolContext`] — no globals.
 //!
 //! Two narrow seam traits ([`FocusControl`], [`ChannelReadStore`]) replace the
-//! Python duck-typed `FocusManager` / `AsyncHistoryStore` references so tests can
-//! inject scripted doubles (DESIGN §4.8); the production `FocusManager` and
+//! concrete `FocusManager` / `AsyncHistoryStore` types so tests
+//! can inject scripted doubles; the production `FocusManager` and
 //! `AsyncHistoryStore` implement them.
 
 use std::collections::{HashMap, HashSet};
@@ -58,7 +57,7 @@ impl ImageResult {
 
 /// What a [`ToolHandler`] produces: either a JSON/text string, or an
 /// [`ImageResult`] the agentic loop serialises per the client's `multimodal`
-/// flag. Replaces the Python `str | ImageResult` union.
+/// flag. Replaces an untyped string-or-image union.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolOutput {
     /// Plain string (usually a JSON object the model reads back).
@@ -68,14 +67,13 @@ pub enum ToolOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Seam traits (DESIGN §4.8): FocusControl + ChannelReadStore
+// Seam traits: FocusControl + ChannelReadStore
 // ---------------------------------------------------------------------------
 
 /// The narrow slice of `FocusManager` the attentional tools touch.
 ///
 /// A tool holds an `Arc<dyn FocusControl>`; the production [`FocusManager`]
-/// implements it, and tests inject a scripted double (mirrors the Python
-/// `MagicMock` focus manager).
+/// implements it, and tests inject a scripted double.
 #[async_trait]
 pub trait FocusControl: Send + Sync {
     /// Is `channel_id` a known text/voice subscription?
@@ -116,8 +114,8 @@ impl FocusControl for FocusManager {
 
 /// The narrow read slice of the history store the focus tools page over.
 ///
-/// Both methods deliberately omit the `mode` filter (the Python tool calls pass
-/// none); [`AsyncHistoryStore`] implements it, tests inject a recorder.
+/// Both methods deliberately omit the `mode` filter; [`AsyncHistoryStore`]
+/// implements it, tests inject a recorder.
 #[async_trait]
 pub trait ChannelReadStore: Send + Sync {
     /// Recent turns in a channel, newest-window, optionally paged with
@@ -188,9 +186,10 @@ impl ChannelReadStore for AsyncHistoryStore {
 /// Per-call context handed to tool handlers.
 ///
 /// `history`/`bus` are `Option` so the unit suites can build a context without
-/// real subsystems (mirrors the Python `cast("...", None)` doubles); no shipped
-/// handler reads them. `scheduler`/`focus_manager`/`store`/`description_llm`
-/// default to `None`; `images` defaults empty.
+/// real subsystems; no shipped
+/// handler reads them. `scheduler`/`focus_manager`/`store`/`description_llm`/
+/// `caption_llm` default to `None`; `images` defaults empty; `multimodal`
+/// defaults `false`.
 #[derive(Clone)]
 pub struct ToolContext {
     /// The familiar this turn belongs to.
@@ -209,8 +208,17 @@ pub struct ToolContext {
     pub scheduler: Option<Arc<AlarmScheduler>>,
     /// `img_id` → URL placeholder map injected per-turn (for `view_image`).
     pub images: HashMap<String, String>,
-    /// Vision model client (`view_image` description leg).
+    /// **Substitution** vision client: describes the image for a calling model
+    /// that cannot see it. Never consulted when [`multimodal`](Self::multimodal)
+    /// is set — the model gets the image itself.
     pub description_llm: Option<Arc<dyn LlmClient>>,
+    /// **Persistence** vision client: the durable caption for memory. Cheap by
+    /// design; used whenever the calling model can see the image, since the
+    /// image never survives into history (#204).
+    pub caption_llm: Option<Arc<dyn LlmClient>>,
+    /// Whether the calling slot receives images natively. Picks which of the
+    /// two clients above runs, and never both.
+    pub multimodal: bool,
     /// Attentional focus controller (`shift_focus` / `read_channel`).
     pub focus_manager: Option<Arc<dyn FocusControl>>,
     /// Explicit store ref for the read-only focus tools.
@@ -236,6 +244,8 @@ impl ToolContext {
             scheduler: None,
             images: HashMap::new(),
             description_llm: None,
+            caption_llm: None,
+            multimodal: false,
             focus_manager: None,
             store: None,
         }
@@ -269,10 +279,24 @@ impl ToolContext {
         self
     }
 
-    /// Builder: attach the vision description client.
+    /// Builder: attach the substitution vision client.
     #[must_use]
     pub fn with_description_llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
         self.description_llm = Some(llm);
+        self
+    }
+
+    /// Builder: attach the persistence caption client.
+    #[must_use]
+    pub fn with_caption_llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
+        self.caption_llm = Some(llm);
+        self
+    }
+
+    /// Builder: declare whether the calling slot sees images natively.
+    #[must_use]
+    pub const fn with_multimodal(mut self, multimodal: bool) -> Self {
+        self.multimodal = multimodal;
         self
     }
 
@@ -322,6 +346,52 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared `silent` flag
+// ---------------------------------------------------------------------------
+
+/// Schema property name of the shared per-turn silence flag every tool carries.
+pub const SILENT_ARG: &str = "silent";
+
+/// Model-facing wording for [`SILENT_ARG`]. One string for every tool, so the
+/// contract reads identically wherever the model meets it.
+const SILENT_ARG_DESCRIPTION: &str = "Silence is the default: calling this tool \
+     sends no reply this turn. Pass false to also say something this turn.";
+
+/// Inject [`SILENT_ARG`] into a tool's `parameters` schema.
+///
+/// [`Tool::new`] applies it, so a new tool cannot forget the flag. Never
+/// `required` — omitting it means silent. A non-object schema (or one whose
+/// `properties` is not an object) passes through untouched; nothing shipped
+/// builds one.
+#[must_use]
+pub fn with_silent_flag(mut parameters: Value) -> Value {
+    if let Some(obj) = parameters.as_object_mut()
+        && let Some(props) = obj
+            .entry("properties")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+    {
+        props.insert(
+            SILENT_ARG.to_owned(),
+            json!({
+                "type": "boolean",
+                "default": true,
+                "description": SILENT_ARG_DESCRIPTION,
+            }),
+        );
+    }
+    parameters
+}
+
+/// Whether a decoded argument object opts the turn into speech
+/// (`silent: false`). Anything else — absent, null, `true`, wrong type — is
+/// silence, the default.
+#[must_use]
+pub fn opts_into_speech(args: &Value) -> bool {
+    args.get(SILENT_ARG).and_then(Value::as_bool) == Some(false)
+}
+
 /// One callable tool exposed to the model.
 #[derive(Clone)]
 pub struct Tool {
@@ -338,7 +408,8 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// Construct a tool with the default `10.0`s timeout.
+    /// Construct a tool with the default `10.0`s timeout. The shared
+    /// [`SILENT_ARG`] flag is injected into `parameters` here.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
@@ -349,7 +420,7 @@ impl Tool {
         Self {
             name: name.into(),
             description: description.into(),
-            parameters,
+            parameters: with_silent_flag(parameters),
             handler,
             timeout_s: 10.0,
         }
@@ -363,8 +434,7 @@ impl Tool {
     }
 }
 
-/// Registration error: a duplicate tool name (a programming error, like the
-/// Python `ValueError`).
+/// Registration error: a duplicate tool name (a programming error).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ToolError {
     /// A tool with this name is already registered.
@@ -521,11 +591,68 @@ mod tests {
                 "function": {
                     "name": "set_alarm",
                     "description": "Schedule a wake.",
-                    "parameters": params,
+                    "parameters": with_silent_flag(params),
                 },
             }
         ]);
         assert_eq!(Value::Array(registry.as_openai_tools()), expected);
+    }
+
+    // -- shared `silent` flag ------------------------------------------------
+
+    #[test]
+    fn tool_new_injects_silent_flag_defaulting_true() {
+        let tool = make_tool("echo");
+        let flag = &tool.parameters["properties"]["silent"];
+        assert_eq!(flag["type"], "boolean");
+        assert_eq!(flag["default"], json!(true));
+        assert!(
+            flag["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Pass false")
+        );
+    }
+
+    #[test]
+    fn silent_flag_is_never_required() {
+        let tool = Tool::new(
+            "echo",
+            "",
+            json!({"type": "object", "properties": {}, "required": ["x"]}),
+            noop_handler(),
+        );
+        assert_eq!(tool.parameters["required"], json!(["x"]));
+    }
+
+    #[test]
+    fn with_silent_flag_creates_missing_properties() {
+        let out = with_silent_flag(json!({}));
+        assert_eq!(out["properties"]["silent"]["type"], "boolean");
+    }
+
+    #[test]
+    fn with_silent_flag_keeps_sibling_properties() {
+        let out = with_silent_flag(json!({
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+        }));
+        assert_eq!(out["properties"]["reason"]["type"], "string");
+        assert_eq!(out["properties"]["silent"]["default"], json!(true));
+    }
+
+    #[test]
+    fn with_silent_flag_leaves_non_object_schema_alone() {
+        assert_eq!(with_silent_flag(json!("nope")), json!("nope"));
+    }
+
+    #[test]
+    fn opts_into_speech_only_on_explicit_false() {
+        assert!(opts_into_speech(&json!({"silent": false})));
+        assert!(!opts_into_speech(&json!({"silent": true})));
+        assert!(!opts_into_speech(&json!({})));
+        assert!(!opts_into_speech(&json!({"silent": null})));
+        assert!(!opts_into_speech(&json!({"silent": "false"})));
     }
 
     #[test]

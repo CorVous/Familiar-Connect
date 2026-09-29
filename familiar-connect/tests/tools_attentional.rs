@@ -1,7 +1,6 @@
-//! Ported from Python `tests/test_attentional_tools.py` — the `shift_focus`,
-//! `read_channel`, and `start_activity` handlers, driven through the narrow
-//! `FocusControl` / `ChannelReadStore` / `StartActivityEngine` seams with
-//! scripted doubles (replacing the Python `MagicMock`s).
+//! The `shift_focus`, `read_channel`, and `start_activity` handlers, driven
+//! through the narrow `FocusControl` / `ChannelReadStore` /
+//! `StartActivityEngine` seams with scripted doubles.
 
 use std::sync::{Arc, Mutex};
 
@@ -535,14 +534,14 @@ impl StartActivityEngine for FakeEngine {
 }
 
 async fn call_start_activity(engine: Arc<FakeEngine>, args: Value) -> ToolOutput {
-    let tool = build_start_activity_tool(engine);
+    let tool = build_start_activity_tool(engine, "");
     let ctx = ToolContext::new("fam-1", 42, "text", "turn-1");
     tool.handler.call(args, &ctx).await.unwrap()
 }
 
 #[test]
 fn start_activity_tool_name_and_schema() {
-    let tool = build_start_activity_tool(Arc::new(FakeEngine::new()));
+    let tool = build_start_activity_tool(Arc::new(FakeEngine::new()), "POLICY_MARKER");
     assert_eq!(tool.name, "start_activity");
     let props = &tool.parameters["properties"];
     assert_eq!(props["activity"]["type"], "string");
@@ -552,8 +551,9 @@ fn start_activity_tool_name_and_schema() {
     let desc = props["activity"]["description"].as_str().unwrap();
     assert!(desc.contains("a creek walk"));
     assert!(desc.contains("tending the hatbox"));
-    assert!(tool.description.len() <= 450);
-    assert!(tool.description.contains("in-character goodbye"));
+    // Policy prose is config-sourced (`[prompt].start_activity_description`);
+    // the shipped default's wording is asserted in the config suite.
+    assert_eq!(tool.description, "POLICY_MARKER");
 }
 
 #[tokio::test]
@@ -641,7 +641,7 @@ fn start_activity_scheduled_entry_appends_availability_window() {
             active_hours: None,
         },
     ];
-    let tool = build_start_activity_tool(Arc::new(engine));
+    let tool = build_start_activity_tool(Arc::new(engine), "");
     let desc = tool.parameters["properties"]["activity"]["description"]
         .as_str()
         .unwrap()

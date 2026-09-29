@@ -1,4 +1,4 @@
-//! `set_alarm` / `cancel_alarm` tools (subsystem 08; Python `tools/alarm.py`).
+//! `set_alarm` / `cancel_alarm` tools (subsystem 08).
 //!
 //! Both route the wake to the channel the user spoke in
 //! (`ctx.channel_id` / `ctx.channel_kind`, `originating_turn_id = ctx.turn_id`).
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::{Value, json};
 
-use crate::support::time::iso_utc;
+use crate::support::time::{iso_utc, parse_iso};
 use crate::tools::registry::{FnHandler, Tool, ToolContext, ToolOutput};
 use crate::tools::scheduler::AlarmScheduler;
 
@@ -25,22 +25,8 @@ fn error_output(msg: &str) -> ToolOutput {
     ToolOutput::Text(json!({ "error": msg }).to_string())
 }
 
-/// Does this string parse as an offset-less ISO-8601 datetime?
-fn is_naive_datetime(s: &str) -> bool {
-    for fmt in [
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S",
-    ] {
-        if chrono::NaiveDateTime::parse_from_str(s, fmt).is_ok() {
-            return true;
-        }
-    }
-    false
-}
-
-/// Resolve the target time from `when` (ISO with tz) or `delay_seconds`.
+/// Resolve the target time from `when` (ISO with a numeric offset) or
+/// `delay_seconds`.
 ///
 /// Returns `Ok(datetime)` or `Err(message)` where the message is a user-facing
 /// tool-error string.
@@ -58,7 +44,9 @@ fn resolve_when(args: &Value) -> Result<DateTime<Utc>, String> {
                     Ok(target)
                 }
                 Err(e) => {
-                    if is_naive_datetime(w) {
+                    // RFC-3339 already failed, so a `parse_iso` hit means the
+                    // value parsed as one of its offset-less naive forms.
+                    if parse_iso(w).is_some() {
                         Err("invalid 'when' (must include timezone, e.g. '...+00:00')".to_owned())
                     } else {
                         Err(format!("invalid 'when' (must be ISO-8601): {e}"))
@@ -130,7 +118,7 @@ async fn set_alarm_handler(args: &Value, ctx: &ToolContext) -> anyhow::Result<To
 
 /// The `cancel_alarm` tool handler. Domain outcomes return `Ok(ToolOutput)`; a
 /// genuine store write fault propagates as `Err` (the loop wraps it as an
-/// `{"error": ...}` result), mirroring Python letting the DB error raise.
+/// `{"error":...}` result).
 async fn cancel_alarm_handler(args: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
     let Some(scheduler) = ctx.scheduler.as_ref() else {
         return Ok(error_output("alarm scheduler not wired into context"));
@@ -167,7 +155,9 @@ pub fn build_alarm_tool(_scheduler: &AlarmScheduler) -> Tool {
                 "when": {
                     "type": "string",
                     "description":
-                        "Absolute target time as ISO-8601 with timezone (e.g. '2030-01-01T12:00:00+00:00').",
+                        "Absolute target time as ISO-8601 with a numeric UTC offset, never an \
+                         abbreviation (e.g. '2030-01-01T12:00:00+00:00'). The current local \
+                         clock and its offset are in the 'It is now:' line.",
                 },
                 "delay_seconds": {
                     "type": "integer",
@@ -226,6 +216,21 @@ mod tests {
     fn resolve_when_rejects_naive_timestamp() {
         let err = resolve_when(&json!({"when": "2030-01-01T12:00:00"})).unwrap_err();
         assert!(err.contains("timezone"));
+    }
+
+    #[test]
+    fn resolve_when_naive_forms_all_ask_for_a_timezone() {
+        // Pins the accept/reject split now that the naive-format list lives in
+        // `support::time` instead of a local copy.
+        for w in [
+            "2030-01-01T12:00:00",
+            "2030-01-01T12:00:00.123456",
+            "2030-01-01 12:00:00",
+            "2030-01-01 12:00:00.5",
+        ] {
+            let err = resolve_when(&json!({ "when": w })).unwrap_err();
+            assert!(err.contains("timezone"), "{w}: {err}");
+        }
     }
 
     #[test]

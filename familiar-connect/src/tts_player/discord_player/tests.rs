@@ -1,4 +1,4 @@
-//! Port of `tests/test_discord_voice_player.py` — buffered + streaming playback,
+//! Buffered + streaming playback,
 //! stereo conversion, skip paths, barge-in `vc.stop`, play-lock serialization,
 //! cancel-then-speak drain, and the `playback_start` budget stamp.
 
@@ -22,7 +22,10 @@ use crate::diagnostics::testutil::singleton_guard;
 use crate::diagnostics::voice_budget::{
     PHASE_TTS_FIRST_AUDIO, get_voice_budget_recorder, reset_voice_budget_recorder,
 };
-use crate::tts::{JitterHints, StreamingTtsClient, TTSResult, TtsClient, TtsError, TtsStream};
+use crate::tts::{
+    AzureBackend, AzureEvent, AzureEventStream, AzureRequest, AzureTTSClient, JitterHints,
+    StreamingTtsClient, TTSResult, TtsClient, TtsError, TtsStream,
+};
 use crate::tts_player::protocol::TtsPlayer;
 use crate::voice::audio::{DISCORD_FRAME_SIZE, mono_to_stereo};
 
@@ -301,6 +304,42 @@ async fn empty_text_skips_synthesize() {
     assert_eq!(vc.plays.lock().unwrap().len(), 0);
 }
 
+/// A trailing emoji is what the sentence streamer leaves as its flush tail when
+/// a reply ends in one; Cartesia 400s on it, so it never goes out.
+#[tokio::test]
+async fn emoji_only_text_skips_synthesize() {
+    let (tts, calls) = stub_tts(mono_pcm(4));
+    let vc = vc_play_durations(true, 1);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak(" \u{1f605} ", &scope("t")).await;
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(vc.plays.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn punctuation_only_text_skips_synthesize() {
+    let (tts, calls) = stub_tts(mono_pcm(4));
+    let vc = vc_play_durations(true, 1);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak("...", &scope("t")).await;
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(vc.plays.lock().unwrap().len(), 0);
+}
+
+/// The skip is narrow: an emoji riding along with words still synthesizes.
+#[tokio::test]
+async fn text_with_words_and_emoji_still_synthesizes() {
+    let (tts, calls) = stub_tts(mono_pcm(4));
+    let vc = vc_play_durations(true, 2);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak("Nice work. \u{1f49b}", &scope("t")).await;
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["Nice work. \u{1f49b}".to_owned()]
+    );
+    assert_eq!(vc.plays.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn already_cancelled_scope_short_circuits() {
     let (tts, _calls) = stub_tts(mono_pcm(4));
@@ -524,7 +563,7 @@ async fn uses_streaming_when_client_supports_it() {
 fn source_uses_default_jitter_params_without_attrs() {
     // A Cartesia-like client exposes no jitter hints, so the player must build the
     // source with prebuffer=0 (first read starts at once) and pad_underrun=false
-    // (an open-but-empty buffer blocks rather than padding silence). Python asserts
+    // (an open-but-empty buffer blocks rather than padding silence). This asserts
     // `source._prebuffer_bytes == 0` / `source._pad_underrun is False`; those fields
     // are private in the landed voice::audio, so guard the *player's* forwarding by
     // the built source's observable read behavior — not the stub's own hints.
@@ -556,9 +595,9 @@ fn source_uses_default_jitter_params_without_attrs() {
 
 #[test]
 fn source_uses_client_jitter_params() {
-    // An Azure-like client sets pre-roll (3 frames) + underrun padding; the player
+    // A bursty client sets pre-roll (3 frames) + underrun padding; the player
     // must forward BOTH into StreamingPcmSource::new(prebuffer_bytes, pad_underrun).
-    // Python asserts `source._prebuffer_bytes == DISCORD_FRAME_SIZE * 3` and
+    // Asserts the prebuffer is `DISCORD_FRAME_SIZE * 3` and
     // `source._pad_underrun is True`; guard the same via observable read behavior.
     let tts = streaming_stub(
         vec![vec![0x10; DISCORD_FRAME_SIZE]],
@@ -741,4 +780,80 @@ async fn stop_no_voice_client() {
     let (tts, _calls) = stub_tts(mono_pcm(4));
     let player = player_no_vc(tts);
     player.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Azure client over a scripted backend (no network)
+// ---------------------------------------------------------------------------
+
+/// `Err` fails `open`; `Ok` is the event script.
+type AzureScript = Result<Vec<Result<AzureEvent, TtsError>>, TtsError>;
+
+struct ScriptedAzure(Mutex<Option<AzureScript>>);
+
+#[async_trait]
+impl AzureBackend for ScriptedAzure {
+    async fn open(&self, _request: AzureRequest) -> Result<AzureEventStream, TtsError> {
+        let script = self.0.lock().unwrap().take().expect("opened once")?;
+        Ok(futures::stream::iter(script).boxed())
+    }
+}
+
+fn azure_client(script: AzureScript) -> Arc<AzureTTSClient> {
+    Arc::new(AzureTTSClient::with_backend(
+        "eastus",
+        "en-US-AmberNeural",
+        Arc::new(ScriptedAzure(Mutex::new(Some(script)))),
+    ))
+}
+
+#[tokio::test]
+async fn azure_client_streams_stereo_through_player() {
+    // Odd-length SDK chunks must still reach the source as whole stereo frames.
+    let tts = azure_client(Ok(vec![
+        Ok(AzureEvent::Audio(vec![1, 2, 3])),
+        Ok(AzureEvent::Word {
+            text: "hi".to_owned(),
+            offset_ticks: 0,
+            duration_ticks: 10,
+        }),
+        Ok(AzureEvent::Audio(vec![4])),
+        Ok(AzureEvent::Audio(vec![5, 6, 7, 8])),
+        Ok(AzureEvent::End),
+    ]));
+    let vc = vc_play_durations(true, 4);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak("hi there", &scope("t")).await;
+
+    let source = {
+        let plays = vc.plays.lock().unwrap();
+        assert_eq!(plays.len(), 1);
+        match &plays[0] {
+            AudioSource::Streaming(s) => Arc::clone(s),
+            AudioSource::Buffered(_) => panic!("azure must take the streaming path"),
+        }
+    };
+    let mut all = Vec::new();
+    loop {
+        let frame = source.read();
+        if frame.is_empty() {
+            break;
+        }
+        all.extend_from_slice(&frame);
+    }
+    assert_eq!(
+        &all[..16],
+        &[1, 2, 1, 2, 3, 4, 3, 4, 5, 6, 5, 6, 7, 8, 7, 8]
+    );
+}
+
+#[tokio::test]
+async fn azure_connect_failure_skips_playback() {
+    let tts = azure_client(Err(TtsError::Transport(
+        "Azure WS connect failed: 401".to_owned(),
+    )));
+    let vc = vc_play_durations(true, 1);
+    let player = player_with(tts, Arc::clone(&vc));
+    player.speak("hello", &scope("t")).await;
+    assert!(vc.plays.lock().unwrap().is_empty());
 }

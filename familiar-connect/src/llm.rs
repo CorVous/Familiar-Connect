@@ -1,7 +1,7 @@
-//! LLM value types + `sanitize_name` (subsystem 08; Python `llm.py`).
+//! LLM value types + `sanitize_name` (subsystem 08).
 //!
-//! This module is split across two port layers (DESIGN §3). Implemented here are
-//! the **Layer-0 core value types** — [`Message`], [`Content`], [`LlmDelta`], and
+//! This module is split across two port layers. Implemented here are the
+//! **Layer-0 core value types** — [`Message`], [`Content`], [`LlmDelta`], and
 //! [`sanitize_name`] — which `identity` (02) and `budget` (05) depend on. The
 //! Layer-2 OpenRouter transport half (the client, SSE streaming, the rate-limit
 //! semaphore, `create_llm_clients`) is a separate porting task; see the stub
@@ -25,7 +25,7 @@ static NAME_DISALLOWED: LazyLock<Regex> =
 pub fn sanitize_name(name: &str) -> Option<String> {
     let replaced = NAME_DISALLOWED.replace_all(name, "_");
     // After substitution the string is pure ASCII, so scalar and byte counts
-    // agree; take 64 scalars to mirror Python's `[:64]`.
+    // agree; take the first 64 scalars.
     let truncated: String = replaced.chars().take(64).collect();
     let trimmed = truncated.trim_matches('_');
     if trimmed.is_empty() {
@@ -45,7 +45,7 @@ pub fn sanitize_name(name: &str) -> Option<String> {
 pub enum Content {
     /// Plain-text content.
     Text(String),
-    /// Structured content blocks (`[{"type": "text", ...}, ...]`).
+    /// Structured content blocks (`[{"type": "text",...},...]`).
     Blocks(Vec<Value>),
 }
 
@@ -75,8 +75,7 @@ impl From<Vec<Value>> for Content {
 
 /// Chat message — role + content + optional speaker name and tool fields.
 ///
-/// `to_dict` (via `Serialize`) omits the `None`-valued optional fields, matching
-/// the Python `Message.to_dict`.
+/// `to_dict` (via `Serialize`) omits the `None`-valued optional fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     /// `"system"` / `"user"` / `"assistant"` / `"tool"`.
@@ -159,30 +158,174 @@ pub struct LlmDelta {
 }
 
 // ============================================================================
-// Layer-2 client (subsystem 08) — STUB.
+// Client seam (subsystem 08).
 //
-// The OpenRouter transport half of `llm` lives here in the Python source
-// (`LLMClient`, `stream_completion`/`chat`/`chat_stream`, the process-wide
-// rate-limit semaphore, `_CallMetrics`, `create_llm_clients`) but is Layer 2 per
-// DESIGN §3 and belongs to the subsystem-08 porting task. Only the Layer-0 value
-// types above are implemented in this foundation pass. The client is filled in
-// later against the `LlmClient` seam trait below.
-//
-// The trait itself is defined here now (Layer 1) because `structured_request`
-// and the 04/07 workers type against it (DESIGN §4.8: mocks touch only these
-// five methods). The concrete OpenRouter client that implements it — the SSE
-// streaming, the rate-limit semaphore, `create_llm_clients` — remains the
-// Layer-2 subsystem-08 task; nothing here constructs a client.
+// The trait itself is defined here (Layer 1) because `structured_request`
+// and the 04/07 workers type against it (mocks touch only these five methods).
+// The concrete OpenRouter client that implements it — the SSE streaming, the
+// rate-limit semaphore, `create_llm_clients` — remains the Layer-2
+// subsystem-08 task; nothing here constructs a client.
 // ============================================================================
 
 use async_trait::async_trait;
+use futures::Stream;
 use futures::stream::BoxStream;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 
-/// The narrow LLM client seam the rest of the system types against
-/// (DESIGN §4.8).
+/// Shared cell holding the status word the transport logs when a stream is
+/// abandoned before its terminal event.
 ///
-/// Only these five methods are ever touched from outside the transport module,
-/// so a ~5-line scripted stub satisfies it (the 04/07 worker doubles and the 06
+/// Starts at `cancelled` (barge-in — the only abandon the transport can infer
+/// on its own). The consumer overrides it when it abandons deliberately.
+#[derive(Clone, Debug)]
+pub struct AbandonStatus(Arc<Mutex<&'static str>>);
+
+impl Default for AbandonStatus {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new("cancelled")))
+    }
+}
+
+impl AbandonStatus {
+    /// Overwrite the status word (last writer wins).
+    pub fn set(&self, status: &'static str) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = status;
+    }
+
+    /// Current status word.
+    #[must_use]
+    pub fn get(&self) -> &'static str {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Shared cell holding the tool calls a consumer executed for one LLM call, and
+/// what they returned.
+///
+/// The transport sees the model *request* tool calls but never their results —
+/// those are produced by the caller after the stream ends. Rather than write two
+/// rows and correlate them later, the caller drops both halves into this cell
+/// and the transport folds them into the one mirrored row it was going to write
+/// anyway. Held as `(tool_calls_json, tool_results_json)`.
+#[derive(Clone, Debug, Default)]
+pub struct ToolTrace(Arc<Mutex<Option<(String, String)>>>);
+
+impl ToolTrace {
+    /// Record this call's tool calls and their results (last writer wins).
+    pub fn set(&self, calls_json: String, results_json: String) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((calls_json, results_json));
+    }
+
+    /// Take what was recorded, leaving the cell empty.
+    #[must_use]
+    pub fn take(&self) -> Option<(String, String)> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+}
+
+/// The stream [`LlmClient::stream_completion`] hands back.
+///
+/// Delegates `Stream` to the boxed inner stream, so `.next()` call sites read
+/// exactly as they did over a bare `BoxStream`. What it adds is
+/// [`note_abandon_status`](Self::note_abandon_status): the `[LLM call]` status
+/// word to log if this stream is dropped before its terminal event. Without it
+/// every early drop looks like a barge-in (issue #220).
+pub struct LlmStream {
+    inner: BoxStream<'static, anyhow::Result<LlmDelta>>,
+    /// `None` for streams with no call metrics behind them (test doubles, the
+    /// `no_stream` path) — noting a status is then a no-op.
+    abandon: Option<AbandonStatus>,
+    /// `None` likewise; noting a tool trace is then a no-op.
+    tools: Option<ToolTrace>,
+}
+
+impl LlmStream {
+    /// Wrap any delta stream; no abandon status to report.
+    pub fn new<S>(inner: S) -> Self
+    where
+        S: Stream<Item = anyhow::Result<LlmDelta>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(inner),
+            abandon: None,
+            tools: None,
+        }
+    }
+
+    /// Wrap a delta stream whose `Drop` reports `abandon`'s status word.
+    #[must_use]
+    pub fn with_abandon(
+        inner: BoxStream<'static, anyhow::Result<LlmDelta>>,
+        abandon: AbandonStatus,
+    ) -> Self {
+        Self {
+            inner,
+            abandon: Some(abandon),
+            tools: None,
+        }
+    }
+
+    /// Attach the cell this stream's mirrored row reads tool calls/results from.
+    #[must_use]
+    pub fn with_tool_trace(mut self, tools: ToolTrace) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Is anything reading a tool trace off this stream? `false` with no mirror
+    /// installed, so a caller can skip building one.
+    #[must_use]
+    pub const fn traces_tools(&self) -> bool {
+        self.tools.is_some()
+    }
+
+    /// Record the tool calls made off this call's response, and their results,
+    /// so both land on the same mirrored row. JSON arrays; no-op on a stream
+    /// with no call metrics behind it.
+    pub fn note_tool_trace(&self, calls_json: String, results_json: String) {
+        if let Some(tools) = &self.tools {
+            tools.set(calls_json, results_json);
+        }
+    }
+
+    /// Declare why this stream is about to be abandoned — e.g. `"silent"`,
+    /// `"suppressed"`. Unset, an early drop logs `cancelled`.
+    pub fn note_abandon_status(&self, status: &'static str) {
+        if let Some(abandon) = &self.abandon {
+            abandon.set(status);
+        }
+    }
+}
+
+impl From<BoxStream<'static, anyhow::Result<LlmDelta>>> for LlmStream {
+    fn from(inner: BoxStream<'static, anyhow::Result<LlmDelta>>) -> Self {
+        Self {
+            inner,
+            abandon: None,
+            tools: None,
+        }
+    }
+}
+
+impl Stream for LlmStream {
+    type Item = anyhow::Result<LlmDelta>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+/// The narrow LLM client seam the rest of the system types against.
+///
+/// Only these methods are ever touched from outside the transport module, and
+/// `model` has a default, so a ~5-line scripted stub satisfies it (the 04/07
+/// worker doubles and the 06
 /// responder doubles implement exactly this). The OpenRouter client (Layer 2,
 /// subsystem 08) implements the trait; the streaming/chat bodies, the rate-limit
 /// semaphore, and `create_llm_clients` are that later task's remit.
@@ -197,14 +340,29 @@ pub trait LlmClient: Send + Sync {
 
     /// SSE streaming completion. `tools` is the OpenAI `tools` payload (`None`
     /// when the registry is empty); each item is one [`LlmDelta`].
+    ///
+    /// `LlmStream::from(box_stream)` adapts any boxed delta stream, so a stub
+    /// stays a one-liner.
     async fn stream_completion(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>>;
+    ) -> anyhow::Result<LlmStream>;
 
     /// The config slot label (`"fast"` / `"prose"` / `"background"`), or `None`.
     fn slot(&self) -> Option<&str>;
+
+    /// The model id, keying #183 token calibration.
+    ///
+    /// Defaults to `""` — a calibration miss, leaving the raw estimate — so
+    /// stubs need not implement it. Decorators must forward the inner value.
+    #[allow(
+        clippy::unnecessary_literal_bound,
+        reason = "only this default returns a literal; overrides borrow from self"
+    )]
+    fn model(&self) -> &str {
+        ""
+    }
 
     /// Whether `ImageResult`s serialize as multimodal blocks for this client.
     fn multimodal(&self) -> bool;
@@ -219,14 +377,18 @@ pub trait LlmClient: Send + Sync {
 // Feature-gated on `net` (default). The value types + `LlmClient` trait above
 // stay ungated because `identity`/`budget`/`structured_request` depend on them.
 // The concrete OpenRouter client, its SSE streaming, the INJECTED rate-limit
-// semaphore (DESIGN D13 — no module global), and `create_llm_clients` live here.
+// semaphore (no module global), and `create_llm_clients` live here.
 // ============================================================================
 
 #[cfg(feature = "net")]
 mod client {
-    use super::{Content, LlmClient, LlmDelta, Message};
+    use super::{AbandonStatus, Content, LlmClient, LlmDelta, LlmStream, Message, ToolTrace};
+    use crate::budget::{estimate_tokens_from_chars, get_token_calibration};
     use crate::config::{CharacterConfig, LLM_SLOT_NAMES, LLMSlotConfig};
     use crate::diagnostics::collector::get_span_collector;
+    use crate::diagnostics::llm_mirror::{
+        CallContext, LlmCallRecord, current_call_context, get_llm_call_sink, mirror_call,
+    };
     use crate::log_style as ls;
     use crate::support;
     use anyhow::{Result, anyhow};
@@ -245,18 +407,20 @@ mod client {
     /// OpenRouter chat-completions base URL.
     pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-    // Retry / concurrency / transport constants (spec 08 § Config knobs).
+    // Retry / concurrency / transport constants.
     const MAX_RETRIES: u32 = 4;
     const BASE_DELAY_S: f64 = 1.0;
     const MAX_DELAY_S: f64 = 30.0;
     const DEFAULT_MAX_CONCURRENT: usize = 4;
     const HTTP_TIMEOUT_S: u64 = 120;
     const HTTP_ERROR_BODY_LIMIT: usize = 600;
+    /// `GET /models` is advisory startup diagnostics — give up quickly.
+    const MODELS_TIMEOUT_S: u64 = 20;
 
     // -- free helpers -------------------------------------------------------
 
     /// Sum of the plain-string content lengths (Unicode scalars) of `messages`;
-    /// list/multimodal content counts 0 (spec 08 §21).
+    /// list/multimodal content counts 0.
     fn input_chars(messages: &[Message]) -> usize {
         messages
             .iter()
@@ -267,7 +431,7 @@ mod client {
             .sum()
     }
 
-    /// 429 backoff delay for a zero-indexed `attempt` (spec 08 §4).
+    /// 429 backoff delay for a zero-indexed `attempt`.
     ///
     /// `min(1.0 * 2**attempt, 30.0)`; a numeric `Retry-After` overrides with
     /// `min(value, 30.0)`; an unparseable header falls back to exponential.
@@ -281,8 +445,8 @@ mod client {
         Duration::from_secs_f64(secs.max(0.0))
     }
 
-    /// Set an Anthropic prompt-caching breakpoint on the FIRST system message
-    /// (spec 08 §10). Mutates in place; a no-op when no system message exists.
+    /// Set an Anthropic prompt-caching breakpoint on the FIRST system message.
+    /// Mutates in place; a no-op when no system message exists.
     fn mark_system_cache_breakpoint(messages: &mut [Value]) {
         let Some(system) = messages
             .iter_mut()
@@ -303,7 +467,7 @@ mod client {
         }
     }
 
-    /// Render an SSE code field like Python `str(code)` (spec 08 §13).
+    /// Render an SSE code field as a string.
     fn code_str(code: Option<&Value>) -> String {
         match code {
             None | Some(Value::Null) => "None".to_string(),
@@ -314,7 +478,7 @@ mod client {
 
     /// Decode one SSE `data` payload into a JSON object. `None` for `[DONE]`,
     /// blanks, non-JSON, non-object, or a top-level `error` frame (which is
-    /// logged at WARNING and skipped — spec 08 §13).
+    /// logged at WARNING and skipped).
     fn parse_sse_json(data: &str) -> Option<Value> {
         let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
@@ -392,8 +556,7 @@ mod client {
 
     // -- per-call metrics ---------------------------------------------------
 
-    /// Per-call timing + token signals for one OpenRouter request
-    /// (Python `_CallMetrics`; spec 08 §19–21).
+    /// Per-call timing + token signals for one OpenRouter request.
     struct CallMetrics {
         slot: Option<String>,
         model: String,
@@ -407,9 +570,31 @@ mod client {
         in_tokens: Option<i64>,
         out_tokens: Option<i64>,
         cached_tokens: Option<i64>,
+        /// `(system_prompt, messages_json)` — `None` when no sink is installed,
+        /// which is what keeps mirroring free when it is switched off.
+        capture: Option<(String, String)>,
+        /// Turn identity read at request time (a stream can be dropped from
+        /// outside its turn's scope).
+        ctx: CallContext,
+        /// Assistant text, concatenated across deltas.
+        response: String,
+        /// Tool calls + results the consumer folded back in.
+        tools: ToolTrace,
+        /// One mirrored row per call, no matter how the stream ends.
+        mirrored: bool,
     }
 
-    /// `max(0, round(delta * 1000))` — half-to-even (DESIGN §4.3), clamped ≥ 0.
+    /// The system prompt as assembled — every system-role message, joined.
+    fn system_prompt_of(messages: &[Message]) -> String {
+        messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(Message::content_str)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// `max(0, round(delta * 1000))` — half-to-even, clamped ≥ 0.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn clamp_ms(from: Instant, to: Instant) -> i64 {
         let ms =
@@ -418,7 +603,13 @@ mod client {
     }
 
     impl CallMetrics {
-        fn new(slot: Option<String>, model: String, input_chars: usize) -> Self {
+        fn new(
+            slot: Option<String>,
+            model: String,
+            input_chars: usize,
+            capture: Option<(String, String)>,
+            tools: ToolTrace,
+        ) -> Self {
             Self {
                 slot,
                 model,
@@ -432,7 +623,62 @@ mod client {
                 in_tokens: None,
                 out_tokens: None,
                 cached_tokens: None,
+                capture,
+                ctx: current_call_context(),
+                response: String::new(),
+                tools,
+                mirrored: false,
             }
+        }
+
+        /// `(ttfb_ms, ttft_ms, total_ms)` — shared by the log line and the
+        /// mirrored row so the two can never disagree.
+        #[allow(clippy::similar_names, reason = "ttfb_ms / ttft_ms are the wire keys")]
+        fn timings(&self) -> (Option<i64>, Option<i64>, Option<i64>) {
+            (
+                self.t_first_byte.map(|t| clamp_ms(self.t_start, t)),
+                self.t_first_delta.map(|t| clamp_ms(self.t_start, t)),
+                self.t_end.map(|t| clamp_ms(self.t_start, t)),
+            )
+        }
+
+        /// Hand this call — prompt, messages, response, tools, metadata — to the
+        /// mirror sink. Exactly once; a no-op when nothing was captured.
+        #[allow(clippy::similar_names, reason = "ttfb_ms / ttft_ms are the wire keys")]
+        fn mirror(&mut self) {
+            if self.mirrored {
+                return;
+            }
+            self.mirrored = true;
+            let Some((system_prompt, messages_json)) = self.capture.take() else {
+                return;
+            };
+            let (ttfb_ms, ttft_ms, total_ms) = self.timings();
+            let (tool_calls_json, tool_results_json) = self
+                .tools
+                .take()
+                .map_or((None, None), |(c, r)| (Some(c), Some(r)));
+            mirror_call(LlmCallRecord {
+                turn_id: self.ctx.turn_id,
+                turn_scope: self.ctx.turn_scope.clone(),
+                channel_id: self.ctx.channel_id,
+                slot: self.slot.clone(),
+                model: self.model.clone(),
+                provider: self.provider.clone(),
+                status: self.status.to_owned(),
+                system_prompt,
+                messages_json,
+                response_text: std::mem::take(&mut self.response),
+                tool_calls_json,
+                tool_results_json,
+                ttfb_ms,
+                ttft_ms,
+                total_ms,
+                est_in_tokens: Some(estimate_tokens_from_chars(self.input_chars)),
+                in_tokens: self.in_tokens,
+                out_tokens: self.out_tokens,
+                cached: self.cached_tokens,
+            });
         }
 
         /// Pull provider + usage off any chunk carrying them (last wins).
@@ -458,9 +704,9 @@ mod client {
             }
         }
 
-        /// Records per-phase spans into the collector and one structured
-        /// `[LLM call]` INFO line (spec 01 §31, spec 08 §19–21). Both are wire
-        /// contracts. Collector failures are suppressed (poison-safe).
+        /// Records per-phase spans into the collector and one structured `[LLM
+        /// call]` INFO line. Both are wire contracts. Collector
+        /// failures are suppressed (poison-safe).
         #[allow(clippy::similar_names)] // ttfb_ms / ttft_ms are the wire keys
         fn emit(&self) {
             let suffix = self
@@ -469,23 +715,15 @@ mod client {
                 .map(|s| format!(".{s}"))
                 .unwrap_or_default();
             let collector = get_span_collector();
-            let mut ttfb_ms = None;
-            let mut ttft_ms = None;
-            let mut total_ms = None;
-            if let Some(tfb) = self.t_first_byte {
-                let ms = clamp_ms(self.t_start, tfb);
-                ttfb_ms = Some(ms);
-                collector.record(&format!("llm.ttfb{suffix}"), ms, "ok");
-            }
-            if let Some(tfd) = self.t_first_delta {
-                let ms = clamp_ms(self.t_start, tfd);
-                ttft_ms = Some(ms);
-                collector.record(&format!("llm.ttft{suffix}"), ms, "ok");
-            }
-            if let Some(te) = self.t_end {
-                let ms = clamp_ms(self.t_start, te);
-                total_ms = Some(ms);
-                collector.record(&format!("llm.total{suffix}"), ms, "ok");
+            let (ttfb_ms, ttft_ms, total_ms) = self.timings();
+            for (name, ms) in [
+                ("llm.ttfb", ttfb_ms),
+                ("llm.ttft", ttft_ms),
+                ("llm.total", total_ms),
+            ] {
+                if let Some(ms) = ms {
+                    collector.record(&format!("{name}{suffix}"), ms, "ok");
+                }
             }
 
             let mut parts = vec![
@@ -512,12 +750,13 @@ mod client {
             if let Some(p) = &self.provider {
                 parts.push(ls::kv_styled("provider", p, ls::W, ls::LM));
             }
-            // Estimated prompt tokens via the char/4 heuristic (mirrors
-            // `budget::estimate_tokens`, CHARS_PER_TOKEN=4; `input_chars` is
-            // already a Unicode-scalar count). Emitted next to the true
-            // `in_tokens` so the estimated-vs-actual ratio is observable
-            // (issues #183/#184) — no calibration, purely a metric.
-            let est_in_tokens = self.input_chars.div_ceil(4);
+            // Estimated prompt tokens through the shared estimator
+            // (`input_chars` is already a Unicode-scalar count). Emitted next to
+            // the true `in_tokens` so the estimated-vs-actual ratio is
+            // observable (issues #183/#184). Deliberately the RAW estimate, never
+            // the calibrated one: calibration is derived from this ratio, so
+            // feeding it back would make `obs` self-referential and always ~1.0.
+            let est_in_tokens = estimate_tokens_from_chars(self.input_chars);
             parts.push(ls::kv_styled(
                 "est_in_tokens",
                 &est_in_tokens.to_string(),
@@ -532,6 +771,24 @@ mod client {
             }
             if let Some(v) = self.cached_tokens {
                 parts.push(ls::kv_styled("cached", &v.to_string(), ls::W, ls::LW));
+            }
+            // Feed the calibration store, then surface the model's running
+            // true/estimated ratio (this call included) as `cal_ratio` so the
+            // learned rate is collectable from logs (#183). Absent until the
+            // model has a usage-bearing call — or, since the store now loads
+            // persisted totals, until the first call of a process whose cache
+            // was cold. `record` may write that cache, on a debounce.
+            let calibration = get_token_calibration();
+            if let Some(actual) = self.in_tokens {
+                calibration.record(&self.model, est_in_tokens, actual);
+            }
+            if let Some(ratio) = calibration.ratio(&self.model) {
+                parts.push(ls::kv_styled(
+                    "cal_ratio",
+                    &format!("{ratio:.3}"),
+                    ls::W,
+                    ls::LC,
+                ));
             }
             tracing::info!(target: "familiar_connect.llm", "{}", parts.join(" "));
         }
@@ -554,12 +811,14 @@ mod client {
     /// was already released at header-check time; this struct's job is to parse
     /// deltas and emit call metrics EXACTLY ONCE — on clean end (`ok`), on a
     /// transport error (`error`), or, via `Drop`, on consumer abandonment
-    /// (`cancelled`, the barge-in path; spec 08 §16).
+    /// (`abandon`'s word: `cancelled` for a barge-in, or whatever the consumer
+    /// noted).
     struct SseDeltaStream {
         events: InnerEvents,
         metrics: CallMetrics,
         done: bool,
         emitted: bool,
+        abandon: AbandonStatus,
     }
 
     impl SseDeltaStream {
@@ -609,8 +868,13 @@ mod client {
                             continue;
                         }
                         let content = content_parts.concat();
-                        if !content.is_empty() && this.metrics.t_first_delta.is_none() {
-                            this.metrics.t_first_delta = Some(Instant::now());
+                        if !content.is_empty() {
+                            if this.metrics.t_first_delta.is_none() {
+                                this.metrics.t_first_delta = Some(Instant::now());
+                            }
+                            if this.metrics.capture.is_some() {
+                                this.metrics.response.push_str(&content);
+                            }
                         }
                         return Poll::Ready(Some(Ok(LlmDelta {
                             content,
@@ -625,9 +889,16 @@ mod client {
 
     impl Drop for SseDeltaStream {
         fn drop(&mut self) {
-            // Abandoned before a terminal event → cancelled (barge-in). A
-            // clean/errored end already emitted and set `emitted`.
-            self.emit_with("cancelled");
+            // Abandoned before a terminal event. `cancelled` (barge-in) unless
+            // the consumer noted a deliberate reason — silent decision,
+            // suppressed tool-call leak (issue #220). A clean/errored end
+            // already emitted and set `emitted`.
+            let status = self.abandon.get();
+            self.emit_with(status);
+            // Mirrored at DROP, not at stream end: the agentic loop executes
+            // tools while still holding the stream, so waiting until here is
+            // what lets one row carry both the calls and their results.
+            self.metrics.mirror();
         }
     }
 
@@ -636,12 +907,12 @@ mod client {
     /// OpenRouter chat-completions client for one call-site slot.
     ///
     /// Blocking `chat` (429-retrying), SSE-streaming `stream_completion` /
-    /// `chat_stream`. The process-wide rate-limit `Arc<Semaphore>` is INJECTED
-    /// (DESIGN D13); `chat` holds a permit only across the POST, streaming drops
-    /// it the instant response headers pass the status check (spec 08 §2–3).
+    /// `chat_stream`. The process-wide rate-limit `Arc<Semaphore>` is INJECTED;
+    /// `chat` holds a permit only across the POST, streaming drops it the
+    /// instant response headers pass the status check.
     #[allow(
         clippy::struct_excessive_bools,
-        reason = "mirrors the Python client's independent boolean knobs 1:1"
+        reason = "these are independent boolean knobs, not a state enum"
     )]
     pub struct OpenRouterClient {
         api_key: String,
@@ -670,7 +941,7 @@ mod client {
     /// injects one shared handle across all slots.
     #[allow(
         clippy::struct_excessive_bools,
-        reason = "mirrors the Python client's independent boolean knobs 1:1"
+        reason = "these are independent boolean knobs, not a state enum"
     )]
     pub struct OpenRouterClientBuilder {
         api_key: String,
@@ -814,7 +1085,7 @@ mod client {
             self
         }
 
-        /// Inject the shared rate-limit semaphore (DESIGN D13).
+        /// Inject the shared rate-limit semaphore.
         pub fn semaphore(mut self, sem: Arc<Semaphore>) -> Self {
             self.semaphore = Some(sem);
             self
@@ -958,7 +1229,7 @@ mod client {
             &self.semaphore
         }
 
-        /// Request headers: `Authorization: Bearer …` + `Content-Type` (spec 08).
+        /// Request headers: `Authorization: Bearer …` + `Content-Type`.
         #[must_use]
         pub fn build_headers(&self) -> BTreeMap<String, String> {
             let mut headers = BTreeMap::new();
@@ -971,7 +1242,7 @@ mod client {
         }
 
         /// Build the OpenRouter request body from `messages` (+ optional
-        /// `tools`), applying every knob per spec 08 §7–11.
+        /// `tools`), applying every configured knob.
         #[must_use]
         pub fn build_payload(&self, messages: &[Message], tools: Option<&[Value]>) -> Value {
             let msgs: Vec<Value> = messages.iter().map(Message::to_dict).collect();
@@ -1018,8 +1289,8 @@ mod client {
             payload
         }
 
-        /// Log a ≥400 upstream error body at WARNING before erroring
-        /// (spec 08 §5). Truncated to 600 scalars, slot-suffixed.
+        /// Log a ≥400 upstream error body at WARNING before erroring.
+        /// Truncated to 600 scalars, slot-suffixed.
         fn log_http_error_body(&self, status: u16, body: &str) {
             let slot_suffix = self
                 .slot
@@ -1046,9 +1317,9 @@ mod client {
             tracing::warn!(target: "familiar_connect.llm", "{line}");
         }
 
-        /// POST with the 429 retry/backoff policy (spec 08 §4). Holds a
-        /// semaphore permit ONLY across each POST — released before the backoff
-        /// sleep so a retrying background call never starves live traffic.
+        /// POST with the 429 retry/backoff policy. Holds a semaphore permit
+        /// ONLY across each POST — released before the backoff sleep so a
+        /// retrying background call never starves live traffic.
         async fn post_with_retry(&self, url: &str, payload: &Value) -> Result<reqwest::Response> {
             let mut last: Option<reqwest::Response> = None;
             for attempt in 0..=MAX_RETRIES {
@@ -1090,10 +1361,55 @@ mod client {
             last.ok_or_else(|| anyhow!("post_with_retry produced no response"))
         }
 
-        /// Blocking, 429-retrying chat completion (spec 08 §4–6).
+        /// Blocking, 429-retrying chat completion.
+        ///
+        /// Mirrored like the streaming path, but silently: this leg emits no
+        /// `[LLM call]` line and no spans (it never has), so instrumenting it
+        /// would change a wire format. The mirrored row carries what it can —
+        /// no `ttfb_ms`/`ttft_ms`, since a blocking POST has no first-byte
+        /// event to time.
         pub async fn chat(&self, messages: Vec<Message>) -> Result<Message> {
+            let mut metrics = get_llm_call_sink().map(|_| {
+                CallMetrics::new(
+                    self.slot.clone(),
+                    self.model.clone(),
+                    input_chars(&messages),
+                    // Filled inside `chat_inner`, off the payload it already
+                    // built — no second serialization of a 15 KB prompt.
+                    None,
+                    ToolTrace::default(),
+                )
+            });
+            let result = self.chat_inner(messages, metrics.as_mut()).await;
+            if let Some(m) = &mut metrics {
+                m.t_end = Some(Instant::now());
+                match &result {
+                    Ok(msg) => {
+                        m.response = msg.content_str();
+                        if let Some(tcs) = &msg.tool_calls {
+                            // No handlers run off a blocking `chat`, so the
+                            // results half stays empty.
+                            m.tools
+                                .set(Value::Array(tcs.clone()).to_string(), "[]".to_owned());
+                        }
+                    }
+                    Err(_) => m.status = "error",
+                }
+                m.mirror();
+            }
+            result
+        }
+
+        async fn chat_inner(
+            &self,
+            messages: Vec<Message>,
+            mut metrics: Option<&mut CallMetrics>,
+        ) -> Result<Message> {
             let url = format!("{}/chat/completions", self.base_url);
             let payload = self.build_payload(&messages, None);
+            if let Some(m) = metrics.as_deref_mut() {
+                m.capture = Some((system_prompt_of(&messages), payload["messages"].to_string()));
+            }
             let response = self.post_with_retry(&url, &payload).await?;
             let status = response.status().as_u16();
             if status >= 400 {
@@ -1102,6 +1418,9 @@ mod client {
                 return Err(anyhow!("OpenRouter chat failed: HTTP {status}"));
             }
             let data: Value = response.json().await?;
+            if let Some(m) = metrics {
+                m.absorb(&data);
+            }
             let choices = data
                 .get("choices")
                 .and_then(Value::as_array)
@@ -1118,12 +1437,12 @@ mod client {
                 .and_then(Value::as_str)
                 .unwrap_or("assistant")
                 .to_string();
-            // Python `content = reply.get("content") or ""` (spec 08 §6): a
-            // non-empty string OR a non-empty list (block form) is preserved
-            // verbatim; None, an empty string, or an empty list all collapse
-            // to "". Mirror that truthiness contract — assistant replies are
-            // strings in practice, but the list branch keeps a multimodal /
-            // block-form reply intact instead of silently dropping it to "".
+            // `content` falls back to `""`: a non-empty string
+            // OR a non-empty list (block form) is preserved verbatim; None, an
+            // empty string, or an empty list all collapse to "". Mirror that
+            // truthiness contract — assistant replies are strings in
+            // practice, but the list branch keeps a multimodal / block-form
+            // reply intact instead of silently dropping it to "".
             let content = match reply.get("content") {
                 Some(Value::String(s)) if !s.is_empty() => Content::Text(s.clone()),
                 Some(Value::Array(a)) if !a.is_empty() => Content::Blocks(a.clone()),
@@ -1147,14 +1466,14 @@ mod client {
             })
         }
 
-        /// SSE streaming completion (spec 08 §12–16). Acquires a permit, opens
-        /// the request, and RELEASES the permit immediately once the response
-        /// headers pass the status check — before any body iteration.
+        /// SSE streaming completion. Acquires a permit, opens the request, and
+        /// RELEASES the permit immediately once the response headers pass the
+        /// status check — before any body iteration.
         pub async fn stream_completion(
             &self,
             messages: Vec<Message>,
             tools: Option<Vec<Value>>,
-        ) -> Result<BoxStream<'static, Result<LlmDelta>>> {
+        ) -> Result<LlmStream> {
             if self.no_stream {
                 return self.no_stream_completion(messages).await;
             }
@@ -1163,10 +1482,20 @@ mod client {
             payload["stream"] = json!(true);
             payload["usage"] = json!({ "include": true });
 
+            // Capture the array as it goes on the wire (post cache-breakpoint
+            // rewrite), so the mirrored row is what the provider actually saw.
+            // Skipped entirely when no sink is installed.
+            let capture = get_llm_call_sink()
+                .map(|_| (system_prompt_of(&messages), payload["messages"].to_string()));
+            // Only when something will read it — an unmirrored tool turn must
+            // not pay to serialize its results.
+            let tool_trace = capture.as_ref().map(|_| ToolTrace::default());
             let mut metrics = CallMetrics::new(
                 self.slot.clone(),
                 self.model.clone(),
                 input_chars(&messages),
+                capture,
+                tool_trace.clone().unwrap_or_default(),
             );
 
             let permit = self
@@ -1188,6 +1517,7 @@ mod client {
                     drop(permit);
                     metrics.status = "error";
                     metrics.emit();
+                    metrics.mirror();
                     return Err(anyhow!("OpenRouter stream request failed: {e}"));
                 }
             };
@@ -1198,28 +1528,35 @@ mod client {
                 drop(permit);
                 metrics.status = "error";
                 metrics.emit();
+                metrics.mirror();
                 return Err(anyhow!("OpenRouter stream failed: HTTP {status}"));
             }
-            // Headers accepted — release the permit before body iteration so a
-            // long stream does not occupy a rate-limit slot (spec 08 §3).
+            // Headers accepted — release the permit before body iteration so
+            // a long stream does not occupy a rate-limit slot.
             drop(permit);
             metrics.t_first_byte = Some(Instant::now());
 
             let events: InnerEvents = Box::pin(response.bytes_stream().eventsource());
-            Ok(Box::pin(SseDeltaStream {
-                events,
-                metrics,
-                done: false,
-                emitted: false,
-            }))
+            let abandon = AbandonStatus::default();
+            let stream = LlmStream::with_abandon(
+                Box::pin(SseDeltaStream {
+                    events,
+                    metrics,
+                    done: false,
+                    emitted: false,
+                    abandon: abandon.clone(),
+                }),
+                abandon,
+            );
+            Ok(match tool_trace {
+                Some(trace) => stream.with_tool_trace(trace),
+                None => stream,
+            })
         }
 
-        /// `no_stream=True` path: delegate to `chat`, then synthesize deltas —
-        /// content, one per tool call, terminal finish reason (spec 08 §18).
-        async fn no_stream_completion(
-            &self,
-            messages: Vec<Message>,
-        ) -> Result<BoxStream<'static, Result<LlmDelta>>> {
+        /// `no_stream=True` path: delegate to `chat`, then synthesize deltas
+        /// — content, one per tool call, terminal finish reason.
+        async fn no_stream_completion(&self, messages: Vec<Message>) -> Result<LlmStream> {
             let msg = self.chat(messages).await?;
             let mut deltas: Vec<LlmDelta> = Vec::new();
             let content = msg.content_str();
@@ -1260,14 +1597,14 @@ mod client {
                 finish_reason: Some(if has_tools { "tool_calls" } else { "stop" }.to_string()),
                 ..Default::default()
             });
-            Ok(Box::pin(futures::stream::iter(
+            Ok(LlmStream::new(futures::stream::iter(
                 deltas.into_iter().map(|d| -> Result<LlmDelta> { Ok(d) }),
             )))
         }
 
         /// Stream assistant content deltas as strings — a projection of
-        /// `stream_completion` to non-empty `.content` (spec 08 §17). Errors
-        /// propagate; the inner cleanup runs when this stream is dropped.
+        /// `stream_completion` to non-empty `.content`. Errors propagate; the
+        /// inner cleanup runs when this stream is dropped.
         pub async fn chat_stream(
             &self,
             messages: Vec<Message>,
@@ -1297,12 +1634,16 @@ mod client {
             &self,
             messages: Vec<Message>,
             tools: Option<Vec<Value>>,
-        ) -> Result<BoxStream<'static, Result<LlmDelta>>> {
+        ) -> Result<LlmStream> {
             OpenRouterClient::stream_completion(self, messages, tools).await
         }
 
         fn slot(&self) -> Option<&str> {
             self.slot.as_deref()
+        }
+
+        fn model(&self) -> &str {
+            &self.model
         }
 
         fn multimodal(&self) -> bool {
@@ -1314,7 +1655,7 @@ mod client {
         }
     }
 
-    /// One structured `[Config]` INFO line per slot (Python parity).
+    /// One structured `[Config]` INFO line per slot.
     fn log_slot_config(slot_name: &str, slot: &LLMSlotConfig) {
         let temp = slot
             .temperature
@@ -1352,7 +1693,7 @@ mod client {
         if slot.image_tools {
             parts.push(ls::kv_styled("image_tools", "on", ls::W, ls::LM));
         }
-        if slot.multimodal {
+        if slot.resolve_multimodal(None) {
             parts.push(ls::kv_styled("multimodal", "on", ls::W, ls::LM));
         }
         tracing::info!(target: "familiar_connect.llm", "{}", parts.join(" "));
@@ -1360,11 +1701,13 @@ mod client {
 
     /// One [`OpenRouterClient`] per call-site slot in `LLM_SLOT_NAMES`.
     ///
-    /// Plus a reserved `"__image_description__"` client when
-    /// `image_description_model` is set. All clients share ONE injected
-    /// rate-limit semaphore sized from `[llm].max_concurrent_requests`
-    /// (spec 08 §22; DESIGN D13). A missing slot is an `Err` (Python raised
-    /// `KeyError`, which run.py caught).
+    /// Plus the two reserved image clients when their models are set:
+    /// `"__image_description__"` (substitution) and `"__image_caption__"`
+    /// (persistence). All clients share ONE injected rate-limit semaphore sized
+    /// from `[llm].max_concurrent_requests`. A missing slot is an `Err`.
+    ///
+    /// `multimodal` is read at its resolved value — auto-detection has already
+    /// filled unset slots by the time the composition root calls this.
     pub fn create_llm_clients(
         api_key: &str,
         config: &CharacterConfig,
@@ -1390,35 +1733,78 @@ mod client {
                 .reasoning(slot.reasoning.clone())
                 .tool_calling(slot.tool_calling)
                 .image_tools(slot.image_tools)
-                .multimodal(slot.multimodal)
+                .multimodal(slot.resolve_multimodal(None))
                 .think_prepend(slot.think_prepend)
                 .semaphore(semaphore.clone())
                 .build();
             log_slot_config(slot_name, slot);
             clients.insert(slot_name.to_string(), client);
         }
-        if !config.image_description_model.is_empty() {
-            let client = OpenRouterClient::builder(api_key, &config.image_description_model)
-                .slot("image_description")
-                .semaphore(semaphore)
+        for (key, slot_label, model) in [
+            (
+                "__image_description__",
+                "image_description",
+                &config.image_description_model,
+            ),
+            (
+                "__image_caption__",
+                "image_caption",
+                &config.image_caption_model,
+            ),
+        ] {
+            if model.is_empty() {
+                continue;
+            }
+            let client = OpenRouterClient::builder(api_key, model)
+                .slot(slot_label)
+                .semaphore(semaphore.clone())
                 .build();
             let line = format!(
                 "{} {} {}",
                 ls::tag("Config", ls::W),
-                ls::kv("slot", "image_description"),
-                ls::kv("model", &config.image_description_model),
+                ls::kv("slot", slot_label),
+                ls::kv("model", model),
             );
             tracing::info!(target: "familiar_connect.llm", "{line}");
-            clients.insert("__image_description__".to_string(), client);
+            clients.insert(key.to_string(), client);
         }
         Ok(clients)
+    }
+
+    /// `GET {base_url}/models` — raw body.
+    ///
+    /// Feeds the startup capability audit (`crate::model_diagnostics`). Same
+    /// Bearer auth as the chat POST; its own short-timeout client so advisory
+    /// diagnostics never share the traffic semaphore or the 120s read timeout.
+    ///
+    /// # Errors
+    /// Transport failure, or a non-2xx status.
+    pub async fn fetch_model_catalog(api_key: &str, base_url: &str) -> Result<String> {
+        let http = reqwest::Client::builder()
+            .read_timeout(Duration::from_secs(MODELS_TIMEOUT_S))
+            .build()?;
+        let response = http
+            .get(format!("{base_url}/models"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("GET /models returned HTTP {}", status.as_u16()));
+        }
+        Ok(response.text().await?)
     }
 
     #[cfg(test)]
     mod tests {
         use super::{MAX_DELAY_S, OpenRouterClient, backoff_delay, create_llm_clients};
+        use crate::budget::reset_token_calibration;
         use crate::config::{CharacterConfig, LLMSlotConfig};
         use crate::diagnostics::collector::{get_span_collector, reset_span_collector};
+        use crate::diagnostics::llm_mirror::{
+            CallContext, LlmCallRecord, LlmCallSink, reset_llm_call_sink, set_llm_call_sink,
+            with_call_context,
+        };
         use crate::diagnostics::testutil::{Capture, install_capture, singleton_guard, strip_ansi};
         use crate::llm::{Content, LlmDelta, Message};
         use futures::StreamExt;
@@ -1504,6 +1890,17 @@ mod client {
 
         fn user(text: &str) -> Message {
             Message::new("user", text)
+        }
+
+        // --- trait surface -------------------------------------------------
+
+        /// #183: the model must reach calibration through the trait object the
+        /// responders hold, not just the inherent accessor.
+        #[test]
+        fn model_reaches_through_the_trait_object() {
+            let c = OpenRouterClient::builder("k", "vendor/model-x").build();
+            let erased: &dyn crate::llm::LlmClient = &c;
+            assert_eq!(erased.model(), "vendor/model-x");
         }
 
         // --- build_payload -------------------------------------------------
@@ -1893,8 +2290,14 @@ mod client {
             assert_eq!(sent[2]["name"], "Bob");
         }
 
+        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn chat_raises_and_logs_body_on_4xx() {
+            // Under the singleton guard like every other capture test: an
+            // `install_capture` guard raises the process-wide `tracing` max
+            // level while it lives, so two overlapping captures can filter each
+            // other's events out.
+            let _g = singleton_guard();
             let server = MockServer::start().await;
             let body = json!({
                 "error": {
@@ -1976,7 +2379,7 @@ mod client {
 
         #[tokio::test]
         async fn chat_preserves_list_content_blocks() {
-            // Python `reply.get("content") or ""` keeps a NON-empty list (block
+            // The content fallback keeps a NON-empty list (block
             // form) verbatim; only None/empty collapses to "". The reply's
             // content must round-trip as `Content::Blocks`, not be flattened to
             // "" (which `as_str` on an array would do).
@@ -2009,7 +2412,7 @@ mod client {
 
         #[tokio::test]
         async fn chat_empty_list_content_collapses_to_empty() {
-            // Python truthiness: `[] or "" == ""`. An empty content list is
+            // An empty content list is
             // falsy, so it collapses to an empty text reply (not empty Blocks).
             let server = MockServer::start().await;
             mount_json(
@@ -2074,7 +2477,7 @@ mod client {
 
         #[tokio::test]
         async fn post_respects_retry_after_header() {
-            // Python parity (test_post_respects_retry_after_header): a 429
+            // A 429
             // carrying a `Retry-After` value must drive a delay read OFF the
             // response, NOT the exponential fallback (1.0s for attempt 0). This
             // exercises the header-extraction wiring in `post_with_retry`
@@ -2528,6 +2931,56 @@ mod client {
             assert!(!line.contains("status=error"), "line: {line}");
         }
 
+        /// Issue #220: a silent decision abandons the stream too, but it is not
+        /// a barge-in — the noted word must reach the `[LLM call]` line.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn noted_silent_abandon_logs_silent_not_cancelled() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            let server = MockServer::start().await;
+            let deltas: Vec<String> = (0..50).map(|i| format!("d{i}")).collect();
+            let refs: Vec<&str> = deltas.iter().map(String::as_str).collect();
+            mount_sse(&server, sse_content(&refs)).await;
+            let c = OpenRouterClient::builder("k", "m")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            let mut s = c.stream_completion(vec![user("hi")], None).await.unwrap();
+            let _ = s.next().await;
+            s.note_abandon_status("silent");
+            drop(s);
+            let line = call_line(&cap);
+            assert!(line.contains("status=silent"), "line: {line}");
+            assert!(!line.contains("status=cancelled"), "line: {line}");
+        }
+
+        /// Same seam, the leaked-tool-call arm's word (issue #109 suppression).
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn noted_suppressed_abandon_logs_suppressed_status() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            let server = MockServer::start().await;
+            let deltas: Vec<String> = (0..50).map(|i| format!("d{i}")).collect();
+            let refs: Vec<&str> = deltas.iter().map(String::as_str).collect();
+            mount_sse(&server, sse_content(&refs)).await;
+            let c = OpenRouterClient::builder("k", "m")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            let mut s = c.stream_completion(vec![user("hi")], None).await.unwrap();
+            let _ = s.next().await;
+            s.note_abandon_status("suppressed");
+            drop(s);
+            let line = call_line(&cap);
+            assert!(line.contains("status=suppressed"), "line: {line}");
+        }
+
         #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn http_4xx_logs_error_status() {
@@ -2569,6 +3022,56 @@ mod client {
             drop(s);
             let line = call_line(&cap);
             assert!(line.contains("cached=800"), "line: {line}");
+        }
+
+        /// #183: the learned true/estimated ratio rides the `[LLM call]` line.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn calibration_ratio_surfaces_in_call_log() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            reset_token_calibration();
+            let server = MockServer::start().await;
+            let usage = json!({ "prompt_tokens": 150, "completion_tokens": 10 });
+            mount_sse(&server, sse_with_usage(&["x"], Some(usage), None)).await;
+            let c = OpenRouterClient::builder("k", "cal/one")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            // 400 scalars -> est 100 tokens; the provider bills 150 -> ratio 1.5.
+            let mut s = c
+                .chat_stream(vec![Message::new("user", "A".repeat(400))])
+                .await
+                .unwrap();
+            while s.next().await.is_some() {}
+            drop(s);
+            let line = call_line(&cap);
+            assert!(line.contains("est_in_tokens=100"), "line: {line}");
+            assert!(line.contains("cal_ratio=1.500"), "line: {line}");
+        }
+
+        /// No reported usage → nothing learned → no `cal_ratio` key.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn no_usage_means_no_calibration_key() {
+            let _g = singleton_guard();
+            reset_span_collector();
+            reset_token_calibration();
+            let server = MockServer::start().await;
+            mount_sse(&server, sse_content(&["x"])).await;
+            let c = OpenRouterClient::builder("k", "cal/two")
+                .base_url(server.uri())
+                .slot("prose")
+                .build();
+            let cap = Capture::default();
+            let _sub = install_capture(&cap);
+            let mut s = c.chat_stream(vec![user("hi")]).await.unwrap();
+            while s.next().await.is_some() {}
+            drop(s);
+            let line = call_line(&cap);
+            assert!(!line.contains("cal_ratio="), "line: {line}");
         }
 
         fn call_line(cap: &Capture) -> String {
@@ -2674,7 +3177,7 @@ mod client {
                 LLMSlotConfig {
                     model: "x/y".into(),
                     image_tools: true,
-                    multimodal: true,
+                    multimodal: Some(true),
                     ..Default::default()
                 },
             );
@@ -2783,6 +3286,258 @@ mod client {
             );
         }
 
+        // --- call mirror (prompt/response capture) -------------------------
+
+        /// Collects mirrored records so a test can assert on them.
+        #[derive(Default)]
+        struct CollectingSink(std::sync::Mutex<Vec<LlmCallRecord>>);
+
+        impl LlmCallSink for CollectingSink {
+            fn mirror(&self, record: LlmCallRecord) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(record);
+            }
+        }
+
+        fn install_sink() -> Arc<CollectingSink> {
+            let sink = Arc::new(CollectingSink::default());
+            set_llm_call_sink(Arc::clone(&sink) as Arc<dyn LlmCallSink>);
+            sink
+        }
+
+        /// Records for `model` only. Unguarded tests in this binary also make
+        /// LLM calls, and an installed sink catches every one of them — so each
+        /// mirror test names its own model and reads back just that.
+        fn taken(sink: &CollectingSink, model: &str) -> Vec<LlmCallRecord> {
+            std::mem::take(
+                &mut *sink
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_iter()
+            .filter(|r| r.model == model)
+            .collect()
+        }
+
+        /// A client whose model names the test that built it.
+        fn client_named(base_url: &str, model: &str) -> OpenRouterClient {
+            OpenRouterClient::builder("k", model)
+                .base_url(base_url)
+                .build()
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn a_stream_mirrors_prompt_response_and_metadata() {
+            let _guard = singleton_guard();
+            let sink = install_sink();
+            let server = MockServer::start().await;
+            mount_sse(
+                &server,
+                sse_with_usage(
+                    &["Ada ", "and Bel."],
+                    Some(json!({
+                        "prompt_tokens": 2100,
+                        "completion_tokens": 80,
+                        "prompt_tokens_details": { "cached_tokens": 1890 }
+                    })),
+                    Some("anthropic"),
+                ),
+            )
+            .await;
+            let c = OpenRouterClient::builder("k", "anthropic/claude-haiku-4.5")
+                .base_url(server.uri())
+                .slot("fast")
+                .build();
+            let messages = vec![
+                Message::new("system", "In the call: Ada, Bel"),
+                user("who is here?"),
+            ];
+            {
+                let mut s = c.stream_completion(messages, None).await.unwrap();
+                while s.next().await.is_some() {}
+                // Row lands when the stream is dropped, not at its last delta.
+                assert!(taken(&sink, "anthropic/claude-haiku-4.5").is_empty());
+            }
+            let records = taken(&sink, "anthropic/claude-haiku-4.5");
+            reset_llm_call_sink();
+            assert_eq!(records.len(), 1);
+            let rec = &records[0];
+            assert_eq!(rec.system_prompt, "In the call: Ada, Bel");
+            assert!(rec.messages_json.contains("who is here?"));
+            assert_eq!(rec.response_text, "Ada and Bel.");
+            assert_eq!(rec.status, "ok");
+            assert_eq!(rec.slot.as_deref(), Some("fast"));
+            assert_eq!(rec.model, "anthropic/claude-haiku-4.5");
+            assert_eq!(rec.provider.as_deref(), Some("anthropic"));
+            assert_eq!(rec.in_tokens, Some(2100));
+            assert_eq!(rec.out_tokens, Some(80));
+            assert_eq!(rec.cached, Some(1890));
+            assert!(rec.est_in_tokens.is_some());
+            assert!(rec.total_ms.is_some());
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn a_mirrored_row_carries_the_scoped_turn() {
+            let _guard = singleton_guard();
+            let sink = install_sink();
+            let server = MockServer::start().await;
+            mount_sse(&server, sse_content(&["hi"])).await;
+            let c = client_named(&server.uri(), "mirror/scoped-turn");
+            with_call_context(CallContext::new(Some(42), "turn-9", 77), async {
+                let mut s = c.stream_completion(vec![user("x")], None).await.unwrap();
+                while s.next().await.is_some() {}
+            })
+            .await;
+            let records = taken(&sink, "mirror/scoped-turn");
+            reset_llm_call_sink();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].turn_id, Some(42));
+            assert_eq!(records[0].turn_scope.as_deref(), Some("turn-9"));
+            assert_eq!(records[0].channel_id, Some(77));
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn an_abandoned_stream_still_mirrors_with_its_status() {
+            let _guard = singleton_guard();
+            let sink = install_sink();
+            let server = MockServer::start().await;
+            mount_sse(&server, sse_content(&["a", "b", "c"])).await;
+            let c = client_named(&server.uri(), "mirror/abandoned");
+            {
+                let mut s = c.stream_completion(vec![user("x")], None).await.unwrap();
+                let _first = s.next().await;
+                s.note_abandon_status("silent");
+            }
+            let records = taken(&sink, "mirror/abandoned");
+            reset_llm_call_sink();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].status, "silent");
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn an_http_error_mirrors_an_error_row() {
+            let _guard = singleton_guard();
+            let sink = install_sink();
+            let server = MockServer::start().await;
+            mount_json(&server, 500, json!({ "error": { "message": "boom" } })).await;
+            let c = client_named(&server.uri(), "mirror/http-error");
+            assert!(c.stream_completion(vec![user("x")], None).await.is_err());
+            let records = taken(&sink, "mirror/http-error");
+            reset_llm_call_sink();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].status, "error");
+            assert!(records[0].response_text.is_empty());
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn tool_calls_and_results_land_on_the_same_row() {
+            let _guard = singleton_guard();
+            let sink = install_sink();
+            let server = MockServer::start().await;
+            mount_sse(&server, sse_content(&["thinking"])).await;
+            let c = client_named(&server.uri(), "mirror/tool-trace");
+            {
+                let mut s = c.stream_completion(vec![user("x")], None).await.unwrap();
+                while s.next().await.is_some() {}
+                // What the agentic loop folds back in once its tools have run.
+                s.note_tool_trace(
+                    r#"[{"id":"c1"}]"#.to_owned(),
+                    r#"[{"tool_call_id":"c1","content":"[]"}]"#.to_owned(),
+                );
+            }
+            let records = taken(&sink, "mirror/tool-trace");
+            reset_llm_call_sink();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].tool_calls_json.as_deref(),
+                Some(r#"[{"id":"c1"}]"#)
+            );
+            assert_eq!(
+                records[0].tool_results_json.as_deref(),
+                Some(r#"[{"tool_call_id":"c1","content":"[]"}]"#)
+            );
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn the_blocking_chat_leg_is_mirrored_too() {
+            // Background workers (summaries, dossiers, sleep) go through `chat`,
+            // which emits no `[LLM call]` line — but still mirrors.
+            let _guard = singleton_guard();
+            let sink = install_sink();
+            let server = MockServer::start().await;
+            mount_json(
+                &server,
+                200,
+                json!({
+                    "provider": "z-ai",
+                    "usage": { "prompt_tokens": 900, "completion_tokens": 20 },
+                    "choices": [{ "message": { "role": "assistant", "content": "a summary" } }]
+                }),
+            )
+            .await;
+            let c = client_named(&server.uri(), "mirror/chat-leg");
+            let reply = c
+                .chat(vec![
+                    Message::new("system", "Summarise the channel."),
+                    user("turns..."),
+                ])
+                .await
+                .unwrap();
+            let records = taken(&sink, "mirror/chat-leg");
+            reset_llm_call_sink();
+            assert_eq!(reply.content_str(), "a summary");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].system_prompt, "Summarise the channel.");
+            assert_eq!(records[0].response_text, "a summary");
+            assert_eq!(records[0].status, "ok");
+            assert_eq!(records[0].provider.as_deref(), Some("z-ai"));
+            assert_eq!(records[0].in_tokens, Some(900));
+            // A blocking POST has no first-byte event to time.
+            assert_eq!(records[0].ttfb_ms, None);
+            assert!(records[0].total_ms.is_some());
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn a_failed_chat_mirrors_an_error_row() {
+            let _guard = singleton_guard();
+            let sink = install_sink();
+            let server = MockServer::start().await;
+            mount_json(&server, 400, json!({ "error": { "message": "bad" } })).await;
+            let c = client_named(&server.uri(), "mirror/chat-error");
+            assert!(c.chat(vec![user("x")]).await.is_err());
+            let records = taken(&sink, "mirror/chat-error");
+            reset_llm_call_sink();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].status, "error");
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn no_sink_captures_nothing() {
+            let _guard = singleton_guard();
+            reset_llm_call_sink();
+            let server = MockServer::start().await;
+            mount_sse(&server, sse_content(&["hi"])).await;
+            let c = client_for(&server.uri());
+            let mut s = c.stream_completion(vec![user("x")], None).await.unwrap();
+            let mut text = String::new();
+            while let Some(item) = s.next().await {
+                text.push_str(&item.unwrap().content);
+            }
+            // The stream is unaffected; there is simply nowhere for a row to go.
+            assert_eq!(text, "hi");
+        }
+
         // Silence dead-code for the `Content` import used only to assert shapes.
         #[test]
         fn content_import_is_live() {
@@ -2794,11 +3549,12 @@ mod client {
 #[cfg(feature = "net")]
 pub use client::{
     OPENROUTER_BASE_URL, OpenRouterClient, OpenRouterClientBuilder, create_llm_clients,
+    fetch_model_catalog,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::{Content, LlmDelta, Message, sanitize_name};
+    use super::{Content, LlmClient, LlmDelta, LlmStream, Message, sanitize_name};
     use serde_json::{Value, json};
 
     // --- sanitize_name -----------------------------------------------------
@@ -2984,5 +3740,40 @@ mod tests {
     #[test]
     fn content_default_is_empty_text() {
         assert_eq!(Content::default(), Content::Text(String::new()));
+    }
+
+    // --- LlmClient::model default (#183) -----------------------------------
+
+    struct BareStub;
+
+    #[async_trait::async_trait]
+    impl LlmClient for BareStub {
+        async fn chat(&self, _messages: Vec<Message>) -> anyhow::Result<Message> {
+            Ok(Message::new("assistant", "ok"))
+        }
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<Value>>,
+        ) -> anyhow::Result<LlmStream> {
+            Ok(LlmStream::new(futures::stream::empty()))
+        }
+        fn slot(&self) -> Option<&str> {
+            None
+        }
+        fn multimodal(&self) -> bool {
+            false
+        }
+        fn tool_calling_enabled(&self) -> bool {
+            false
+        }
+    }
+
+    // A stub that never names a model keeps the raw estimator: `""` misses the
+    // calibration store.
+    #[test]
+    fn model_defaults_to_empty_string() {
+        let c: &dyn LlmClient = &BareStub;
+        assert_eq!(c.model(), "");
     }
 }

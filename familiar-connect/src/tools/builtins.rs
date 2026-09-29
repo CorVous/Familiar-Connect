@@ -1,22 +1,22 @@
-//! Registry-builder helpers (subsystem 08; Python `tools/builtins.py`).
+//! Registry-builder helpers (subsystem 08).
 //!
-//! Extracted so tests can compose registries without `run.py`. The focus
+//! Extracted so tests can compose registries without the full wiring. The focus
 //! manager and image-tools/describe knobs are *gates*: the tools reach the live
 //! focus manager / store / scheduler through the per-call [`ToolContext`], so the
-//! builder only needs to know *whether* to include each tool (the Python passes
-//! the `FocusManager` object, but uses it solely as a presence gate — a `bool`
-//! is the faithful Rust shape). The activity engine is passed by value because
+//! builder only needs to know *whether* to include each tool, so a `bool`
+//! gate is enough. The activity engine is passed by value because
 //! its catalog shapes the `start_activity` schema at build time.
 
 use std::sync::Arc;
 
 use crate::tools::alarm::{build_alarm_tool, build_cancel_alarm_tool};
+use crate::tools::image_policy::ImageUrlPolicy;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::scheduler::AlarmScheduler;
 use crate::tools::start_activity::StartActivityEngine;
 
-// Re-exported so the shipped tool builders are reachable at the Python
-// `tools.builtins` import path used by tests / wiring.
+// Re-exported so the shipped tool builders are reachable from this module
+// path, as tests / wiring expect.
 pub use crate::tools::read_channel::build_read_channel_tool;
 pub use crate::tools::shift_focus::build_shift_focus_tool;
 pub use crate::tools::silent::build_silent_tool;
@@ -46,15 +46,18 @@ pub fn build_voice_registry(scheduler: &AlarmScheduler, with_focus_manager: bool
 /// Text-tier registry.
 ///
 /// `set_alarm` + `cancel_alarm` + `silent`; plus `view_image` (when
-/// `image_tools`), `shift_focus` + `read_channel` (when a focus manager is
-/// present), and `start_activity` (when an activity engine is provided).
+/// `image_tools`, gated by `image_url_policy`), `shift_focus` + `read_channel`
+/// (when a focus manager is present), and `start_activity` (when an activity
+/// engine is provided, with its config-sourced description).
 #[must_use]
 pub fn build_text_registry(
     scheduler: &AlarmScheduler,
     image_tools: bool,
     describe_constraints: &str,
+    image_url_policy: &ImageUrlPolicy,
     with_focus_manager: bool,
     activity_engine: Option<Arc<dyn StartActivityEngine>>,
+    start_activity_description: &str,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry
@@ -69,10 +72,13 @@ pub fn build_text_registry(
         registry
             .register(crate::tools::image::build_view_image_tool(
                 describe_constraints,
+                Arc::new(crate::tools::image_policy::UrlGuard::production(
+                    image_url_policy.clone(),
+                )),
             ))
             .expect("unique tool");
         #[cfg(not(feature = "images"))]
-        let _ = describe_constraints;
+        let _ = (describe_constraints, image_url_policy);
     }
     if with_focus_manager {
         registry
@@ -85,7 +91,10 @@ pub fn build_text_registry(
     // text-only by design — absence while voice-connected is refused by the engine
     if let Some(engine) = activity_engine {
         registry
-            .register(build_start_activity_tool(engine))
+            .register(build_start_activity_tool(
+                engine,
+                start_activity_description,
+            ))
             .expect("unique tool");
     }
     registry
@@ -128,6 +137,10 @@ mod tests {
         AlarmScheduler::new(store, bus, "fam")
     }
 
+    fn policy() -> ImageUrlPolicy {
+        ImageUrlPolicy::default()
+    }
+
     fn names(reg: &ToolRegistry) -> BTreeSet<String> {
         reg.tools().map(|t| t.name.clone()).collect()
     }
@@ -140,7 +153,16 @@ mod tests {
     #[test]
     fn text_registry_includes_silent() {
         assert!(
-            names(&build_text_registry(&scheduler(), false, "", false, None)).contains("silent")
+            names(&build_text_registry(
+                &scheduler(),
+                false,
+                "",
+                &policy(),
+                false,
+                None,
+                ""
+            ))
+            .contains("silent")
         );
     }
 
@@ -152,10 +174,26 @@ mod tests {
 
     #[test]
     fn text_registry_shift_focus_and_read_channel_gated_on_fm() {
-        let with = names(&build_text_registry(&scheduler(), false, "", true, None));
+        let with = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            &policy(),
+            true,
+            None,
+            "",
+        ));
         assert!(with.contains("shift_focus"));
         assert!(with.contains("read_channel"));
-        let without = names(&build_text_registry(&scheduler(), false, "", false, None));
+        let without = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            &policy(),
+            false,
+            None,
+            "",
+        ));
         assert!(!without.contains("shift_focus"));
     }
 
@@ -173,12 +211,73 @@ mod tests {
             &scheduler(),
             false,
             "",
+            &policy(),
             false,
             Some(Arc::new(FakeEngine)),
+            "",
         ));
         assert!(with.contains("start_activity"));
-        let without = names(&build_text_registry(&scheduler(), false, "", false, None));
+        let without = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            &policy(),
+            false,
+            None,
+            "",
+        ));
         assert!(!without.contains("start_activity"));
+    }
+
+    /// #151: the roleplay policy is config text threaded through the builder,
+    /// not a constant in `start_activity.rs`.
+    #[test]
+    fn start_activity_description_threads_from_the_builder() {
+        let reg = build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            &policy(),
+            false,
+            Some(Arc::new(FakeEngine)),
+            "POLICY_MARKER",
+        );
+        let tool = reg
+            .tools()
+            .find(|t| t.name == "start_activity")
+            .expect("start_activity registered");
+        assert_eq!(tool.description, "POLICY_MARKER");
+    }
+
+    /// Every shipped tool carries the shared `silent` flag, defaulting true —
+    /// the whole registry, so a new tool cannot ship without it.
+    #[test]
+    fn every_tool_carries_the_silent_flag() {
+        let registries = [
+            build_voice_registry(&scheduler(), true),
+            build_text_registry(
+                &scheduler(),
+                true,
+                "be brief",
+                &policy(),
+                true,
+                Some(Arc::new(FakeEngine)),
+                "go outside",
+            ),
+        ];
+        for reg in &registries {
+            for tool in reg.tools() {
+                let flag = &tool.parameters["properties"]["silent"];
+                assert_eq!(flag["type"], "boolean", "{}", tool.name);
+                assert_eq!(flag["default"], json!(true), "{}", tool.name);
+                let required = tool.parameters["required"].as_array();
+                assert!(
+                    !required.is_some_and(|r| r.iter().any(|v| v == "silent")),
+                    "{} marks silent required",
+                    tool.name
+                );
+            }
+        }
     }
 
     #[cfg(feature = "images")]
@@ -188,11 +287,21 @@ mod tests {
             &scheduler(),
             true,
             "be brief",
+            &policy(),
             false,
             None,
+            "",
         ));
         assert!(with.contains("view_image"));
-        let without = names(&build_text_registry(&scheduler(), false, "", false, None));
+        let without = names(&build_text_registry(
+            &scheduler(),
+            false,
+            "",
+            &policy(),
+            false,
+            None,
+            "",
+        ));
         assert!(!without.contains("view_image"));
     }
 }

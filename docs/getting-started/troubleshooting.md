@@ -13,16 +13,63 @@ Common startup errors and what they mean:
   OpenRouter key.
 - **`Opus library not found — voice playback will not work`** — voice
   commands still run, but no audio; install libopus.
+- **`[tts].provider 'gemini' is no longer supported`** — the `gemini`
+  stub never had a backend and was removed. Set
+  `[tts].provider = "cartesia"` and `CARTESIA_API_KEY` (or `"azure"`).
+- **`TTS provider unavailable: TTS provider 'azure' requires the 'azure-tts' feature…`**
+  — exit 1. Rebuild with `azure-tts` in `--features`
+  (e.g. `--features discord,discord-voice,azure-tts`).
+- **`TTS provider unavailable: AZURE_SPEECH_KEY environment variable is required for Azure TTS`**
+  (or `AZURE_SPEECH_REGION`) — exit 1. Set both in `.env`. A key with
+  stray whitespace or a region that isn't a bare name like `eastus` is
+  refused the same way, naming the variable.
+- **`[llm.<slot>].tool_calling = false is unsupported …`** — silence and
+  `shift_focus` are both tool calls, so that surface could neither
+  decline to reply nor move. Remove the key (it defaults to `true`);
+  config loading refuses the value outright, and the same text appears
+  as a boot `ERROR` for a config built in process.
+- **`[Config] slot=… model=… capability=… fix=…`** — the detached
+  startup audit compared the slot's declared capability flags against
+  the model's OpenRouter metadata. `ERROR` means the model does not
+  support what the config declares — for `tool_calling` the only fix is
+  a different model, since it cannot be turned off; `INFO` is the
+  advisory inverse. See
+  [Startup model diagnostics](../architecture/configuration-model.md#startup-model-diagnostics).
 
 ## Runtime symptoms
 
 - **Bot joined voice but no audio plays** — confirm libopus loaded on
   startup (look for the `Loaded Opus from:` debug line). Without it
   `voice_client.play(...)` is silent. Also confirm a TTS provider in
-  `[tts].provider` and the matching env var (`AZURE_SPEECH_KEY`,
-  `CARTESIA_API_KEY`, or `GOOGLE_API_KEY` / `GEMINI_API_KEY`) is set;
+  `[tts].provider` and the matching env var (`CARTESIA_API_KEY`, or the
+  `AZURE_SPEECH_*` pair) is set;
   with no client the player falls back to `LoggingTTSPlayer`, which
   only logs.
+- **Voice transcripts come out anonymous** — every frame is unattributed
+  when the SSRC → user map never fills. Look for the periodic
+  `[🎙️  Voice] receive ticks=… speaking_frames=… unmapped_frames=…`
+  line: `unmapped_frames` equal to `speaking_frames` means no op-5
+  `Speaking` event was ever seen. See
+  [Voice pipeline](../architecture/voice-pipeline.md#songbird-join-order-and-ssrc-attribution).
+- **Voice turns are attributed to a bare user id, not a name** — the speaker
+  is missing from the voice-member roster, so only the id survives. The roster
+  is snapshotted from the gateway cache at join and maintained from
+  voice-state updates; an occupant the cache cannot resolve (no
+  `GUILD_MEMBERS` intent) stays nameless until they type or their voice state
+  changes. See
+  [Voice pipeline](../architecture/voice-pipeline.md#voice-member-roster).
+- **`[Player] synthesize_error=…Cartesia TTS error (status=400)…`** — the
+  provider rejected one chunk's transcript; the rest of the reply still
+  plays, so the symptom is a missing sentence, usually the last one.
+  Chunks with nothing to voice (whitespace, punctuation, or a lone
+  trailing emoji) are skipped before the request goes out, so a 400 that
+  survives that gate points at the request itself: check
+  `[tts].cartesia_voice_id` and `[tts].cartesia_model` against the voices
+  and models the account actually has. See
+  [Voice pipeline](../architecture/voice-pipeline.md#sentence-streaming).
+- **`RTCP decryption failed: Crypto(Error)` in the log** — songbird's UDP
+  receive task, benign and non-fatal by design. It is filtered out by
+  default (`songbird::driver::tasks::udp_rx=error`); `-vv` restores it.
 - **`(playback only — no transcriber)` after `/subscribe-voice`** —
   `DEEPGRAM_API_KEY` is missing or invalid. The bot joined the channel
   and can speak, but incoming audio isn't transcribed.

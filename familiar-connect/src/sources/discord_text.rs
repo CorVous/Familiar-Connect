@@ -1,5 +1,4 @@
-//! Discord text message → bus event (subsystem 10; Python
-//! `sources/discord_text.py`).
+//! Discord text message → bus event (subsystem 10).
 //!
 //! Not a pull-loop source; the gateway owns the event loop. The bot's
 //! `on_message` hands off to [`DiscordTextSource::publish_text`], which builds the
@@ -20,7 +19,7 @@ use crate::identity::Author;
 use crate::processors::DiscordTextPayload;
 
 /// Parameters for [`DiscordTextSource::publish_text`] — the exact `discord.text`
-/// payload fields (spec 10 § Data formats).
+/// payload fields.
 #[derive(Clone, Debug)]
 pub struct PublishText {
     /// Discord channel snowflake.
@@ -47,8 +46,8 @@ pub struct PublishText {
 }
 
 impl PublishText {
-    /// A minimal payload carrying only the required fields (optionals default to
-    /// absent, matching the Python keyword defaults).
+    /// A minimal payload carrying only the required fields (optionals default
+    /// to absent).
     #[must_use]
     pub fn new(
         channel_id: i64,
@@ -95,7 +94,7 @@ impl DiscordTextSource {
     /// Construct + publish a text event; return the envelope.
     ///
     /// `event_id = turn_id = "discord-text-" + 12 hex chars`; the payload keys and
-    /// optional-field defaults follow spec 10 § Data formats.
+    /// optional-field defaults are pinned by tests.
     pub async fn publish_text(&self, params: PublishText) -> Event {
         let seq = {
             let mut guard = self
@@ -131,6 +130,7 @@ impl DiscordTextSource {
                 pings_bot: params.pings_bot,
                 author_is_bot: params.author_is_bot,
                 wake: false,
+                alarm: false,
             }),
         };
         self.bus.publish(event.clone()).await;
@@ -140,8 +140,8 @@ impl DiscordTextSource {
 
 /// The narrow publish seam the Discord shell (`on_message`) points at.
 ///
-/// Mirrors Python's `ingest_event` → `source.publish_text`. A scripted double
-/// satisfies it in the bot tests; production wires [`DiscordTextSource`].
+/// A scripted double satisfies it in the bot tests; production wires
+/// [`DiscordTextSource`].
 #[async_trait]
 pub trait TextPublisher: Send + Sync {
     /// Publish a text event onto the bus.

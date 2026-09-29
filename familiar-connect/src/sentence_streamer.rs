@@ -1,5 +1,4 @@
-//! Sentence-boundary aggregator for streamed LLM output (subsystem 09; Python
-//! `sentence_streamer.py`).
+//! Sentence-boundary aggregator for streamed LLM output (subsystem 09).
 //!
 //! Sits between the LLM content stream and the TTS player. Buffers deltas and
 //! emits whole sentences as soon as a terminator (`.` / `!` / `?`) is followed
@@ -25,18 +24,18 @@ fn is_terminator(ch: char) -> bool {
     TERMINATORS.contains(&ch)
 }
 
-/// Python `str.isspace()` classification for a single Unicode scalar.
+/// Whitespace classification for a single Unicode scalar.
 ///
 /// Rust's [`char::is_whitespace`] tracks the Unicode `White_Space` property,
-/// which — unlike CPython's `str.isspace()` — excludes the four ASCII
-/// information separators U+001C–U+001F (FS/GS/RS/US). Python classifies those
+/// which excludes the four ASCII information separators U+001C–U+001F
+/// (FS/GS/RS/US). This helper counts those
 /// as whitespace (their bidirectional class is `B`/`S`), so a terminator run
-/// followed by one of them *is* a sentence boundary there and the separator is
+/// followed by one of them *is* a sentence boundary and the separator is
 /// consumed with the rest of the trailing whitespace. Spec 09 invariant 67
 /// pins the boundary contract to `isspace()`, so match it exactly rather than
 /// leaning on `char::is_whitespace` (which would withhold the sentence until a
 /// real space or flush). The two classifications agree on every other scalar.
-fn is_py_whitespace(ch: char) -> bool {
+fn is_boundary_whitespace(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
 }
 
@@ -76,7 +75,7 @@ impl SentenceStreamer {
     /// and split there, returning `(sentence_including_terminators, remainder)`.
     ///
     /// Operates over `char`s so multi-byte scalars (emoji, accents) never land
-    /// mid-codepoint — matching Python's code-point indexing.
+    /// mid-codepoint.
     fn try_split(&self) -> Option<(String, String)> {
         let chars: Vec<char> = self.buf.chars().collect();
         let n = chars.len();
@@ -95,7 +94,7 @@ impl SentenceStreamer {
                 // Punctuation at buffer end — wait for the next delta.
                 return None;
             }
-            if !is_py_whitespace(chars[end]) {
+            if !is_boundary_whitespace(chars[end]) {
                 // ".5" / "1.0" / "?<tag>" — not a boundary.
                 i = end;
                 continue;
@@ -107,7 +106,7 @@ impl SentenceStreamer {
             let head: String = chars[..end].iter().collect();
             // Consume all following whitespace so the next sentence starts clean.
             let mut rest_start = end;
-            while rest_start < n && is_py_whitespace(chars[rest_start]) {
+            while rest_start < n && is_boundary_whitespace(chars[rest_start]) {
                 rest_start += 1;
             }
             let rest: String = chars[rest_start..].iter().collect();
@@ -121,11 +120,11 @@ impl SentenceStreamer {
 /// token and decide whether it is an abbreviation or a single-letter initial.
 fn looks_like_abbreviation(chars: &[char], dot_index: usize) -> bool {
     // Collect the token immediately preceding the run, allowing inner dots so
-    // "e.g" / "i.e" round-trip. `is_alphabetic` matches Python's `str.isalpha`
-    // for every letter that can plausibly appear in chat text (categories
-    // Lu/Ll/Lt/Lm/Lo, incl. all accented forms); the two diverge only on
+    // "e.g" / "i.e" round-trip. `is_alphabetic` covers every letter that can
+    // plausibly appear in chat text (categories
+    // Lu/Ll/Lt/Lm/Lo, incl. all accented forms); it excludes only
     // exotic Nl / Other_Alphabetic scalars that never front an abbreviation or
-    // single-letter initial, so the walk-back is faithful in practice.
+    // single-letter initial, so the walk-back is correct in practice.
     let mut start = dot_index;
     while start > 0 && (chars[start - 1].is_alphabetic() || chars[start - 1] == '.') {
         start -= 1;
@@ -283,10 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn silent_sentinel_never_emits() {
+    fn unpunctuated_tag_only_emits_on_flush() {
         let mut s = SentenceStreamer::new();
-        assert!(s.feed("<silent>").is_empty());
-        assert_eq!(s.flush(), "<silent>");
+        assert!(s.feed("<tag>").is_empty());
+        assert_eq!(s.flush(), "<tag>");
     }
 
     #[test]
@@ -301,18 +300,17 @@ mod tests {
         assert_eq!(s.feed("Done.\nNext"), vec!["Done."]);
     }
 
-    // --- Python `isspace()` parity: U+001C–U+001F -------------------------
+    // --- info-separator whitespace: U+001C–U+001F ------------------------
     //
-    // CPython `str.isspace()` classifies the four ASCII information separators
-    // FS/GS/RS/US (U+001C–U+001F) as whitespace, but Rust `char::is_whitespace`
-    // (Unicode White_Space) does not. Spec 09 invariant 67 pins the boundary
-    // contract to `isspace()`. These mirror the Python reference exactly:
+    // The four ASCII information separators FS/GS/RS/US (U+001C–U+001F) count
+    // as whitespace here, but Rust `char::is_whitespace` (Unicode White_Space)
+    // does not, so `is_boundary_whitespace` pins the boundary contract:
     //   feed("Done.\x1cNext")           -> ["Done."]
     //   feed("First.\x1c\x1dSecond")    -> ["First."]   (separator run consumed)
 
     #[test]
     fn info_separator_acts_as_terminator_whitespace() {
-        // U+001C (FILE SEPARATOR) follows the terminator: Python emits here.
+        // U+001C (FILE SEPARATOR) follows the terminator: emits here.
         let mut s = SentenceStreamer::new();
         assert_eq!(s.feed("Done.\u{1c}Next"), vec!["Done."]);
         // The separator is consumed like any trailing whitespace.

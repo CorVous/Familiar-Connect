@@ -1,10 +1,8 @@
-//! PCM conversion + resampler + streaming source (subsystem 09; Python
-//! `voice/audio.py`).
+//! PCM conversion + resampler + streaming source (subsystem 09).
 //!
 //! Pure audio primitives for the Discord voice path. The averaging here uses
-//! floor division (`div_euclid`) to match Python's `//` bit-for-bit — Rust's
-//! integer `/` truncates toward zero, which differs at negatives (DESIGN §4.3;
-//! byte-pinned by `tests/test_audio_resample.py`). All samples are little-endian
+//! floor division (`div_euclid`) — Rust's integer `/` truncates toward zero,
+//! which differs at negatives. All samples are little-endian
 //! `i16` (`<i2`).
 
 use std::collections::VecDeque;
@@ -299,7 +297,7 @@ mod tests {
         bytes.chunks_exact(2).map(unpack1).collect()
     }
 
-    // --- Resampler48to16 (test_audio_resample.py) --------------------------
+    // --- Resampler48to16 --------------------------
 
     #[test]
     fn resample_empty_input_returns_empty() {
@@ -369,7 +367,7 @@ mod tests {
 
     #[test]
     fn negative_values_average_correctly() {
-        // Floor division: (-100 + -200 + -300) // 3 == -200 (matches Python `//`).
+        // Floor division: (-100 + -200 + -300) // 3 == -200.
         let mut r = Resampler48to16::new();
         let out = r.feed(&pcm(&[-100, -200, -300])).unwrap();
         assert_eq!(unpack1(&out), -200);
@@ -377,15 +375,15 @@ mod tests {
 
     #[test]
     fn floor_division_at_negative_boundary() {
-        // Pin the div_euclid vs truncation contrast: (-3 + 0 + 0) // 3 == -1 in
-        // Python; -3/3 == -1 in Rust too, but (-1 + 0 + 0) // 3 == -1 (floor)
+        // Pin the div_euclid vs truncation contrast: (-3 + 0 + 0) / 3 == -1, and
+        // (-1 + 0 + 0).div_euclid(3) == -1 (floor)
         // whereas truncation gives 0. Use a triplet summing to -1.
         let mut r = Resampler48to16::new();
         let out = r.feed(&pcm(&[-1, 0, 0])).unwrap();
         assert_eq!(unpack1(&out), -1);
     }
 
-    // --- mono_to_stereo (test_voice_audio.py) ------------------------------
+    // --- mono_to_stereo ------------------------------
 
     #[test]
     fn mono_to_stereo_doubles_length() {

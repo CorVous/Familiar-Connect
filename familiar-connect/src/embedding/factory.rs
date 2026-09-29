@@ -1,7 +1,6 @@
-//! Embedder factory registry + `known_embedders` (subsystem 04; Python
-//! `embedding/factory.py`).
+//! Embedder factory registry + `known_embedders` (subsystem 04).
 //!
-//! DESIGN D14 / §4.8: explicit [`EmbedderRegistry::with_builtins`] builder plus
+//! An explicit [`EmbedderRegistry::with_builtins`] builder plus
 //! [`EmbedderRegistry::register`], **not** an import-time global dict. Names are
 //! kept sorted (a `BTreeMap`) and the error strings are byte-exact so config
 //! validation (02, which consults [`known_embedders`]) and the tests match on
@@ -12,8 +11,8 @@
 //! * `hash` → [`HashEmbedder`](crate::embedding::hash::HashEmbedder).
 //! * `fastembed` → fails with the `local-embed` install hint. The real ONNX
 //!   backend is Layer 2 (feature `local-embed`, `embedding::fastembed`); the
-//!   wiring injects it via `register("fastembed", …)` when the extra is present,
-//!   exactly the Python "re-registration overwrites" seam. Absent the extra a
+//!   wiring injects it via `register("fastembed", …)` when the feature is present,
+//!   exactly the "re-registration overwrites" seam. Absent the feature a
 //!   deploy that selects `fastembed` refuses to start rather than crashing
 //!   mid-turn.
 
@@ -26,11 +25,10 @@ use crate::embedding::hash::HashEmbedder;
 use crate::embedding::protocol::Embedder;
 
 /// A backend factory: turns config into an optional shared embedder, or an
-/// error (unavailable extra / bad dimensionality).
+/// error (unavailable feature / bad dimensionality).
 ///
 /// `Ok(None)` is the `off` outcome — the seam is disabled. The `Arc` lets one
-/// instance be shared across assemblers and the projector context (the Python
-/// wiring shares a single embedder from startup).
+/// instance be shared across assemblers and the projector context.
 pub type EmbedderFactory = Arc<
     dyn Fn(&EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> + Send + Sync,
 >;
@@ -69,8 +67,7 @@ impl EmbedderRegistry {
         registry
     }
 
-    /// Register `factory` under `name`; re-registration overwrites silently
-    /// (matching the Python module-global registry).
+    /// Register `factory` under `name`; re-registration overwrites silently.
     pub fn register(&mut self, name: impl Into<String>, factory: EmbedderFactory) {
         self.factories.insert(name.into(), factory);
     }
@@ -134,20 +131,23 @@ fn hash_factory(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>>, E
 
 /// `fastembed` built-in: fail-fast with the `local-embed` install hint.
 ///
-/// Mirrors the Python import-probe: without the extra, refuse to start. The real
-/// backend (Layer 2, feature `local-embed`) is injected by the wiring via
-/// [`EmbedderRegistry::register`].
+/// The real backend (Layer 2, feature `local-embed`) is injected by the wiring
+/// via [`EmbedderRegistry::register`].
 fn fastembed_factory(
     _config: &EmbeddingConfig,
 ) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
     Err(EmbeddingError::FastembedMissing)
 }
 
-/// `fastembed` backend when the `local-embed` extra is compiled: constructs the
+/// `fastembed` backend when the `local-embed` feature is compiled: constructs the
 /// real ONNX [`FastEmbedEmbedder`], overriding [`fastembed_factory`]'s stub via
 /// re-registration in [`EmbedderRegistry::with_builtins`]. An empty configured
 /// model falls back to the default (BGE-small).
 #[cfg(feature = "local-embed")]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature parity with the `fastembed_factory` stub it replaces — both register as the same fn pointer"
+)]
 fn real_fastembed_factory(
     config: &EmbeddingConfig,
 ) -> Result<Option<Arc<dyn Embedder>>, EmbeddingError> {
@@ -167,17 +167,12 @@ fn real_fastembed_factory(
 /// Built-in registered names, sorted (convenience over a fresh
 /// [`EmbedderRegistry::with_builtins`]).
 ///
-/// Mirrors the Python module-level `known_embedders()`; config parsing (02)
-/// injects this set.
 #[must_use]
 pub fn known_embedders() -> BTreeSet<String> {
     EmbedderRegistry::with_builtins().known_embedders()
 }
 
 /// Instantiate the embedder selected by `config.backend` from the built-ins.
-///
-/// Mirrors the Python module-level `create_embedder()`; the wiring uses a shared
-/// [`EmbedderRegistry`] when third-party backends need registering.
 ///
 /// # Errors
 /// See [`EmbedderRegistry::create`].
@@ -191,6 +186,8 @@ pub fn create_embedder(
 mod tests {
     use super::{EmbedderRegistry, create_embedder, known_embedders};
     use crate::config::EmbeddingConfig;
+    // Only the no-feature load-failure test names the error type.
+    #[cfg(not(feature = "local-embed"))]
     use crate::embedding::EmbeddingError;
 
     fn config(backend: &str, dim: i64) -> EmbeddingConfig {
@@ -235,8 +232,8 @@ mod tests {
 
     #[cfg(feature = "local-embed")]
     #[test]
-    fn fastembed_with_extra_resolves_to_the_real_backend() {
-        // With the extra compiled, `with_builtins` overrides the stub with the
+    fn fastembed_with_feature_resolves_to_the_real_backend() {
+        // With the feature compiled, `with_builtins` overrides the stub with the
         // real ONNX backend, so `fastembed` resolves to a live embedder (lazy
         // model load — construction here does not download).
         let out = create_embedder(&config("fastembed", 384))
@@ -247,10 +244,10 @@ mod tests {
 
     #[cfg(not(feature = "local-embed"))]
     #[test]
-    fn fastembed_without_extra_fails_at_load() {
+    fn fastembed_without_feature_fails_at_load() {
         let err = create_embedder(&config("fastembed", 256))
             .err()
-            .expect("fastembed without the extra errors");
+            .expect("fastembed without the feature errors");
         assert!(matches!(err, EmbeddingError::FastembedMissing));
         assert!(err.to_string().contains("local-embed"));
     }

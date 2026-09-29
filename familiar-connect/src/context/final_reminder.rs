@@ -1,36 +1,29 @@
-//! Closing "final reminder" block appended to every system prompt (subsystem 05;
-//! Python `context/final_reminder.py`).
+//! Closing "final reminder" block appended to every system prompt (subsystem
+//! 05).
 //!
 //! Restates the current time (so the model doesn't drift on long-lived caches)
-//! and enumerates text-channel sentinels, the per-mode operating directive, an
+//! and enumerates text-channel input markers, the per-mode operating directive, an
 //! optional voice tool nudge, a focus + unread digest block, and any
 //! post-history etiquette. Responders render it twice per turn (head copy with
 //! `include_time=false`; tail copy with the clock, mode instruction, post-history
 //! and guild name).
 //!
-//! The block grammar is a byte-exact prompt-format contract (spec 05 behavior 44).
+//! Tool-referencing prose is gated on `tools_enabled`: a slot with tool calling
+//! off is never told to call `shift_focus` (#221).
+//!
+//! Every configurable string (mode directives, voice tool nudge, unread
+//! `shift_focus` clause, post-history block) arrives from `[prompt]` — this
+//! module keeps no in-code copy, so the reminder and `OperatingModeLayer`
+//! cannot drift (#151).
+//!
+//! The block grammar is a byte-exact prompt-format contract.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
-use crate::focus::PRIVATE_MESSAGE_GUILD_NAME;
-
-/// Per-mode operating directive. Intentionally duplicates the strings
-/// `OperatingModeLayer` is configured with (spec 05 behavior 8) — keep in sync.
-const VOICE_INSTRUCTION: &str =
-    "You are speaking aloud. Keep replies short (one or two sentences). Avoid markdown.";
-const TEXT_INSTRUCTION: &str =
-    "You are chatting in a text channel. Markdown and multi-line replies are fine.";
-
-fn mode_instruction(viewer_mode: &str) -> Option<&'static str> {
-    match viewer_mode {
-        "voice" => Some(VOICE_INSTRUCTION),
-        "text" => Some(TEXT_INSTRUCTION),
-        _ => None,
-    }
-}
+use crate::focus::{PRIVATE_MESSAGE_GUILD_NAME, UNNAMED_CHANNEL_PREFIX};
 
 /// Parenthetical count/ping suffix for one channel in the unread digest.
 fn unread_suffix(unread: i64, pings: i64) -> String {
@@ -50,32 +43,46 @@ fn unread_suffix(unread: i64, pings: i64) -> String {
     }
 }
 
-/// Render `now` as `YYYY-MM-DD H:MMpm TZ` in `display_tz` (no leading zero on the
-/// hour; `%Z` timezone abbreviation).
+/// Render `now` as `YYYY-MM-DD H:MMpm TZ (±HH:MM)` in `display_tz` (no leading
+/// zero on the hour; `%Z` abbreviation, then the numeric offset).
+///
+/// This line is the system's only clock anchor: every other model-facing time
+/// (recent-history `HH:MM` prefixes, schedule windows) is local to the same
+/// zone and carries no offset of its own. The parenthetical is what makes an
+/// RFC-3339 `when` for `set_alarm` constructible — an abbreviation alone leaves
+/// the model guessing "PDT → -07:00".
 fn fmt_when(now: DateTime<Utc>, display_tz: &str) -> String {
     let tz: Tz = display_tz.parse().unwrap_or(Tz::UTC);
     let aware = now.with_timezone(&tz);
     let clock = aware.format("%I:%M%p").to_string();
     let clock = clock.trim_start_matches('0');
     format!(
-        "{} {clock} {}",
+        "{} {clock} {} ({})",
         aware.format("%Y-%m-%d"),
-        aware.format("%Z")
+        aware.format("%Z"),
+        aware.format("%:z")
     )
 }
 
-fn channel_label(names: &HashMap<i64, String>, cid: i64) -> String {
-    names
-        .get(&cid)
-        .map_or_else(|| format!("#{cid}"), |name| format!("#{name}"))
+/// Focus-line label. An unnamed channel says so — `#<snowflake>` would tell the
+/// model the channel is *named* after its id (#222) — and keeps the id, which
+/// `shift_focus` needs.
+fn channel_label<S: std::hash::BuildHasher>(names: &HashMap<i64, String, S>, cid: i64) -> String {
+    names.get(&cid).map_or_else(
+        || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
+        |name| format!("#{name}"),
+    )
 }
 
-/// Unread-list item label: named channels **must** carry the numeric id so the
+/// Unread-list item label: every entry **must** carry the numeric id so the
 /// model can pass a valid `channel_id` to `shift_focus`.
 ///
 /// A channel whose `guilds` entry is [`PRIVATE_MESSAGE_GUILD_NAME`] is a DM and
-/// renders as `DM from <name> (id <cid>)` (or `DM (id <cid>)` unnamed); the id
-/// is preserved either way because `shift_focus` still needs it.
+/// renders as `DM from <name> (id <cid>)` (or `DM (id <cid>)` unnamed). A guild
+/// channel the name cache missed says so, as on the focus line — the digest ids
+/// come from staged turns, the names from the gateway, so an id with no name is
+/// routine and `#<snowflake>` would claim the channel is *named* after its id
+/// (#222).
 fn channel_label_with_id(
     names: &HashMap<i64, String>,
     guilds: &HashMap<i64, String>,
@@ -88,22 +95,65 @@ fn channel_label_with_id(
             |name| format!("DM from {name} (id {cid})"),
         );
     }
-    name.map_or_else(|| format!("#{cid}"), |name| format!("#{name} (id {cid})"))
+    name.map_or_else(
+        || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
+        |name| format!("#{name} (id {cid})"),
+    )
+}
+
+/// The wake turn's user-role notice — the wake event itself, stated as an
+/// observation.
+///
+/// A wake stages no user message, so replayed history ends on the familiar's
+/// own reply. A trailing assistant turn alongside a `tools` array reads as
+/// prefix-completion mode on some providers (DeepSeek 400s
+/// "Function call should not be used with prefix"), so the wake turn names what
+/// she noticed and the array ends on a user turn again.
+///
+/// Channel labels carry no id: the digest in the reminder just above already
+/// lists them with ids for `shift_focus`.
+#[must_use]
+pub fn wake_notice<S: std::hash::BuildHasher>(
+    digest: &[(i64, (i64, i64))],
+    channel_names: &HashMap<i64, String, S>,
+) -> String {
+    let active: Vec<(i64, i64)> = digest
+        .iter()
+        .filter(|(_, (unread, _))| *unread > 0)
+        .map(|(cid, (unread, _))| (*cid, *unread))
+        .collect();
+    if active.is_empty() {
+        return "(You notice unread messages waiting elsewhere.)".to_owned();
+    }
+    let total: i64 = active.iter().map(|(_, unread)| *unread).sum();
+    let noun = if total == 1 {
+        "a new message"
+    } else {
+        "new messages"
+    };
+    let list = active
+        .iter()
+        .map(|(cid, _)| channel_label(channel_names, *cid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("(You notice {noun} in {list}.)")
 }
 
 /// The closing "final reminder" block builder.
 ///
 /// Construct with [`FinalReminder::new`], set the desired options, then
-/// [`render`](FinalReminder::render). Mirrors Python `build_final_reminder(*,
-/// viewer_mode, ...)` — the keyword-only args become builder setters. `now`
-/// defaults to the wall clock when `include_time` and unset.
+/// [`render`](FinalReminder::render). `now` defaults to the wall clock when
+/// `include_time` and unset.
 pub struct FinalReminder {
     viewer_mode: String,
     now: Option<DateTime<Utc>>,
     display_tz: String,
     include_time: bool,
     include_mode_instruction: bool,
+    mode_instructions: HashMap<String, String>,
     tools_enabled: bool,
+    voice_tool_ack: String,
+    shift_focus_coaching: String,
     post_history_instructions: Option<String>,
     focus_channel_id: Option<i64>,
     unread_digest: Vec<(i64, (i64, i64))>,
@@ -123,7 +173,10 @@ impl FinalReminder {
             display_tz: "UTC".to_owned(),
             include_time: true,
             include_mode_instruction: false,
+            mode_instructions: HashMap::new(),
             tools_enabled: false,
+            voice_tool_ack: String::new(),
+            shift_focus_coaching: String::new(),
             post_history_instructions: None,
             focus_channel_id: None,
             unread_digest: Vec::new(),
@@ -157,7 +210,32 @@ impl FinalReminder {
         self.include_mode_instruction = include;
         self
     }
-    /// Toggle the voice tool nudge (voice mode only).
+    /// Set the per-mode operating directives, keyed by viewer mode. Same map
+    /// `OperatingModeLayer` is built from (`[prompt].operating_mode_*`) — the
+    /// single source for both copies.
+    #[must_use]
+    pub fn mode_instructions(mut self, modes: HashMap<String, String>) -> Self {
+        self.mode_instructions = modes;
+        self
+    }
+    /// Set the voice tool-preamble nudge (`[prompt].voice_tool_ack`); blank
+    /// omits it.
+    #[must_use]
+    pub fn voice_tool_ack(mut self, text: impl Into<String>) -> Self {
+        self.voice_tool_ack = text.into();
+        self
+    }
+    /// Set the unread-digest `shift_focus` clause
+    /// (`[prompt].shift_focus_coaching`); blank leaves the digest a plain
+    /// statement of fact. One line — it is spliced into the digest sentence
+    /// after an em dash.
+    #[must_use]
+    pub fn shift_focus_coaching(mut self, text: impl Into<String>) -> Self {
+        self.shift_focus_coaching = text.into();
+        self
+    }
+    /// Whether the slot can actually call tools. Gates the voice tool nudge
+    /// (voice mode) and the `shift_focus` clause on the unread digest (#221).
     #[must_use]
     pub const fn tools_enabled(mut self, enabled: bool) -> Self {
         self.tools_enabled = enabled;
@@ -222,19 +300,24 @@ impl FinalReminder {
         }
 
         if self.include_mode_instruction {
-            if let Some(instruction) = mode_instruction(&self.viewer_mode) {
+            // Unknown mode → no directive (map miss), as does a blank one.
+            if let Some(instruction) = self
+                .mode_instructions
+                .get(&self.viewer_mode)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 lines.push(String::new());
                 lines.push(instruction.to_owned());
             }
         }
 
-        if self.tools_enabled && self.viewer_mode == "voice" {
+        if self.tools_enabled
+            && self.viewer_mode == "voice"
+            && !self.voice_tool_ack.trim().is_empty()
+        {
             lines.push(String::new());
-            lines.push(
-                "Always speak at least a brief acknowledgement before calling a tool. \
-                 Never reply with a tool call alone."
-                    .to_owned(),
-            );
+            lines.push(self.voice_tool_ack.trim().to_owned());
         }
 
         if self.focus_channel_id.is_some() || !self.unread_digest.is_empty() {
@@ -276,10 +359,16 @@ impl FinalReminder {
                 } else {
                     "new messages"
                 };
-                format!(
-                    "There {verb} {noun} in {ch_list} \
-                     \u{2014} use shift_focus if it pulls your attention."
-                )
+                // Coach `shift_focus` only where it can actually be called —
+                // a tool-less slot told to use it just leaks the literal
+                // call syntax into the channel (#221). Blank coaching leaves
+                // the digest a plain statement of fact.
+                let coaching = self.shift_focus_coaching.trim();
+                if self.tools_enabled && !coaching.is_empty() {
+                    format!("There {verb} {noun} in {ch_list} \u{2014} {coaching}")
+                } else {
+                    format!("There {verb} {noun} in {ch_list}.")
+                }
             };
 
             let block = [focus_part, unread_part]
@@ -307,7 +396,7 @@ impl FinalReminder {
 
 #[cfg(test)]
 mod tests {
-    use super::FinalReminder;
+    use super::{FinalReminder, wake_notice};
     use crate::focus::PRIVATE_MESSAGE_GUILD_NAME;
     use chrono::{TimeZone, Utc};
     use std::collections::HashMap;
@@ -321,6 +410,76 @@ mod tests {
         pairs.iter().map(|(k, v)| (*k, (*v).to_owned())).collect()
     }
 
+    /// Stand-in for the `[prompt].operating_mode_*` pair the wiring supplies.
+    fn modes() -> HashMap<String, String> {
+        [
+            (
+                "voice".to_owned(),
+                "You are speaking aloud. Keep replies short (one or two sentences). \
+                 Avoid markdown."
+                    .to_owned(),
+            ),
+            (
+                "text".to_owned(),
+                "You are chatting in a text channel. Markdown and multi-line replies \
+                 are fine."
+                    .to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Wake notice (the wake turn's user-role message)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wake_notice_names_the_unread_channels() {
+        let out = wake_notice(
+            &[(10, (3, 0)), (20, (1, 0))],
+            &names(&[(10, "general"), (20, "art")]),
+        );
+        assert_eq!(out, "(You notice new messages in #general, #art.)");
+    }
+
+    #[test]
+    fn wake_notice_singular_for_one_message() {
+        let out = wake_notice(&[(10, (1, 0))], &names(&[(10, "general")]));
+        assert_eq!(out, "(You notice a new message in #general.)");
+    }
+
+    /// No digest (no focus manager) still yields a sensible user turn.
+    #[test]
+    fn wake_notice_without_digest_is_generic() {
+        assert_eq!(
+            wake_notice(&[], &HashMap::new()),
+            "(You notice unread messages waiting elsewhere.)"
+        );
+    }
+
+    /// Zero-unread entries are not news — same generic line.
+    #[test]
+    fn wake_notice_skips_zero_unread_channels() {
+        assert_eq!(
+            wake_notice(&[(10, (0, 0))], &names(&[(10, "general")])),
+            "(You notice unread messages waiting elsewhere.)"
+        );
+        assert_eq!(
+            wake_notice(&[(10, (0, 0)), (20, (2, 0))], &names(&[(20, "art")])),
+            "(You notice new messages in #art.)"
+        );
+    }
+
+    /// Unnamed channel says so rather than claiming a `#<snowflake>` name (#222).
+    #[test]
+    fn wake_notice_labels_unnamed_channels() {
+        assert_eq!(
+            wake_notice(&[(123, (2, 0))], &HashMap::new()),
+            "(You notice new messages in unnamed channel (id 123).)"
+        );
+    }
+
     #[test]
     fn text_mode_lists_ping_and_reply_sentinels() {
         let out = FinalReminder::new("text")
@@ -329,14 +488,6 @@ mod tests {
         assert!(out.contains("It is now: 2026-05-04 2:30PM UTC"));
         assert!(out.contains("[@DisplayName]"));
         assert!(out.contains("[\u{21a9} <message_id>]"));
-    }
-
-    #[test]
-    fn text_mode_no_silent_sentinel() {
-        let out = FinalReminder::new("text")
-            .now(at(2026, 5, 4, 14, 30))
-            .render();
-        assert!(!out.contains("`<silent>`"));
     }
 
     #[test]
@@ -356,6 +507,41 @@ mod tests {
             .display_tz("America/Los_Angeles")
             .render();
         assert!(out.contains("It is now: 2026-05-04 2:30PM PDT"), "{out}");
+    }
+
+    #[test]
+    fn display_tz_clock_carries_numeric_offset() {
+        // Abbreviation alone ("PDT") leaves the model guessing the offset it
+        // must put in `set_alarm`'s `when`.
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 21, 30))
+            .display_tz("America/Los_Angeles")
+            .render();
+        assert!(
+            out.contains("It is now: 2026-05-04 2:30PM PDT (-07:00)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn shown_offset_splices_into_an_rfc3339_the_alarm_tool_accepts() {
+        let now = at(2026, 5, 4, 21, 30);
+        let out = FinalReminder::new("voice")
+            .now(now)
+            .display_tz("America/Los_Angeles")
+            .render();
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("It is now: "))
+            .expect("clock line");
+        let offset = line
+            .rsplit_once('(')
+            .and_then(|(_, tail)| tail.strip_suffix(')'))
+            .expect("offset parenthetical");
+        // What the model does to fill `when`: shown local clock + shown offset.
+        let stamp = format!("2026-05-04T14:30:00{offset}");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&stamp).expect("rfc3339");
+        assert_eq!(parsed.with_timezone(&Utc), now);
     }
 
     #[test]
@@ -389,6 +575,7 @@ mod tests {
         let out = FinalReminder::new("voice")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .render();
         assert!(out.contains("You are speaking aloud"));
         assert!(out.contains("Avoid markdown"));
@@ -399,6 +586,7 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .render();
         assert!(out.contains("chatting in a text channel"));
         assert!(out.contains("Markdown"));
@@ -408,6 +596,7 @@ mod tests {
     fn mode_instruction_omitted_by_default() {
         let out = FinalReminder::new("voice")
             .now(at(2026, 5, 4, 14, 30))
+            .mode_instructions(modes())
             .render();
         assert!(!out.contains("You are speaking aloud"));
     }
@@ -417,9 +606,70 @@ mod tests {
         let out = FinalReminder::new("other")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .render();
         assert!(!out.contains("You are speaking aloud"));
         assert!(!out.contains("Markdown"));
+    }
+
+    #[test]
+    fn unconfigured_mode_instruction_renders_nothing() {
+        // No `[prompt].operating_mode_*` supplied — no in-code fallback copy.
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .include_mode_instruction(true)
+            .render();
+        assert_eq!(out, "---\n\nIt is now: 2026-05-04 2:30PM UTC (+00:00)");
+    }
+
+    #[test]
+    fn blank_mode_instruction_appends_nothing() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .include_mode_instruction(true)
+            .mode_instructions(std::iter::once(("voice".to_owned(), "   ".to_owned())).collect())
+            .render();
+        assert_eq!(out, "---\n\nIt is now: 2026-05-04 2:30PM UTC (+00:00)");
+    }
+
+    // --- voice tool ack -----------------------------------------------------
+
+    #[test]
+    fn voice_tool_ack_rendered_when_tools_enabled() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .voice_tool_ack("Speak first, then call.")
+            .render();
+        assert!(out.contains("Speak first, then call."));
+    }
+
+    #[test]
+    fn voice_tool_ack_omitted_without_tools() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .voice_tool_ack("Speak first, then call.")
+            .render();
+        assert!(!out.contains("Speak first"));
+    }
+
+    #[test]
+    fn voice_tool_ack_never_rendered_in_text_mode() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .voice_tool_ack("Speak first, then call.")
+            .render();
+        assert!(!out.contains("Speak first"));
+    }
+
+    #[test]
+    fn unconfigured_voice_tool_ack_renders_nothing() {
+        let out = FinalReminder::new("voice")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .render();
+        assert_eq!(out, "---\n\nIt is now: 2026-05-04 2:30PM UTC (+00:00)");
     }
 
     #[test]
@@ -437,6 +687,7 @@ mod tests {
         let out = FinalReminder::new("voice")
             .now(at(2026, 5, 4, 14, 30))
             .include_mode_instruction(true)
+            .mode_instructions(modes())
             .post_history_instructions("ETIQUETTE_MARKER")
             .render();
         assert!(out.trim_end().ends_with("ETIQUETTE_MARKER"));
@@ -489,7 +740,7 @@ mod tests {
             .render();
         let expected = "---\n\
              \n\
-             It is now: 2026-05-04 2:30PM UTC\n\
+             It is now: 2026-05-04 2:30PM UTC (+00:00)\n\
              \n\
              Special input:\n\
              \n\
@@ -609,9 +860,25 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(42)
+            .channel_names(names(&[(42, "general")]))
             .render();
-        assert!(out.contains("attention is currently on #42"));
+        assert!(out.contains("attention is currently on #general"));
         assert!(!out.contains("shift_focus"));
+    }
+
+    // An unnamed focus channel used to render as `#<snowflake>`, telling the
+    // model the channel is *named* after its id (#222).
+    #[test]
+    fn unnamed_focus_channel_announces_the_missing_name() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .focus_channel_id(1_221_605_022_102_458_421)
+            .render();
+        assert!(
+            out.contains("attention is currently on unnamed channel (id 1221605022102458421)."),
+            "{out}"
+        );
+        assert!(!out.contains("#1221605022102458421"), "{out}");
     }
 
     #[test]
@@ -628,9 +895,13 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(7)
+            .channel_names(names(&[(7, "general")]))
             .post_history_instructions("ETIQUETTE")
             .render();
-        assert!(out.find("attention is currently on #7").unwrap() < out.find("ETIQUETTE").unwrap());
+        assert!(
+            out.find("attention is currently on #general").unwrap()
+                < out.find("ETIQUETTE").unwrap()
+        );
     }
 
     // --- unread digest ------------------------------------------------------
@@ -639,12 +910,84 @@ mod tests {
     fn unread_digest_rendered() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (3, 0)), (20, (1, 0))])
             .render();
         assert!(out.contains("new message"));
-        assert!(out.contains("#10"));
-        assert!(out.contains("#20"));
+        assert!(out.contains("(id 10)"));
+        assert!(out.contains("(id 20)"));
         assert!(out.contains("shift_focus"));
+    }
+
+    #[test]
+    fn unread_digest_omits_shift_focus_coaching_without_tools() {
+        // #221: a tool-less slot cannot call `shift_focus`; coaching it only
+        // invites a leaked literal call. Configured coaching stays gated.
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .shift_focus_coaching(coaching())
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(
+            out.contains("There are new messages in unnamed channel (id 10) (3)."),
+            "{out}"
+        );
+        assert!(!out.contains("shift_focus"), "{out}");
+    }
+
+    #[test]
+    fn unread_digest_keeps_shift_focus_coaching_with_tools() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .shift_focus_coaching(coaching())
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(
+            out.contains(
+                "unnamed channel (id 10) (3) \u{2014} use shift_focus if one pulls your \
+                 attention: it moves you there quietly, or pass silent: false to arrive \
+                 and speak."
+            ),
+            "{out}"
+        );
+    }
+
+    /// Stand-in for the `[prompt].shift_focus_coaching` the wiring supplies.
+    fn coaching() -> &'static str {
+        "use shift_focus if one pulls your attention: it moves you there \
+         quietly, or pass silent: false to arrive and speak."
+    }
+
+    #[test]
+    fn blank_shift_focus_coaching_leaves_a_plain_digest() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .shift_focus_coaching("   ")
+            .unread_digest(vec![(10, (3, 0))])
+            .render();
+        assert!(
+            out.contains("There are new messages in unnamed channel (id 10) (3)."),
+            "{out}"
+        );
+        assert!(!out.contains("shift_focus"), "{out}");
+    }
+
+    // A digest entry the name cache missed used to render `#<snowflake>`,
+    // telling the model the channel is *named* after its id (#222).
+    #[test]
+    fn unnamed_unread_channel_announces_the_missing_name() {
+        let out = FinalReminder::new("text")
+            .now(at(2026, 5, 4, 14, 30))
+            .unread_digest(vec![(1_502_465_463_144_415_372, (53, 0))])
+            .render();
+        assert!(
+            out.contains("unnamed channel (id 1502465463144415372) (53)"),
+            "{out}"
+        );
+        assert!(!out.contains("#1502465463144415372"), "{out}");
     }
 
     #[test]
@@ -663,9 +1006,9 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (5, 0)), (20, (0, 0)), (30, (2, 0))])
             .render();
-        assert!(out.contains("#10"));
-        assert!(out.contains("#30"));
-        assert!(!out.contains("#20"));
+        assert!(out.contains("(id 10)"));
+        assert!(out.contains("(id 30)"));
+        assert!(!out.contains("(id 20)"));
     }
 
     #[test]
@@ -683,19 +1026,22 @@ mod tests {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .focus_channel_id(3)
+            .channel_names(names(&[(3, "general")]))
             .unread_digest(vec![(10, (4, 0))])
             .render();
-        assert!(out.contains("attention is currently on #3"));
-        assert!(out.contains("#10 (4)"));
+        assert!(out.contains("attention is currently on #general"));
+        assert!(out.contains("unnamed channel (id 10) (4)"));
     }
 
     #[test]
     fn ping_subset_with_higher_unread_count() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (3, 1))])
             .render();
-        assert!(out.contains("#10 (3, 1 ping)"));
+        assert!(out.contains("(id 10) (3, 1 ping)"));
         assert!(out.contains("shift_focus"));
     }
 
@@ -705,7 +1051,7 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (1, 1))])
             .render();
-        assert!(out.contains("#10 (1 ping)"));
+        assert!(out.contains("(id 10) (1 ping)"));
     }
 
     #[test]
@@ -714,7 +1060,7 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (3, 2))])
             .render();
-        assert!(out.contains("#10 (3, 2 pings)"));
+        assert!(out.contains("(id 10) (3, 2 pings)"));
     }
 
     #[test]
@@ -723,23 +1069,27 @@ mod tests {
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(10, (2, 0))])
             .render();
-        assert!(out.contains("#10 (2)"));
+        assert!(out.contains("(id 10) (2)"));
     }
 
     #[test]
     fn single_unread_no_ping_has_no_suffix() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(10, (1, 0))])
             .render();
-        assert!(out.contains("#10 \u{2014}"));
-        assert!(!out.contains("#10 ("));
+        assert!(out.contains("unnamed channel (id 10) \u{2014}"));
+        assert!(!out.contains("(id 10) ("));
     }
 
     #[test]
     fn named_unread_channel_surfaces_numeric_id() {
         let out = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
+            .tools_enabled(true)
+            .shift_focus_coaching(coaching())
             .unread_digest(vec![(422_137_955_130_408_970, (2, 0))])
             .channel_names(names(&[(422_137_955_130_408_970, "the-annex")]))
             .render();
@@ -824,13 +1174,13 @@ mod tests {
             .render();
         assert!(named.contains("#general (id 20)"));
         assert!(!named.contains("DM from"));
-        // A DM channel with no guild_names map falls through to the old
-        // no-name #{cid} rendering.
+        // A DM channel with no guild_names map falls through to the plain
+        // unnamed-channel rendering.
         let fallback = FinalReminder::new("text")
             .now(at(2026, 5, 4, 14, 30))
             .unread_digest(vec![(123, (1, 0))])
             .render();
-        assert!(fallback.contains("#123"));
+        assert!(fallback.contains("unnamed channel (id 123)"));
         assert!(!fallback.contains("DM"));
     }
 }

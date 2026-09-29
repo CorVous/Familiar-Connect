@@ -1,6 +1,6 @@
 //! Integration tests for `history::store` — turns, reads, summaries, watermarks,
-//! attentional stream, activities. Ports `test_history_store.py` and
-//! `test_attentional_store.py` (FTS-independent parts).
+//! attentional stream, activities — plus the FTS-independent parts of the
+//! attentional store.
 
 use chrono::{TimeZone, Utc};
 use familiar_connect::history::db::Value;

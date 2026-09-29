@@ -1,5 +1,4 @@
-//! Typing-event policy: interruption + bot-pingpong backoff (subsystem 06;
-//! Python `typing_interrupt.py`).
+//! Typing-event policy: interruption + bot-pingpong backoff (subsystem 06).
 //!
 //! Discord `on_typing` fires when any user (or bot) starts typing in a channel.
 //! [`TypingInterruptHandler`] translates events into:
@@ -34,7 +33,7 @@ pub type BotUserIdProvider = Arc<dyn Fn() -> Option<i64> + Send + Sync>;
 ///
 /// Stateless across processes — the backoff ladder lives in memory and resets
 /// on user activity. Safe to share across the async runtime (all interior state
-/// is behind mutexes; the Python original relied on the single event loop).
+/// is behind mutexes).
 pub struct TypingInterruptHandler {
     config: DiscordTextConfig,
     router: Arc<TurnRouter>,

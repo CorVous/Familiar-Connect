@@ -1,5 +1,5 @@
 //! Discord voice in: DAVE E2EE client, per-SSRC recording, PCM conversion,
-//! per-user turn detection (subsystem 09; Python `voice/`).
+//! per-user turn detection (subsystem 09).
 
 pub mod audio;
 pub mod dave_client;

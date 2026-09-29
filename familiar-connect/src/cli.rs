@@ -1,12 +1,13 @@
-//! CLI parsing + setup_logging (subsystem 10; Python cli.py).
+//! CLI parsing + setup_logging (subsystem 10).
 //!
 //! `clap` (derive) replaces `argparse`; the subcommand set (`run` / `diagnose` /
-//! `version`) and the repeatable `-v/--verbose` counter mirror the Python parser
-//! exactly, and there is deliberately **no** `sleep` subcommand (test-pinned).
+//! `prompts` / `version`) and the repeatable `-v/--verbose` counter are a fixed
+//! CLI contract, and there is deliberately **no** `sleep` subcommand
+//! (test-pinned).
 //! [`setup_logging`] installs a `tracing` subscriber whose event formatter
 //! reproduces the [`StyledFormatter`](crate::log_style::StyledFormatter) wire
 //! format, and pins the two-tier visibility (`warn` root, `familiar_connect` at
-//! `info`) the Python `setup_logging` set via the package logger floor.
+//! `info`) via the package logger floor.
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -23,7 +24,7 @@ use tracing_subscriber::registry::LookupSpan;
 use crate::commands;
 use crate::log_style::{self as ls, LogLevel, LogRecord, StyledFormatter};
 
-/// Top-level parser (Python `create_parser`).
+/// Top-level parser.
 #[derive(Parser, Debug)]
 #[command(
     name = "familiar-connect",
@@ -52,6 +53,8 @@ pub enum Command {
     Run(commands::run::RunArgs),
     /// Aggregate span timings from log files.
     Diagnose(DiagnoseArgs),
+    /// Print mirrored LLM prompts/responses from `history.db`.
+    Prompts(commands::prompts::PromptsArgs),
     /// Display package version.
     Version,
 }
@@ -68,9 +71,8 @@ pub struct DiagnoseArgs {
 // setup_logging
 // ---------------------------------------------------------------------------
 
-/// A resolved log level, mirroring the Python `logging` levels
-/// `setup_logging` selects. `Critical` has no `tracing` analog and maps to
-/// `error` at the subscriber (tracing's most severe level).
+/// A resolved log level. `Critical` has no `tracing` analog and maps to `error`
+/// at the subscriber (tracing's most severe level).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvedLevel {
     /// `DEBUG` (verbose ≥ 2).
@@ -98,7 +100,7 @@ impl ResolvedLevel {
     }
 
     /// The package-logger floor: `min(level, INFO)` so package INFO stays
-    /// visible even at root WARNING (Python `pkg_logger.setLevel`).
+    /// visible even at root WARNING.
     const fn floored_to_info(self) -> Self {
         match self {
             Self::Debug => Self::Debug,
@@ -108,14 +110,14 @@ impl ResolvedLevel {
 }
 
 /// Resolve the effective level from the verbose counter and optional explicit
-/// name (Python `setup_logging`'s level ladder).
+/// name.
 ///
 /// `verbose`: 0 → WARNING, 1 → INFO, ≥ 2 → DEBUG. An explicit `level`
 /// (case-insensitive) overrides the counter.
 ///
 /// # Errors
-/// An unknown `level` name yields `Err` with the byte-stable
-/// `"Invalid log level: <name>"` message (Python raised `ValueError`).
+/// An unknown `level` name yields `Err` with the byte-stable `"Invalid log
+/// level: <name>"` message.
 pub fn resolve_log_level(verbose: u8, level: Option<&str>) -> Result<ResolvedLevel, String> {
     if let Some(level) = level {
         return match level.to_ascii_uppercase().as_str() {
@@ -159,8 +161,7 @@ impl tracing::field::Visit for MessageVisitor {
 }
 
 /// A `tracing` event formatter that reproduces the `log_style` wire format via
-/// [`StyledFormatter`] (DESIGN §4.5) — the same layout the Python
-/// `StyledFormatter` emitted, and the one the `diagnose` grep parses.
+/// [`StyledFormatter`] — the layout the `diagnose` grep parses.
 struct StyledEventFormat;
 
 impl<S, N> FormatEvent<S, N> for StyledEventFormat
@@ -191,12 +192,38 @@ where
     }
 }
 
-/// Configure logging (Python `setup_logging`).
+/// songbird's UDP receive task. Warns per packet on RTCP decrypt failures,
+/// which upstream documents as non-fatal by design (the packet is still
+/// forwarded with a fallback offset).
+const SONGBIRD_UDP_RX_TARGET: &str = "songbird::driver::tasks::udp_rx";
+
+/// Build the `EnvFilter` directive string: root level, `familiar_connect`
+/// floor, third-party quieting.
+///
+/// The root level gates every dependency, and it defaults to `warn` — so
+/// songbird's per-packet receive-path spam passes the filter at any verbosity
+/// (#199). A target-scoped directive pins that one module to `error`; genuine
+/// songbird errors elsewhere still show. `-vv` (root `debug`) is the "show me
+/// everything" escape hatch and drops the directive.
+fn log_filter_directive(resolved: ResolvedLevel) -> String {
+    let base = format!(
+        "{},familiar_connect={}",
+        resolved.filter_str(),
+        resolved.floored_to_info().filter_str()
+    );
+    if resolved == ResolvedLevel::Debug {
+        base
+    } else {
+        format!("{base},{SONGBIRD_UDP_RX_TARGET}=error")
+    }
+}
+
+/// Configure logging.
 ///
 /// Installs a process-wide `tracing` subscriber with the `StyledFormatter` wire
-/// format and the two-tier `EnvFilter` (`<root>,familiar_connect=<min(root,info)>`).
-/// Re-installation across a process is a no-op (`try_init`), the Rust analog of
-/// Python's `force=True` reconfigure being harmless.
+/// format and the `EnvFilter` from [`log_filter_directive`].
+/// Re-installation across a process is a no-op (`try_init`), so a second
+/// call is harmless.
 ///
 /// # Errors
 /// Propagates the `resolve_log_level` error on an unknown explicit level.
@@ -204,11 +231,7 @@ pub fn setup_logging(verbose: u8, level: Option<&str>) -> Result<(), String> {
     let resolved = resolve_log_level(verbose, level)?;
     // colorama parity: strip ANSI when stderr is not an interactive terminal.
     ls::init(!std::io::stderr().is_terminal());
-    let directive = format!(
-        "{},familiar_connect={}",
-        resolved.filter_str(),
-        resolved.floored_to_info().filter_str()
-    );
+    let directive = log_filter_directive(resolved);
     let filter = EnvFilter::try_new(&directive).unwrap_or_else(|_| EnvFilter::new("warn"));
     // `try_init` fails only if a global subscriber is already installed; that is
     // benign here (a second setup_logging call), so the error is dropped.
@@ -228,13 +251,13 @@ fn exit_code(code: i32) -> ExitCode {
     u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from)
 }
 
-/// Program entry (Python `main`): load `.env`, parse, dispatch.
+/// Program entry: load `.env`, parse, dispatch.
 ///
 /// A bare invocation (no subcommand) prints help and exits `0`. `clap` handles
 /// `--version` (prints and exits `0`) during parse, matching argparse.
 #[must_use]
 pub fn main() -> ExitCode {
-    // Autoload `.env` before parsing (Python `load_dotenv()`); a missing file is
+    // Autoload `.env` before parsing; a missing file is
     // not an error.
     let _ = dotenvy::dotenv();
 
@@ -255,6 +278,7 @@ pub fn main() -> ExitCode {
     let code = match command {
         Command::Run(args) => commands::run::run(&args),
         Command::Diagnose(args) => commands::diagnose::diagnose(&args.paths),
+        Command::Prompts(args) => commands::prompts::main(&args),
         Command::Version => commands::version::run(),
     };
     exit_code(code)
@@ -262,11 +286,11 @@ pub fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, ResolvedLevel, resolve_log_level};
+    use super::{Cli, Command, ResolvedLevel, log_filter_directive, resolve_log_level};
     use crate::commands::version::VERSION;
     use clap::Parser;
 
-    // --- parser shape (ported from test_cli.py) ---
+    // --- parser shape ---
 
     #[test]
     fn parser_definition_is_valid() {
@@ -296,6 +320,43 @@ mod tests {
         match cli.command {
             Some(Command::Diagnose(args)) => assert_eq!(args.paths, vec!["somefile".to_owned()]),
             _ => panic!("expected diagnose"),
+        }
+    }
+
+    #[test]
+    fn prompts_subcommand_registered() {
+        let cli =
+            Cli::try_parse_from(["familiar-connect", "prompts", "--turn", "42"]).expect("parse");
+        match cli.command {
+            Some(Command::Prompts(args)) => {
+                assert_eq!(args.turn, Some(42));
+                // One call unless asked otherwise: prompts are ~15 KB each.
+                assert_eq!(args.limit, 1);
+            }
+            _ => panic!("expected prompts"),
+        }
+    }
+
+    #[test]
+    fn prompts_subcommand_takes_familiar_slot_and_limit() {
+        let cli = Cli::try_parse_from([
+            "familiar-connect",
+            "prompts",
+            "--familiar",
+            "aria",
+            "--slot",
+            "fast",
+            "--limit",
+            "3",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Command::Prompts(args)) => {
+                assert_eq!(args.familiar.as_deref(), Some("aria"));
+                assert_eq!(args.slot.as_deref(), Some("fast"));
+                assert_eq!(args.limit, 3);
+            }
+            _ => panic!("expected prompts"),
         }
     }
 
@@ -346,7 +407,7 @@ mod tests {
         assert!(cli.command.is_none());
     }
 
-    // --- resolve_log_level (ported from test_logging.py setup half) ---
+    // --- resolve_log_level ---
 
     #[test]
     fn verbose_ladder() {
@@ -408,5 +469,49 @@ mod tests {
             ResolvedLevel::Info
         );
         assert_eq!(ResolvedLevel::Debug.floored_to_info(), ResolvedLevel::Debug);
+    }
+
+    // --- EnvFilter directive (#199) ---
+
+    #[test]
+    fn directive_quiets_songbird_udp_rx_below_debug() {
+        // Root WARNING lets every dependency's WARN through, so songbird's
+        // per-packet "RTCP decryption failed" spam needs its own directive.
+        assert_eq!(
+            log_filter_directive(ResolvedLevel::Warning),
+            "warn,familiar_connect=info,songbird::driver::tasks::udp_rx=error"
+        );
+        assert_eq!(
+            log_filter_directive(ResolvedLevel::Info),
+            "info,familiar_connect=info,songbird::driver::tasks::udp_rx=error"
+        );
+    }
+
+    #[test]
+    fn directive_restores_songbird_udp_rx_at_debug() {
+        // `-vv` is the "show me everything" escape hatch — no quieting.
+        assert_eq!(
+            log_filter_directive(ResolvedLevel::Debug),
+            "debug,familiar_connect=debug"
+        );
+    }
+
+    #[test]
+    fn directive_parses_as_env_filter() {
+        // Guards the target path + syntax: a bad directive would silently fall
+        // back to bare `warn` in setup_logging.
+        for level in [
+            ResolvedLevel::Debug,
+            ResolvedLevel::Info,
+            ResolvedLevel::Warning,
+            ResolvedLevel::Error,
+            ResolvedLevel::Critical,
+        ] {
+            let directive = log_filter_directive(level);
+            assert!(
+                tracing_subscriber::EnvFilter::try_new(&directive).is_ok(),
+                "unparseable directive: {directive}"
+            );
+        }
     }
 }

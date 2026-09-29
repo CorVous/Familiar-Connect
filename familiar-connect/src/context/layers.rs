@@ -1,14 +1,19 @@
-//! Prompt layer implementations (subsystem 05; Python `context/layers.py`).
+//! Prompt layer implementations (subsystem 05).
 //!
 //! Each layer owns one segment of the system prompt with its own invalidation
-//! signal. The [`Layer`] trait is the swappable seam (Python's `Protocol`); the
-//! eight concrete layers below implement it — except [`RecentHistoryLayer`],
-//! which is a distinct assembler slot (DESIGN D15), not a `Layer`.
+//! signal. The [`Layer`] trait is the swappable seam; the eight concrete layers
+//! below implement it — except [`RecentHistoryLayer`], which is a distinct
+//! assembler slot, not a `Layer`.
 //!
 //! Store access goes through the async facade (`build` and `invalidation_key` are
-//! both `async` so neither blocks the reactor — DESIGN D16). All truncation caps
-//! count Unicode scalars via a `limit-1 + "…"` helper (DESIGN §4.9, spec 05 port
-//! notes); chars-per-token is 4.
+//! both `async` so neither blocks the reactor). All truncation caps
+//! count Unicode scalars via a `limit-1 + "…"` helper; chars-per-token is 4.
+//!
+//! Trimming keys [`AssemblyContext::model`] into the calibration store, so a
+//! model known to bill above the heuristic trims earlier (#183). An empty model
+//! misses the store, leaving the raw estimate. The model is fixed for an
+//! assembler's lifetime (one client per responder), so no invalidation key
+//! carries it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,13 +29,16 @@ use chrono_tz::Tz;
 use regex::Regex;
 
 use super::assembler::AssemblyContext;
-use crate::budget::{estimate_message_tokens, estimate_tokens};
+use crate::budget::{
+    char_cap_for_tokens, estimate_message_tokens_calibrated, estimate_tokens_calibrated,
+};
 use crate::embedding::protocol::Embedder;
 use crate::history::FOCUS_STREAM_CHANNEL_ID;
 use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::{AccountProfile, Fact, HistoryTurn};
 use crate::identity::{ego_canonical_key, is_ego_key};
 use crate::llm::{Message, sanitize_name};
+use crate::voice_roster::{RosterEvent, RosterEventKind, VoiceRoster};
 
 /// A shared async history store handle every layer holds.
 type Store = Arc<AsyncHistoryStore>;
@@ -52,9 +60,9 @@ const BIO_CHAR_CAP: usize = 240;
 /// Single prompt-layer seam.
 ///
 /// [`build`](Layer::build) returns the layer's text contribution to the system
-/// prompt (empty string opts out); [`invalidation_key`](Layer::invalidation_key)
-/// is a short string used for in-process caching. Both are `async` so neither
-/// blocks the reactor (DESIGN D16).
+/// prompt (empty string opts out);
+/// [`invalidation_key`](Layer::invalidation_key) is a short string used for
+/// in-process caching. Both are `async` so neither blocks the reactor.
 #[async_trait]
 pub trait Layer: Send + Sync {
     /// Stable layer name (the cache key namespace).
@@ -81,7 +89,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 /// Short content hash of a file (BLAKE2b, 8-byte digest); `"missing"` when the
 /// file is absent or unreadable. Content-based, not mtime — sub-second edits
-/// flip the key (behavior 7).
+/// flip the key.
 fn content_hash(path: &Path) -> String {
     std::fs::read(path).map_or_else(
         |_| "missing".to_owned(),
@@ -97,9 +105,9 @@ fn content_hash(path: &Path) -> String {
     )
 }
 
-/// Hard cap on a string; `…` (U+2026) suffix when truncated. Keeps `limit - 1`
-/// scalars then the ellipsis so the result is at most `limit` scalars — the
-/// context module's convention (Python `_truncate`), distinct from
+/// Hard cap on a string; `…` (U+2026) suffix when truncated. Keeps `limit -
+/// 1` scalars then the ellipsis so the result is at most `limit` scalars —
+/// the context module's convention, distinct from
 /// [`crate::support::text::truncate`] (which keeps `limit` then appends).
 fn truncate_cap(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
@@ -111,16 +119,15 @@ fn truncate_cap(text: &str, limit: usize) -> String {
     out
 }
 
-/// Truncate so the estimated token count fits `max_tokens` (char/4 heuristic).
-fn truncate_to_tokens(text: &str, max_tokens: i64) -> String {
+/// Truncate so `model`'s calibrated token count fits `max_tokens`.
+fn truncate_to_tokens(text: &str, max_tokens: i64, model: &str) -> String {
     if max_tokens <= 0 {
         return String::new();
     }
-    if estimate_tokens(text) <= max_tokens {
+    if estimate_tokens_calibrated(text, model) <= max_tokens {
         return text.to_owned();
     }
-    let char_cap = usize::try_from(max_tokens.saturating_mul(4)).unwrap_or(usize::MAX);
-    truncate_cap(text, char_cap)
+    truncate_cap(text, char_cap_for_tokens(max_tokens, model))
 }
 
 /// `[reactions: 👍 x3 ❤️ x1]`; empty input → empty string.
@@ -135,7 +142,7 @@ fn format_reactions(reactions: &[(String, i64)]) -> String {
     format!("[reactions: {}]", parts.join(" "))
 }
 
-/// Non-empty string test mirroring Python truthiness of an optional string.
+/// Non-empty string test for an optional string (`None` and `""` are both false).
 fn is_nonempty(value: Option<&str>) -> bool {
     value.is_some_and(|s| !s.is_empty())
 }
@@ -289,7 +296,7 @@ impl Layer for OperatingModeLayer {
 }
 
 // ---------------------------------------------------------------------------
-// Recent history (assembler slot, not a Layer — DESIGN D15)
+// Recent history (assembler slot, not a Layer)
 // ---------------------------------------------------------------------------
 
 /// Collapse consecutive same-speaker voice fragments into one rendered message.
@@ -316,9 +323,7 @@ fn coalesce_voice_fragments(turns: Vec<HistoryTurn>, max_gap_seconds: f64) -> Ve
     merged
 }
 
-/// Gap in seconds between two turns (microsecond precision, matching Python
-/// `timedelta.total_seconds()` over microsecond-granularity store timestamps —
-/// `layers.py:392`/`:333`).
+/// Gap in seconds between two turns (microsecond precision).
 fn gap_seconds(earlier: DateTime<Utc>, later: DateTime<Utc>) -> f64 {
     #[allow(
         clippy::cast_precision_loss,
@@ -369,14 +374,18 @@ fn silence_fold_index(turns: &[HistoryTurn], min_gap_seconds: f64) -> usize {
 
 /// Drop oldest messages until the total estimated tokens fit, always keeping the
 /// newest message even if it alone exceeds the cap.
-fn trim_messages_to_token_cap(messages: Vec<Message>, max_tokens: i64) -> Vec<Message> {
+fn trim_messages_to_token_cap(
+    messages: Vec<Message>,
+    max_tokens: i64,
+    model: &str,
+) -> Vec<Message> {
     if messages.is_empty() {
         return messages;
     }
     let mut kept_rev: Vec<Message> = Vec::new();
     let mut used: i64 = 0;
     for msg in messages.into_iter().rev() {
-        let cost = estimate_message_tokens(&msg);
+        let cost = estimate_message_tokens_calibrated(&msg, model);
         if used + cost > max_tokens && !kept_rev.is_empty() {
             break;
         }
@@ -394,8 +403,6 @@ fn format_channel_marker(
     channel_resolver: Option<&ChannelResolver>,
     guild_resolver: Option<&ChannelResolver>,
 ) -> String {
-    // Mirror Python's empty-string-is-falsy truthiness (`layers.py` lines
-    // 276/278): an empty resolver result is treated as absent, not rendered.
     let name = channel_resolver
         .and_then(|r| r(channel_id))
         .filter(|s| !s.is_empty());
@@ -409,22 +416,43 @@ fn format_channel_marker(
     }
 }
 
-/// Interleave channel markers when the surviving window spans more than one
-/// channel; single-channel windows pass through byte-for-byte.
-fn insert_channel_markers(
+/// Interleave day + channel markers into the rendered window.
+///
+/// A `{date}:` marker (the RAG renderer's date-header shape) precedes each
+/// local calendar day, and a `{server}/{channel}` marker each channel change —
+/// but **only** when the window actually spans more than one day / channel, so
+/// the common single-day single-channel window passes through byte-for-byte at
+/// zero token cost. Per-turn prefixes stay bare `HH:MM`: dating every line
+/// would cost far more than one marker per day boundary.
+fn insert_window_markers(
     turns: &[HistoryTurn],
     rendered: Vec<Message>,
+    tz: Tz,
     channel_resolver: Option<&ChannelResolver>,
     guild_resolver: Option<&ChannelResolver>,
 ) -> Vec<Message> {
-    let distinct: HashSet<i64> = turns.iter().map(|t| t.channel_id).collect();
-    if distinct.len() <= 1 {
+    let channels: HashSet<i64> = turns.iter().map(|t| t.channel_id).collect();
+    let dates: HashSet<String> = turns
+        .iter()
+        .map(|t| format_date_iso(t.timestamp, tz))
+        .collect();
+    let mark_channels = channels.len() > 1;
+    let mark_days = dates.len() > 1;
+    if !mark_channels && !mark_days {
         return rendered;
     }
-    let mut out: Vec<Message> = Vec::with_capacity(rendered.len() + distinct.len());
+    let mut out: Vec<Message> = Vec::with_capacity(rendered.len() + channels.len() + dates.len());
     let mut prev_channel: Option<i64> = None;
+    let mut prev_date: Option<String> = None;
     for (turn, msg) in turns.iter().zip(rendered) {
-        if Some(turn.channel_id) != prev_channel {
+        if mark_days {
+            let date = format_date_iso(turn.timestamp, tz);
+            if prev_date.as_ref() != Some(&date) {
+                out.push(Message::new("user", format!("{date}:")));
+                prev_date = Some(date);
+            }
+        }
+        if mark_channels && Some(turn.channel_id) != prev_channel {
             out.push(Message::new(
                 "user",
                 format_channel_marker(turn.channel_id, channel_resolver, guild_resolver),
@@ -467,8 +495,8 @@ async fn reply_prefix_body(
     }
 }
 
-/// Render one [`HistoryTurn`] into an LLM [`Message`] with all enrichment
-/// (behaviors 13–17). `pub(crate)` so subsystem 06 can reuse it.
+/// Render one [`HistoryTurn`] into an LLM [`Message`] with all enrichment.
+/// `pub(crate)` so subsystem 06 can reuse it.
 pub(crate) async fn turn_to_message_with_context(
     store: &AsyncHistoryStore,
     turn: &HistoryTurn,
@@ -545,8 +573,8 @@ pub(crate) async fn turn_to_message_with_context(
 
 /// Verbatim tail of the consumed cross-channel stream for the active familiar.
 ///
-/// Not a [`Layer`]: the assembler holds it as a distinct slot (DESIGN D15) and
-/// consumes [`recent_messages`](RecentHistoryLayer::recent_messages).
+/// Not a [`Layer`]: the assembler holds it as a distinct slot and consumes
+/// [`recent_messages`](RecentHistoryLayer::recent_messages).
 pub struct RecentHistoryLayer {
     store: Store,
     tz: Tz,
@@ -566,9 +594,10 @@ impl RecentHistoryLayer {
     }
 
     /// Always the empty string — this slot contributes to `recent_history`, not
-    /// the system prompt (behavior 19).
+    /// the system prompt.
     #[allow(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "mirrors the layer build contract; the slot opts out of the system prompt"
     )]
     pub async fn build(&self, _ctx: &AssemblyContext) -> String {
@@ -576,7 +605,7 @@ impl RecentHistoryLayer {
     }
 
     /// The last `window_size` turns of the consumed cross-channel stream as LLM
-    /// messages (behaviors 9–18).
+    /// messages.
     pub async fn recent_messages(&self, ctx: &AssemblyContext) -> Vec<Message> {
         let mut turns = self
             .store
@@ -622,7 +651,7 @@ impl RecentHistoryLayer {
         }
 
         if let Some(max_tokens) = self.max_tokens {
-            rendered = trim_messages_to_token_cap(rendered, max_tokens);
+            rendered = trim_messages_to_token_cap(rendered, max_tokens, &ctx.model);
             let keep = rendered.len();
             let drop = turns.len().saturating_sub(keep);
             if drop > 0 {
@@ -637,9 +666,10 @@ impl RecentHistoryLayer {
             turns = turns.split_off(drop);
         }
 
-        insert_channel_markers(
+        insert_window_markers(
             &turns,
             rendered,
+            self.tz,
             self.channel_name_resolver.as_ref(),
             self.guild_name_resolver.as_ref(),
         )
@@ -781,7 +811,7 @@ impl Layer for ConversationSummaryLayer {
         }
         let body = self.max_tokens.map_or_else(
             || body.to_owned(),
-            |max_tokens| truncate_to_tokens(body, max_tokens),
+            |max_tokens| truncate_to_tokens(body, max_tokens, &ctx.model),
         );
         format!("## Conversation so far\n\n{body}")
     }
@@ -810,11 +840,10 @@ impl Layer for ConversationSummaryLayer {
 
 /// Simple ASCII-ish title-case fallback for the ego header display.
 ///
-/// Mirrors Python `str.title()` (`layers.py:1001`): word boundaries fall on
-/// Unicode *cased* characters only. Digits and punctuation are uncased, so a
-/// letter following one starts a new word and is capitalized
-/// (`agent007bond` -> `Agent007Bond`, `3cats` -> `3Cats`). Uncased characters
-/// pass through their (identity) case mapping unchanged.
+/// Digits and punctuation are uncased, so a letter following one starts a new
+/// word and is capitalized (`agent007bond` -> `Agent007Bond`, `3cats` ->
+/// `3Cats`). Uncased characters pass through their (identity) case mapping
+/// unchanged.
 fn title_case(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut previous_is_cased = false;
@@ -972,12 +1001,12 @@ impl Layer for PeopleDossierLayer {
             };
             let mut section = format!("{header}\n\n{}", entry.dossier_text.trim());
             if let Some(rem) = remaining {
-                let cost = estimate_tokens(&section);
+                let cost = estimate_tokens_calibrated(&section, &ctx.model);
                 if cost > rem && !sections.is_empty() {
                     break;
                 }
-                section = truncate_to_tokens(&section, rem);
-                remaining = Some(rem - estimate_tokens(&section));
+                section = truncate_to_tokens(&section, rem, &ctx.model);
+                remaining = Some(rem - estimate_tokens_calibrated(&section, &ctx.model));
             }
             sections.push(section);
         }
@@ -1082,7 +1111,7 @@ impl PeopleDossierBuilder {
 /// norm.
 #[allow(
     clippy::suboptimal_flops,
-    reason = "mirror Python's plain +/* float arithmetic for bit-parity of the cosine score"
+    reason = "plain +/* float arithmetic keeps the cosine score bit-stable"
 )]
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
@@ -1103,8 +1132,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     dot / (na * nb).sqrt()
 }
 
-/// Fuse BM25 / recency / importance / embedding signals into one rank
-/// (behavior 31); each signal is normalized to `[0, 1]` within the batch.
+/// Fuse BM25 / recency / importance / embedding signals into one rank;
+/// each signal is normalized to `[0, 1]` within the batch.
 fn rerank_fact_candidates(
     scored: Vec<(Fact, f32)>,
     limit: i64,
@@ -1163,7 +1192,7 @@ fn rerank_fact_candidates(
         let embedding_q = sims.get(&fact.id).map_or(0.5, |cos| (cos + 1.0) / 2.0);
         #[allow(
             clippy::suboptimal_flops,
-            reason = "mirror Python's plain +/* float arithmetic for bit-parity of the rerank score"
+            reason = "plain +/* float arithmetic keeps the rerank score bit-stable"
         )]
         let score = bm25_weight * bm25_q
             + recency_weight * recency_q
@@ -1180,7 +1209,7 @@ fn rerank_fact_candidates(
     ranked.into_iter().take(keep).map(|(_, _, f)| f).collect()
 }
 
-/// Render one fact line with optional rename annotations (behavior 33).
+/// Render one fact line with optional rename annotations.
 async fn render_fact_line(
     store: &AsyncHistoryStore,
     familiar_id: &str,
@@ -1226,16 +1255,17 @@ async fn render_fact_line(
     }
 }
 
-/// Cap RAG fact + turn lines together; facts win ties (behavior 35).
+/// Cap RAG fact + turn lines together; facts win ties.
 fn trim_rag_lines_to_tokens(
     fact_lines: Vec<String>,
     turn_lines: Vec<String>,
     max_tokens: i64,
+    model: &str,
 ) -> (Vec<String>, Vec<String>) {
     let mut used: i64 = 0;
     let mut kept_facts: Vec<String> = Vec::new();
     for line in fact_lines {
-        let cost = estimate_tokens(&line);
+        let cost = estimate_tokens_calibrated(&line, model);
         if used + cost > max_tokens && !kept_facts.is_empty() {
             break;
         }
@@ -1244,7 +1274,7 @@ fn trim_rag_lines_to_tokens(
     }
     let mut kept_turns: Vec<String> = Vec::new();
     for line in turn_lines {
-        let cost = estimate_tokens(&line);
+        let cost = estimate_tokens_calibrated(&line, model);
         if used + cost > max_tokens && (!kept_turns.is_empty() || !kept_facts.is_empty()) {
             break;
         }
@@ -1340,7 +1370,7 @@ impl RagContextLayer {
     }
 
     /// Retrieve the fact results for `cue` — BM25-only (default) or the
-    /// over-fetch-and-rerank path when any non-BM25 weight is set (behavior 30).
+    /// over-fetch-and-rerank path when any non-BM25 weight is set.
     async fn retrieve_facts(&self, ctx: &AssemblyContext, cue: &str) -> Vec<Fact> {
         if !self.rerank_facts() {
             return self
@@ -1516,7 +1546,8 @@ impl Layer for RagContextLayer {
         let mut turn_lines = self.render_turn_lines(ctx, &turn_results, max_id).await;
 
         if let Some(max_tokens) = self.max_tokens {
-            let (facts, turns) = trim_rag_lines_to_tokens(fact_lines, turn_lines, max_tokens);
+            let (facts, turns) =
+                trim_rag_lines_to_tokens(fact_lines, turn_lines, max_tokens, &ctx.model);
             fact_lines = facts;
             turn_lines = turns;
         }
@@ -1666,8 +1697,7 @@ impl RagContextBuilder {
         self
     }
 
-    /// Build the layer (`context_window`/`fact_overfetch` are floored as in
-    /// Python).
+    /// Build the layer (`context_window`/`fact_overfetch` are floored).
     #[must_use]
     pub fn build(self) -> RagContextLayer {
         RagContextLayer {
@@ -1728,7 +1758,7 @@ impl ReflectionLayer {
     }
 }
 
-/// `Option<i64>` rendered as Python would render `ctx.channel_id` in an f-string.
+/// `Option<i64>` rendered for interpolation: `None` renders as `"None"`.
 fn opt_int_display(value: Option<i64>) -> String {
     value.map_or_else(|| "None".to_owned(), |v| v.to_string())
 }
@@ -1787,12 +1817,12 @@ impl Layer for ReflectionLayer {
             };
             let mut line = format!("- {}{cite_block}{stale_block}", row.text.trim());
             if let Some(rem) = remaining {
-                let cost = estimate_tokens(&line);
+                let cost = estimate_tokens_calibrated(&line, &ctx.model);
                 if cost > rem && !sections.is_empty() {
                     break;
                 }
-                line = truncate_to_tokens(&line, rem);
-                remaining = Some(rem - estimate_tokens(&line));
+                line = truncate_to_tokens(&line, rem, &ctx.model);
+                remaining = Some(rem - estimate_tokens_calibrated(&line, &ctx.model));
             }
             sections.push(line);
         }
@@ -1834,7 +1864,7 @@ pub struct LorebookEntry {
     pub selective: bool,
 }
 
-/// Stringify a TOML scalar the way Python `str(...)` would for lorebook content.
+/// Stringify a TOML scalar for lorebook content.
 fn toml_value_to_string(value: &toml::Value) -> String {
     match value {
         toml::Value::String(s) => s.clone(),
@@ -1846,7 +1876,8 @@ fn toml_value_to_string(value: &toml::Value) -> String {
     }
 }
 
-/// Python-style truthiness of a TOML scalar (for the `selective` flag).
+/// Truthiness of a TOML scalar (for the `selective` flag): `false`, zero, the
+/// empty string, and empty collections are falsy; everything else is truthy.
 fn toml_truthy(value: &toml::Value) -> bool {
     match value {
         toml::Value::Boolean(b) => *b,
@@ -2000,12 +2031,12 @@ impl Layer for LorebookLayer {
         for &i in &idxs {
             let mut section = entries[i].content.clone();
             if let Some(rem) = remaining {
-                let cost = estimate_tokens(&section);
+                let cost = estimate_tokens_calibrated(&section, &ctx.model);
                 if cost > rem && !sections.is_empty() {
                     break;
                 }
-                section = truncate_to_tokens(&section, rem);
-                remaining = Some(rem - estimate_tokens(&section));
+                section = truncate_to_tokens(&section, rem, &ctx.model);
+                remaining = Some(rem - estimate_tokens_calibrated(&section, &ctx.model));
             }
             sections.push(section);
         }
@@ -2085,14 +2116,102 @@ impl LorebookBuilder {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Voice roster
+// ---------------------------------------------------------------------------
+
+/// Voice-call roster line + narrated join/leave events.
+///
+/// Reads the shared [`VoiceRoster`] the `discord` gateway glue writes. Voice
+/// turns only — a text prompt gets nothing (roster churn would cost tokens and
+/// poison that path's cache prefix for no benefit).
+pub struct VoiceRosterLayer {
+    roster: Arc<VoiceRoster>,
+}
+
+/// Roster names rendered before the `+N more` tail.
+const MAX_RENDERED_NAMES: usize = 12;
+/// Newest events narrated per turn.
+const MAX_RENDERED_EVENTS: usize = 6;
+
+impl VoiceRosterLayer {
+    /// New layer over `roster`.
+    #[must_use]
+    pub const fn new(roster: Arc<VoiceRoster>) -> Self {
+        Self { roster }
+    }
+}
+
+/// `In the call: A, B, C.` — capped, with a `+N more` tail past the cap.
+fn format_roster_line(members: &[String]) -> String {
+    use std::fmt::Write as _;
+    let shown = members.len().min(MAX_RENDERED_NAMES);
+    let mut line = members[..shown].join(", ");
+    let hidden = members.len() - shown;
+    if hidden > 0 {
+        let _ = write!(line, ", +{hidden} more");
+    }
+    format!("In the call: {line}.")
+}
+
+/// `Tam just joined. pixel left.` — newest [`MAX_RENDERED_EVENTS`], chronological.
+fn format_roster_events(events: &[RosterEvent]) -> String {
+    let skip = events.len().saturating_sub(MAX_RENDERED_EVENTS);
+    events[skip..]
+        .iter()
+        .map(|ev| match ev.kind {
+            RosterEventKind::Joined => format!("{} just joined.", ev.label),
+            RosterEventKind::Left => format!("{} left.", ev.label),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[async_trait]
+impl Layer for VoiceRosterLayer {
+    fn name(&self) -> &'static str {
+        "voice_roster"
+    }
+
+    async fn build(&self, ctx: &AssemblyContext) -> String {
+        if ctx.viewer_mode != "voice" {
+            return String::new();
+        }
+        let view = self.roster.view();
+        // Empty call renders nothing — never "In the call: nobody."
+        if view.members.is_empty() {
+            return String::new();
+        }
+        let mut out = format_roster_line(&view.members);
+        if !view.events.is_empty() {
+            out.push('\n');
+            out.push_str(&format_roster_events(&view.events));
+        }
+        out
+    }
+
+    /// `voice|r<revision>`; a constant off-switch key on non-voice turns.
+    ///
+    /// The roster's revision counter covers membership *and* the visible event
+    /// set: every mutation bumps it, and so does a decay eviction (pruning
+    /// happens inside the read). A raw clock reading would churn the key every
+    /// turn; the revision only moves when the rendered text actually can.
+    async fn invalidation_key(&self, ctx: &AssemblyContext) -> String {
+        if ctx.viewer_mode != "voice" {
+            return "off".to_owned();
+        }
+        format!("voice|r{}", self.roster.revision())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Parity with Python `str.title()` (`layers.py:1001`): word boundaries fall
+    // Word boundaries fall
     // on cased characters only, so a letter after a digit begins a new word.
     #[test]
-    fn title_case_matches_python_str_title() {
+    fn title_case_word_boundaries_are_cased_chars() {
         assert_eq!(title_case("familiar"), "Familiar");
         assert_eq!(title_case("agent007bond"), "Agent007Bond");
         assert_eq!(title_case("3cats"), "3Cats");
@@ -2100,9 +2219,9 @@ mod tests {
         assert_eq!(title_case(""), "");
     }
 
-    // Parity with Python `timedelta.total_seconds()`: sub-millisecond fractions
+    // Sub-millisecond fractions
     // of a second must survive so a gap just above a whole-second cap is not
-    // truncated down onto the cap (`layers.py:392`).
+    // truncated down onto the cap.
     #[test]
     fn gap_seconds_keeps_microsecond_precision() {
         let base =
@@ -2117,8 +2236,8 @@ mod tests {
         );
     }
 
-    // Parity with Python's empty-string-is-falsy handling in
-    // `_format_channel_marker` (`layers.py:276`/`:278`).
+    // Empty-string-is-falsy handling in
+    // the channel-marker formatter.
     #[test]
     fn format_channel_marker_treats_empty_resolver_result_as_absent() {
         let empty: ChannelResolver = Arc::new(|_| Some(String::new()));
@@ -2138,5 +2257,97 @@ mod tests {
         );
         // No resolvers -> `#<id>`.
         assert_eq!(format_channel_marker(42, None, None), "#42");
+    }
+}
+
+/// Calibrated trimming (#183). The calibration store is a process-wide
+/// singleton, so every test here holds the shared guard and resets first.
+#[cfg(test)]
+mod calibration_tests {
+    use std::sync::MutexGuard;
+
+    use super::{trim_messages_to_token_cap, trim_rag_lines_to_tokens, truncate_to_tokens};
+    use crate::budget::{
+        estimate_tokens, estimate_tokens_calibrated, get_token_calibration, reset_token_calibration,
+    };
+    use crate::diagnostics::testutil::singleton_guard;
+    use crate::llm::Message;
+
+    // Serialize + reset, as the diagnostics singleton tests do.
+    fn isolated() -> MutexGuard<'static, ()> {
+        let g = singleton_guard();
+        reset_token_calibration();
+        g
+    }
+
+    /// `n` user messages of `chars` scalars each.
+    fn messages(n: usize, chars: usize) -> Vec<Message> {
+        (0..n)
+            .map(|_| Message::new("user", "a".repeat(chars)))
+            .collect()
+    }
+
+    /// A model billing twice the heuristic.
+    fn seed_dense() {
+        get_token_calibration().record("dense", 100, 200);
+    }
+
+    #[test]
+    fn message_trim_drops_more_under_calibration() {
+        let _g = isolated();
+        seed_dense();
+        // 40 scalars -> 10 raw + 4 framing = 14; calibrated 20 + 4 = 24.
+        let cap = 60;
+        let plain = trim_messages_to_token_cap(messages(10, 40), cap, "unseen-model");
+        let dense = trim_messages_to_token_cap(messages(10, 40), cap, "dense");
+        assert_eq!(plain.len(), 4);
+        assert_eq!(dense.len(), 2);
+    }
+
+    #[test]
+    fn message_trim_with_empty_model_matches_raw() {
+        let _g = isolated();
+        seed_dense();
+        let cap = 60;
+        let empty = trim_messages_to_token_cap(messages(10, 40), cap, "");
+        let unseen = trim_messages_to_token_cap(messages(10, 40), cap, "unseen-model");
+        assert_eq!(empty, unseen);
+        assert_eq!(empty.len(), 4);
+    }
+
+    #[test]
+    fn rag_line_trim_drops_more_under_calibration() {
+        let _g = isolated();
+        seed_dense();
+        // 40 scalars -> 10 raw tokens per line; calibrated 20.
+        let facts: Vec<String> = (0..5).map(|_| "f".repeat(40)).collect();
+        let turns: Vec<String> = (0..5).map(|_| "t".repeat(40)).collect();
+        let cap = 60;
+        let (pf, pt) = trim_rag_lines_to_tokens(facts.clone(), turns.clone(), cap, "unseen-model");
+        let (df, dt) = trim_rag_lines_to_tokens(facts, turns, cap, "dense");
+        assert_eq!((pf.len(), pt.len()), (5, 1));
+        assert_eq!((df.len(), dt.len()), (3, 0));
+    }
+
+    #[test]
+    fn truncation_respects_the_calibrated_cap() {
+        let _g = isolated();
+        seed_dense();
+        let text = "z".repeat(1000);
+        let out = truncate_to_tokens(&text, 50, "dense");
+        // 50 tokens at twice the heuristic rate buys 100 scalars, not 200.
+        assert_eq!(out.chars().count(), 100);
+        assert!(estimate_tokens_calibrated(&out, "dense") <= 50);
+    }
+
+    #[test]
+    fn truncation_with_empty_model_matches_raw() {
+        let _g = isolated();
+        seed_dense();
+        let text = "z".repeat(1000);
+        let out = truncate_to_tokens(&text, 50, "");
+        assert_eq!(out.chars().count(), 200);
+        assert_eq!(estimate_tokens(&out), 50);
+        assert_eq!(out, truncate_to_tokens(&text, 50, "unseen-model"));
     }
 }

@@ -1,17 +1,16 @@
-//! Attentional focus controller for a single familiar (subsystem 05; Python
-//! `focus.py`).
+//! Attentional focus controller for a single familiar (subsystem 05).
 //!
 //! Two independent focus pointers (text, voice). Focus shifts are model-decided
-//! (via the `shift_focus` tool) and applied immediately at tool-call time — no
-//! deferral (behavior 50; `end_turn` is a no-op). An unread nudge fires when a
-//! non-focused channel receives traffic, throttled by a debounce window with an
-//! injectable clock (DESIGN §4.8).
+//! (via the `shift_focus` tool) and applied immediately at tool-call time —
+//! no deferral (`end_turn` is a no-op). An unread nudge fires when
+//! a non-focused channel receives traffic, throttled by a debounce window with
+//! an injectable clock.
 //!
-//! Per DESIGN port notes the two Python `asyncio.Lock`s collapse into a single
-//! [`std::sync::Mutex`] over the focus state — an acceptable simplification that
-//! also closes the benign cross-modal double-pointer persist race (behavior 49).
-//! `on_shift` is invoked outside the lock. The store dependency is a narrow
-//! [`FocusStore`] trait so tests inject a scripted double.
+//! A single [`std::sync::Mutex`] guards the focus state — this also closes
+//! the
+//! benign cross-modal double-pointer persist race. `on_shift` is
+//! invoked outside the lock. The store dependency is a narrow [`FocusStore`]
+//! trait so tests inject a scripted double.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -36,14 +35,21 @@ const DEFAULT_CATCH_UP_LIMIT: usize = 20;
 /// `guild_names` / `guild_name_for`, so the constant lives here.
 pub const PRIVATE_MESSAGE_GUILD_NAME: &str = "Private Message";
 
+/// Stand-in for a channel missing from `channel_names`.
+///
+/// Always followed by `(id <cid>)`. Says "name unknown" where a bare id would
+/// read as the name (#222). Shared with the final-reminder block so both
+/// surfaces agree.
+pub const UNNAMED_CHANNEL_PREFIX: &str = "unnamed channel";
+
 /// Injectable monotonic clock returning seconds.
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
 /// Presence-refresh hook awaited once after each applied shift.
 pub type OnShift = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
-/// The narrow store seam [`FocusManager`] needs (DESIGN §4.8: tests inject a
-/// scripted double). Implemented for [`AsyncHistoryStore`].
+/// The narrow store seam [`FocusManager`] needs (tests inject a scripted
+/// double). Implemented for [`AsyncHistoryStore`].
 #[async_trait]
 pub trait FocusStore: Send + Sync {
     /// Load the persisted focus pointers row, if any.
@@ -107,7 +113,7 @@ impl FocusStore for AsyncHistoryStore {
     }
 }
 
-/// Interior mutable focus state (single-mutex design; DESIGN port notes).
+/// Interior mutable focus state (single-mutex design).
 struct FocusState {
     text_focus: Option<i64>,
     voice_focus: Option<i64>,
@@ -338,7 +344,7 @@ impl FocusManager {
         }
     }
 
-    /// Whether a non-focused arrival warrants a nudge (behavior 51).
+    /// Whether a non-focused arrival warrants a nudge.
     #[must_use]
     pub fn should_wake(&self, channel_id: i64) -> bool {
         if !self.unread_nudge_enabled {
@@ -359,24 +365,27 @@ impl FocusManager {
         self.state.lock().expect("focus state mutex").last_nudge = now;
     }
 
-    /// Responder end-of-turn hook — intentionally a no-op (behavior 50).
+    /// Responder end-of-turn hook — intentionally a no-op.
     #[allow(
         clippy::unused_async,
         reason = "kept async so both responders can await it uniformly"
     )]
     pub async fn end_turn(&self) {}
 
-    /// Format a channel id as `#name(id)` or `#id` (`"none"` for `None`).
+    /// Format a channel id as `#name(id)`, or `#unnamed(id)` when the name
+    /// cache never learned it (`"none"` for `None`). The `unnamed` marker keeps
+    /// a bare snowflake from reading as the channel's name in logs (#222);
+    /// space-free so the label stays one log token.
     #[must_use]
     pub fn channel_label(&self, channel_id: Option<i64>) -> String {
         channel_id.map_or_else(
             || "none".to_owned(),
             |cid| {
                 let state = self.state.lock().expect("focus state mutex");
-                state
-                    .channel_names
-                    .get(&cid)
-                    .map_or_else(|| format!("#{cid}"), |name| format!("#{name}({cid})"))
+                state.channel_names.get(&cid).map_or_else(
+                    || format!("#unnamed({cid})"),
+                    |name| format!("#{name}({cid})"),
+                )
             },
         )
     }
@@ -401,18 +410,21 @@ impl FocusManager {
         state.guild_names.get(&cid).cloned()
     }
 
-    /// `#channel-name` (or `#<id>`) for the current text focus; `None` when unset.
+    /// `#channel-name` for the current text focus; `None` when unset.
+    ///
+    /// An unknown name renders as [`UNNAMED_CHANNEL_PREFIX`] plus `(id <cid>)`
+    /// rather than a bare snowflake dressed up as a name (#222) — kept short
+    /// because Discord truncates the presence line.
     #[must_use]
     pub fn presence_text(&self) -> Option<String> {
         let state = self.state.lock().expect("focus state mutex");
         let cid = state.text_focus?;
-        let name = state
-            .channel_names
-            .get(&cid)
-            .cloned()
-            .unwrap_or_else(|| cid.to_string());
+        let name = state.channel_names.get(&cid).cloned();
         drop(state);
-        Some(format!("#{name}"))
+        Some(name.map_or_else(
+            || format!("{UNNAMED_CHANNEL_PREFIX} (id {cid})"),
+            |name| format!("#{name}"),
+        ))
     }
 
     /// Seed a focus pointer without deferral, promotion, or persistence (startup).

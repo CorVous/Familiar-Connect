@@ -1,11 +1,11 @@
-//! Discord bot shell (subsystem 10; Python `bot.py`).
+//! Discord bot shell (subsystem 10).
 //!
 //! Owns the gateway client, the subscribe/unsubscribe/diagnostics slash commands,
 //! the `on_message` / reaction / typing / voice-state / ready handlers, the
 //! [`BotHandle`] adapter bus-only processors post back through, and the
 //! `/subscribe-voice` intake pipeline.
 //!
-//! ## Port shape (DESIGN §4.8 + spec 10 "Rust port notes")
+//! ## Shape
 //!
 //! The serenity-independent logic — the [`BotHandle`] policy, image collection,
 //! embed composition, reaction/edit dispatch, the DM disclaimer + ingest
@@ -40,6 +40,7 @@ use crate::sources::discord_embed_text::{EmbedView, format_embeds};
 use crate::sources::discord_text::{PublishText, TextPublisher};
 use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry};
 use crate::typing_interrupt::TypingInterruptHandler;
+use crate::voice_roster::VoiceRoster;
 
 // ---------------------------------------------------------------------------
 // Constants (byte-exact, test-pinned)
@@ -205,8 +206,154 @@ pub struct VoiceStateUpdateView {
     pub guild_id: i64,
     /// The joined channel id (`None` when leaving).
     pub after_channel_id: Option<i64>,
+    /// Whether the member is a bot.
+    pub is_bot: bool,
     /// The resolved author for the member.
     pub author: Author,
+}
+
+/// One occupant of a join-time voice-roster snapshot.
+#[derive(Clone, Debug)]
+pub struct VoiceMemberView {
+    /// The occupant's user id.
+    pub member_id: i64,
+    /// Whether the occupant is a bot.
+    pub is_bot: bool,
+    /// The resolved author for the occupant.
+    pub author: Author,
+}
+
+/// A join-time occupant, before the REST leg.
+#[derive(Clone, Debug)]
+pub struct SeatedMember {
+    /// The occupant's user id — known even when nothing else is.
+    pub member_id: i64,
+    /// `(is_bot, author)` from the gateway cache; `None` owes a REST lookup.
+    pub cached: Option<(bool, Author)>,
+}
+
+impl SeatedMember {
+    /// Cache hit — no REST lookup owed.
+    #[must_use]
+    pub const fn cached(member_id: i64, is_bot: bool, author: Author) -> Self {
+        Self {
+            member_id,
+            cached: Some((is_bot, author)),
+        }
+    }
+
+    /// Cache miss — REST owed.
+    #[must_use]
+    pub const fn unresolved(member_id: i64) -> Self {
+        Self {
+            member_id,
+            cached: None,
+        }
+    }
+}
+
+/// One member read back over REST.
+#[derive(Clone, Debug)]
+pub struct FetchedMember {
+    /// Whether the member is a bot.
+    pub is_bot: bool,
+    /// The resolved author.
+    pub author: Author,
+}
+
+/// Join-time member lookup seam (`GET /guilds/{guild}/members/{user}`).
+///
+/// Injected so tests never open a socket; production wires the serenity HTTP
+/// client. Off the audio path — the per-frame resolver stays cache-only
+/// ([`ResolveMember`]).
+#[async_trait]
+pub trait MemberFetcher: Send + Sync {
+    /// Fetch one guild member, or fail.
+    async fn fetch(&self, guild_id: i64, user_id: i64) -> anyhow::Result<FetchedMember>;
+}
+
+/// Max REST member lookups in flight at once — bounds the burst a busy channel
+/// aims at Discord (serenity's client handles the 429s, but a fan-out of one
+/// request per occupant is still rude).
+pub const ROSTER_FETCH_CONCURRENCY: usize = 4;
+
+/// Wall-clock cap on the whole join-time REST leg. Bounds how long
+/// `/subscribe-voice` waits before starting audio intake; occupants still
+/// unresolved when it expires degrade to id-only.
+pub const ROSTER_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Complete a join-time roster: cache hits pass straight through, cache misses
+/// get one REST lookup each.
+///
+/// Never drops an occupant. A failed, errored, or over-budget lookup degrades
+/// to an id-only [`Author`] — same fallback the voice responder uses — because
+/// losing a known user id to a failed *name* lookup is what made quiet
+/// participants invisible in the first place (N16). Input order is preserved.
+pub async fn resolve_voice_roster(
+    guild_id: i64,
+    seated: Vec<SeatedMember>,
+    fetcher: &dyn MemberFetcher,
+    budget: std::time::Duration,
+) -> Vec<VoiceMemberView> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut slots: Vec<Option<VoiceMemberView>> = Vec::with_capacity(seated.len());
+    let mut pending: Vec<(usize, i64)> = Vec::new();
+    for occupant in seated {
+        if let Some((is_bot, author)) = occupant.cached {
+            slots.push(Some(VoiceMemberView {
+                member_id: occupant.member_id,
+                is_bot,
+                author,
+            }));
+        } else {
+            pending.push((slots.len(), occupant.member_id));
+            slots.push(None);
+        }
+    }
+    // Chunked, not fanned out; every request shares the one deadline, so the
+    // whole leg costs at most `budget` however many chunks remain.
+    for chunk in pending.chunks(ROSTER_FETCH_CONCURRENCY) {
+        let round = futures::future::join_all(chunk.iter().map(|&(idx, user_id)| async move {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let outcome = tokio::time::timeout(left, fetcher.fetch(guild_id, user_id)).await;
+            (idx, user_id, outcome)
+        }))
+        .await;
+        for (idx, user_id, outcome) in round {
+            let (view, failure) = match outcome {
+                Ok(Ok(member)) => (
+                    VoiceMemberView {
+                        member_id: user_id,
+                        is_bot: member.is_bot,
+                        author: member.author,
+                    },
+                    None,
+                ),
+                Ok(Err(err)) => (id_only_member(user_id), Some(err.to_string())),
+                Err(_) => (id_only_member(user_id), Some("over budget".to_owned())),
+            };
+            if let Some(failure) = failure {
+                tracing::warn!(
+                    target: "familiar_connect.bot",
+                    "{} {} {}",
+                    ls::tag("Voice", ls::Y),
+                    ls::kv("member_fetch", &user_id.to_string()),
+                    ls::kv("failed", &failure),
+                );
+            }
+            slots[idx] = Some(view);
+        }
+    }
+    slots.into_iter().flatten().collect()
+}
+
+/// Identity without a name — the degrade path, never a drop.
+fn id_only_member(user_id: i64) -> VoiceMemberView {
+    VoiceMemberView {
+        member_id: user_id,
+        is_bot: false,
+        author: Author::new("discord", user_id.to_string(), None, None),
+    }
 }
 
 /// The `on_ready` snapshot (channel + guild name maps from every guild).
@@ -220,6 +367,18 @@ pub struct ReadyInfo {
     pub guild_names: Vec<(i64, String)>,
 }
 
+/// A guild's naming batch — `GUILD_CREATE`, or a channel / guild rename.
+///
+/// READY carries only unavailable guild stubs, so this is where channel and
+/// server names actually arrive (#222).
+#[derive(Clone, Debug, Default)]
+pub struct GuildInfo {
+    /// Server name; `None` when the gateway cache hasn't got it yet.
+    pub guild_name: Option<String>,
+    /// `(channel_id, channel_name)` for every channel in the batch.
+    pub channels: Vec<(i64, String)>,
+}
+
 // ---------------------------------------------------------------------------
 // Seam traits
 // ---------------------------------------------------------------------------
@@ -228,7 +387,7 @@ pub struct ReadyInfo {
 /// touch.
 ///
 /// Implemented for [`HistoryStore`]; a recorder double stands in for the
-/// "must-not-write" disclaimer tests (DESIGN §4.8).
+/// "must-not-write" disclaimer tests.
 pub trait BotStore: Send + Sync {
     /// Rewrite a stored turn's content by platform message id.
     fn update_turn_content_by_message_id(
@@ -288,11 +447,11 @@ impl BotStore for HistoryStore {
 ///
 /// The serenity gateway handlers (reaction / edit dispatch, B-RX) run on the
 /// reactor; a direct synchronous store write there would block a tokio worker on
-/// the SQLite lock + disk I/O, which DESIGN §4.4 forbids ("DB work stays off the
-/// reactor"). This adapter keeps the cheap subscription / emoji gating inline
+/// the SQLite lock + disk I/O, and DB work must stay off the reactor. This
+/// adapter keeps the cheap subscription / emoji gating inline
 /// (`apply_message_edit` / `apply_reaction_*`) and spawns only the DB write,
-/// honouring spec 10's guidance: "in Rust use the async store, but keep the
-/// no-await-in-gateway-handler spirit by spawning if the write can block."
+/// keeping the no-await-in-gateway-handler property while still using the
+/// async store.
 ///
 /// Writes are fire-and-forget: the enqueue always succeeds (returns `Ok`), and
 /// each spawned task logs its own failure, so the dispatchers' `Err` branch is a
@@ -420,7 +579,7 @@ pub trait PresenceSink: Send + Sync {
 /// A slash-command interaction acknowledgement surface.
 ///
 /// Both methods treat a dead (`NotFound 10062`) interaction as benign — the
-/// action already ran (spec 10 B-SC1/2). A scripted double drives the defer/reply
+/// action already ran. A scripted double drives the defer/reply
 /// guard tests.
 #[async_trait]
 pub trait InteractionAck: Send + Sync {
@@ -575,6 +734,12 @@ fn add_image(
 /// inline image URLs in `content`. Ids assigned `img_0, img_1, …` in discovery
 /// order; deduped by exact URL (first source wins). `[image: img_N (filename)]`
 /// markers are appended one-per-line after the content.
+///
+/// The inline source is attacker-controlled — anyone in the channel picks the
+/// host. Registration is deliberately unfiltered; the scheme / allowlist /
+/// private-address gate lives at the fetch boundary
+/// ([`tools::image_policy`](crate::tools::image_policy)) so every source is
+/// covered by one check.
 #[must_use]
 pub fn collect_images(
     content: &str,
@@ -815,7 +980,7 @@ pub type ResolveMember = Arc<dyn Fn(i64, i64) -> Option<Author> + Send + Sync>;
 
 /// Bot + outbound seams for bus processors.
 ///
-/// The closures the Python dataclass stored (`send_text`, `trigger_typing`,
+/// The outbound closures (`send_text`, `trigger_typing`,
 /// `resolve_member`) become trait objects; the mutable side caches
 /// (`voice_members`, the late-set `activity_engine`, and — under `discord-voice`
 /// — `voice_runtime`) sit behind mutexes so many tasks can touch them.
@@ -830,15 +995,18 @@ pub struct BotHandle {
     pub focus_manager: Option<Arc<FocusManager>>,
     /// The bot presence surface.
     pub presence: Arc<dyn PresenceSink>,
-    /// Voice-only member side cache (`user_id -> Author`).
-    pub voice_members: Mutex<HashMap<i64, Author>>,
+    /// Live voice-call roster: membership + the decaying join/leave log the
+    /// prompt layer renders. Shared `Arc` — the ungated
+    /// [`VoiceRosterLayer`](crate::context::VoiceRosterLayer) reads the same
+    /// state this module writes, so the two can never drift.
+    pub voice_members: Arc<VoiceRoster>,
     /// Voice-turn member resolver consumed by the voice responder (06).
     pub resolve_member: Mutex<Option<ResolveMember>>,
     /// Absence controller (11); `on_ready` resyncs away presence via it.
     pub activity_engine: Mutex<Option<Arc<dyn ActivityResync>>>,
     /// Per-voice-channel intake pipeline state (voice feature only). A
     /// `BTreeMap` (not `HashMap`) so the TTS voice-client getter's
-    /// `.values().next()` is deterministic + stable (Python `_first_voice_client`).
+    /// `.values.next` is deterministic + stable.
     #[cfg(feature = "discord-voice")]
     pub voice_runtime:
         Mutex<std::collections::BTreeMap<i64, crate::bot::voice_intake::VoiceRuntime>>,
@@ -858,7 +1026,7 @@ impl BotHandle {
             typing_interrupt: None,
             focus_manager: None,
             presence,
-            voice_members: Mutex::new(HashMap::new()),
+            voice_members: Arc::new(VoiceRoster::new()),
             resolve_member: Mutex::new(None),
             activity_engine: Mutex::new(None),
             #[cfg(feature = "discord-voice")]
@@ -899,32 +1067,23 @@ impl BotHandle {
     /// Resolve a voice member from the side cache alone (no I/O).
     #[must_use]
     pub fn voice_member_cached(&self, user_id: i64) -> Option<Author> {
-        self.voice_members
-            .lock()
-            .expect("voice members mutex poisoned")
-            .get(&user_id)
-            .cloned()
+        self.voice_members.member(user_id)
     }
 
-    /// Every cached voice member's proper nouns — `all_known_names()` (display /
-    /// username / aliases) plus the per-guild nickname — for STT keyterm biasing
-    /// (#198). Returned raw (with duplicates); the transcriber's `set_keyterms`
-    /// merges these with the config keyterms and normalizes/dedupes/caps. All
-    /// current members are enumerated so a name one speaker utters biases every
+    /// The call's spoken vocabulary for STT keyterm biasing (#198): the
+    /// familiar's own configured names, every cached voice member's proper nouns
+    /// (`all_known_names()` — display / username / aliases — plus the per-guild
+    /// nickname), and every seated bot's.
+    ///
+    /// A *vocabulary* read, not a roster read: the roster filter drops the
+    /// familiar and sibling bots, which are the most-uttered proper nouns in the
+    /// room. Returned raw (with duplicates); the transcriber's `set_keyterms`
+    /// merges these behind the config keyterms and normalizes/dedupes/caps.
+    /// Everyone is enumerated so a name one speaker utters biases every
     /// speaker's independent stream.
     #[must_use]
     pub fn voice_member_keyterms(&self) -> Vec<String> {
-        self.voice_members
-            .lock()
-            .expect("voice members mutex poisoned")
-            .values()
-            .flat_map(|author| {
-                author
-                    .all_known_names()
-                    .into_iter()
-                    .chain(author.guild_nick.clone())
-            })
-            .collect()
+        self.voice_members.keyterms()
     }
 }
 
@@ -1029,13 +1188,41 @@ impl BotEvents {
         }
     }
 
+    /// Record display names for one channel. Without this the focus caches stay
+    /// empty for that channel and every label degrades to its raw id (#222).
+    /// Empty / absent names leave the cache untouched.
+    fn record_channel_naming(
+        &self,
+        channel_id: i64,
+        channel_name: Option<&str>,
+        guild_name: Option<&str>,
+    ) {
+        let Some(fm) = &self.handle.focus_manager else {
+            return;
+        };
+        if let Some(name) = channel_name.filter(|n| !n.is_empty()) {
+            fm.set_channel_name(channel_id, name);
+        }
+        if let Some(name) = guild_name.filter(|n| !n.is_empty()) {
+            fm.set_guild_name(channel_id, name);
+        }
+    }
+
     /// `/subscribe-text` registry mutation, returning the ack to reply with.
+    /// `channel_name` / `guild_name` come from the interaction + gateway cache
+    /// and seed the focus name caches.
     ///
     /// Refuses inside a DM (`guild_id` is `None`): the command is global, so it
     /// is invocable in a DM, where `add()` would replace the persisted DM row
     /// and wipe its `dm_user_id`. DM subscriptions are managed by the allowlist
     /// alone.
-    pub fn on_subscribe_text(&self, channel_id: i64, guild_id: Option<i64>) -> &'static str {
+    pub fn on_subscribe_text(
+        &self,
+        channel_id: i64,
+        guild_id: Option<i64>,
+        channel_name: Option<&str>,
+        guild_name: Option<&str>,
+    ) -> &'static str {
         if guild_id.is_none() {
             return "DM subscriptions are managed automatically via the DM \
                     allowlist — no need to subscribe here.";
@@ -1053,6 +1240,7 @@ impl BotEvents {
                 guild_id.and_then(|g| u64::try_from(g).ok()),
                 None,
             );
+        self.record_channel_naming(channel_id, channel_name, guild_name);
         "Listening in this channel."
     }
 
@@ -1060,12 +1248,18 @@ impl BotEvents {
     /// songbird join + intake pipeline is layered on by the `discord-voice` glue
     /// in [`create_bot`]'s dispatcher).
     ///
-    /// Registers a persisted voice subscription and marks the channel active in
-    /// the `voice_channels` proxy the activity engine's `voice_active_fn` reads.
-    /// The focus manager sees the new subscription immediately through the
-    /// shared registry (no restart), matching Python's single-registry
-    /// semantics.
-    pub fn on_subscribe_voice(&self, channel_id: i64, guild_id: Option<i64>) {
+    /// Registers a persisted voice subscription, records its display names, and
+    /// marks the channel active in the `voice_channels` proxy the activity
+    /// engine's `voice_active_fn` reads. The focus manager sees the new
+    /// subscription immediately through the shared registry (no restart).
+    pub fn on_subscribe_voice(
+        &self,
+        channel_id: i64,
+        guild_id: Option<i64>,
+        channel_name: Option<&str>,
+        guild_name: Option<&str>,
+    ) {
+        self.record_channel_naming(channel_id, channel_name, guild_name);
         if let Ok(cid) = u64::try_from(channel_id) {
             let _ = self
                 .subscriptions
@@ -1108,6 +1302,10 @@ impl BotEvents {
             .lock()
             .expect("voice channels mutex poisoned")
             .remove(&channel_id);
+        // Leaving drops the roster: a stale one would bias the next call's STT
+        // keyterms toward people who aren't there (N17), and the prompt would
+        // still describe a call that ended.
+        self.handle.voice_members.clear();
         Some(channel_id)
     }
 
@@ -1215,31 +1413,72 @@ impl BotEvents {
         }
     }
 
-    /// `on_voice_state_update` (B-EV23): cache voice-only members joining the
+    /// Join-time roster snapshot (B-EV23b): replace the voice-member cache with
+    /// the channel's current occupants.
+    ///
+    /// `on_voice_state_update` only ever sees *changes*, so without this
+    /// everyone already seated when the familiar joined stays unresolvable for
+    /// the whole session — anonymous turns, no STT keyterms (N16). Replaces
+    /// rather than merges: a re-join must not inherit the last call's roster.
+    ///
+    /// Two passes over one list: humans seat the roster, bots only stock the
+    /// keyterm vocabulary. Both replace wholesale and neither depends on the
+    /// other's order.
+    pub fn on_voice_roster(&self, members: Vec<VoiceMemberView>) {
+        let own = self.bot_user_id();
+        let (bots, humans): (Vec<_>, Vec<_>) = members
+            .into_iter()
+            .filter(|m| own != Some(m.member_id))
+            .partition(|m| m.is_bot);
+        // Seeding narrates nothing: nobody "just joined" — the familiar did.
+        self.handle
+            .voice_members
+            .snapshot(humans.into_iter().map(|m| (m.member_id, m.author)));
+        // Sibling familiars get said constantly; the familiar's own names come
+        // from config, not from its Discord account.
+        self.handle
+            .voice_members
+            .snapshot_bots(bots.into_iter().map(|m| (m.member_id, m.author)));
+    }
+
+    /// `on_voice_state_update` (B-EV23): track voice-only members of the
     /// subscribed voice channel.
+    ///
+    /// Adds on a join, drops on a leave or a move out (N17), narrating both.
+    /// Removal is keyed by member id alone, so an update from elsewhere in the
+    /// guild needs no before-channel: the member simply isn't in the roster. A
+    /// repeat update for a seated member (mute / deafen / camera) is not
+    /// re-narrated. A bot lands in the keyterm-only set instead — biased, never
+    /// seated, never narrated.
     pub fn on_voice_state_update(&self, ev: VoiceStateUpdateView) {
         if self.bot_user_id() == Some(ev.member_id) {
             return;
         }
-        let Some(after_channel) = ev.after_channel_id else {
-            return;
-        };
-        let matches = u64::try_from(ev.guild_id).ok().and_then(|g| {
+        let Some(sub) = u64::try_from(ev.guild_id).ok().and_then(|g| {
             self.subscriptions
                 .lock()
                 .expect("subscriptions mutex poisoned")
                 .voice_in_guild(g)
-        });
-        let matches = matches
-            .is_some_and(|sub| u64::try_from(after_channel).is_ok_and(|c| sub.channel_id == c));
-        if !matches {
+        }) else {
             return;
+        };
+        let joined_ours = ev
+            .after_channel_id
+            .is_some_and(|c| u64::try_from(c).is_ok_and(|c| sub.channel_id == c));
+        if joined_ours {
+            if ev.is_bot {
+                // Keyterms only — never the roster line.
+                self.handle
+                    .voice_members
+                    .bot_joined(ev.member_id, ev.author);
+            } else {
+                self.handle
+                    .voice_members
+                    .member_joined(ev.member_id, ev.author);
+            }
+        } else {
+            self.handle.voice_members.member_left(ev.member_id);
         }
-        self.handle
-            .voice_members
-            .lock()
-            .expect("voice members mutex poisoned")
-            .insert(ev.member_id, ev.author);
     }
 
     /// `on_ready` (B-PR24): set the bot user id, bulk-populate focus name caches,
@@ -1267,6 +1506,12 @@ impl BotEvents {
             }));
             sync_presence(fm, self.handle.presence.as_ref()).await;
         }
+        self.resync_activity_presence().await;
+    }
+
+    /// Let an in-flight activity re-assert its away presence over the online
+    /// focus presence (B-PR24 ordering); idle ⇒ no-op.
+    async fn resync_activity_presence(&self) {
         let engine = self
             .handle
             .activity_engine
@@ -1275,6 +1520,37 @@ impl BotEvents {
             .clone();
         if let Some(engine) = engine {
             engine.resync_presence().await;
+        }
+    }
+
+    /// Naming batch from `GUILD_CREATE`, `CHANNEL_UPDATE`, or `GUILD_UPDATE`.
+    ///
+    /// The real population path for the focus name caches: READY lists guilds
+    /// as unavailable stubs, so full channel data arrives here (#222). Also
+    /// covers joining a guild and mid-session renames (N14).
+    ///
+    /// Presence is captured before and after the batch and re-synced only when
+    /// the focused channel's rendered label moved — one update per batch, since
+    /// Discord rate-limits presence. An in-flight activity re-asserts its away
+    /// presence afterwards, same ordering as `on_ready`.
+    pub async fn on_guild_available(&self, info: GuildInfo) {
+        let Some(fm) = &self.handle.focus_manager else {
+            return;
+        };
+        let before = (fm.presence_guild(), fm.presence_text());
+        for (cid, name) in &info.channels {
+            self.record_channel_naming(*cid, Some(name), info.guild_name.as_deref());
+        }
+        tracing::debug!(
+            target: "familiar_connect.bot",
+            "{} {} {}",
+            ls::tag("Focus", ls::LC),
+            ls::kv("guild", info.guild_name.as_deref().unwrap_or("unknown")),
+            ls::kv("named", &info.channels.len().to_string()),
+        );
+        if (fm.presence_guild(), fm.presence_text()) != before {
+            sync_presence(fm, self.handle.presence.as_ref()).await;
+            self.resync_activity_presence().await;
         }
     }
 
@@ -1391,15 +1667,17 @@ mod serenity_glue {
     use serenity::all::{
         ActivityData, Attachment, ChannelId, Client, Command, Context, CreateAllowedMentions,
         CreateCommand, CreateInteractionResponseFollowup, CreateMessage, Embed, EventHandler,
-        GatewayIntents, Interaction, Message, MessageId, MessageUpdateEvent, OnlineStatus,
-        Reaction, ReactionType, Ready, TypingStartEvent, User, VoiceState,
+        GatewayIntents, Guild, GuildChannel, Interaction, Member, Message, MessageId,
+        MessageUpdateEvent, OnlineStatus, PartialGuild, Reaction, ReactionType, Ready,
+        TypingStartEvent, User, VoiceState,
     };
 
     use super::{
-        AttachmentView, BotEvents, BotHandle, BotStore, ChannelSender, EmojiView, InteractionAck,
-        InteractionGone, MentionView, MessageEditView, MessageView, Presence, PresenceSink,
-        PresenceStatus, ReactionClearPayloadView, ReactionPayloadView, ReadyInfo, ResolveMember,
-        SentMessage, TypingEventView, VoiceStateUpdateView, defer_interaction, reply,
+        AttachmentView, BotEvents, BotHandle, BotStore, ChannelSender, EmojiView, GuildInfo,
+        InteractionAck, InteractionGone, MentionView, MessageEditView, MessageView, Presence,
+        PresenceSink, PresenceStatus, ReactionClearPayloadView, ReactionPayloadView, ReadyInfo,
+        ResolveMember, SentMessage, TypingEventView, VoiceStateUpdateView, defer_interaction,
+        reply,
     };
     use crate::diagnostics::collector::get_span_collector;
     use crate::diagnostics::report::render_summary_table;
@@ -1410,6 +1688,7 @@ mod serenity_glue {
     use crate::sources::discord_embed_text::{EmbedFieldView, EmbedImageView, EmbedView};
     use crate::sources::discord_text::DiscordTextSource;
     use crate::subscriptions::SubscriptionKind;
+    use crate::voice_roster::VoiceRoster;
 
     // -- view builders ---------------------------------------------------
 
@@ -1424,6 +1703,37 @@ mod serenity_glue {
             Some(user.name.clone()),
             Some(display),
         )
+    }
+
+    /// [`author_from_user`] plus the per-guild nickname (an STT keyterm, #198).
+    fn author_from_member(member: &Member) -> Author {
+        let mut author = author_from_user(&member.user);
+        author.guild_nick.clone_from(&member.nick);
+        author
+    }
+
+    /// Production [`MemberFetcher`](super::MemberFetcher): one REST
+    /// `GET /guilds/{guild}/members/{user}`. Passing the bare `Http` (not the
+    /// `Context`) as the `CacheHttp` makes `GuildId::member` skip its cache
+    /// branch — the caller already missed — and go straight to the wire;
+    /// serenity's client owns the rate-limit bookkeeping.
+    #[cfg(feature = "discord-voice")]
+    struct HttpMemberFetcher {
+        http: Arc<serenity::http::Http>,
+    }
+
+    #[cfg(feature = "discord-voice")]
+    #[async_trait]
+    impl super::MemberFetcher for HttpMemberFetcher {
+        async fn fetch(&self, guild_id: i64, user_id: i64) -> anyhow::Result<super::FetchedMember> {
+            let gid = serenity::all::GuildId::new(u64::try_from(guild_id)?);
+            let uid = serenity::all::UserId::new(u64::try_from(user_id)?);
+            let member = gid.member(&self.http, uid).await?;
+            Ok(super::FetchedMember {
+                is_bot: member.user.bot,
+                author: author_from_member(&member),
+            })
+        }
     }
 
     fn attachment_view(att: &Attachment) -> AttachmentView {
@@ -1717,6 +2027,17 @@ mod serenity_glue {
             let name = command.data.name.clone();
             let guild_id = command.guild_id.map(|g| g.get() as i64);
             let channel_id = command.channel_id.get() as i64;
+            // Naming for a channel `on_ready` never saw (created post-boot):
+            // the interaction carries the channel object, the gateway cache the
+            // server name — neither costs a REST call.
+            let channel_name = command
+                .channel
+                .as_ref()
+                .and_then(|ch| ch.name.clone())
+                .filter(|n| !n.is_empty());
+            let guild_name = command
+                .guild_id
+                .and_then(|gid| ctx.cache.guild(gid).map(|g| g.name.clone()));
             let ack = SlashCtx {
                 command,
                 http: ctx.http.clone(),
@@ -1724,7 +2045,16 @@ mod serenity_glue {
             match name.as_str() {
                 "subscribe-text" => {
                     defer_interaction(&ack).await;
-                    reply(&ack, self.events.on_subscribe_text(channel_id, guild_id)).await;
+                    reply(
+                        &ack,
+                        self.events.on_subscribe_text(
+                            channel_id,
+                            guild_id,
+                            channel_name.as_deref(),
+                            guild_name.as_deref(),
+                        ),
+                    )
+                    .await;
                 }
                 "unsubscribe-text" => {
                     defer_interaction(&ack).await;
@@ -1788,10 +2118,123 @@ mod serenity_glue {
             line
         }
 
+        /// The caller's live voice channel as `(id, channel name, server name)`,
+        /// read from the gateway cache (GUILD_VOICE_STATES). The dashmap ref is
+        /// dropped before any await.
+        #[cfg(feature = "discord-voice")]
+        fn resolve_voice_target(
+            ctx: &Context,
+            gid: serenity::all::GuildId,
+            user_id: serenity::all::UserId,
+        ) -> Option<(u64, Option<String>, String)> {
+            ctx.cache.guild(gid).and_then(|guild| {
+                let cid = guild
+                    .voice_states
+                    .get(&user_id)
+                    .and_then(|vs| vs.channel_id)?;
+                let name = guild.channels.get(&cid).map(|ch| ch.name.clone());
+                Some((cid.get(), name, guild.name.clone()))
+            })
+        }
+
+        /// Live voice-member proper nouns for per-user STT keyterm biasing
+        /// (#198). A weak ref avoids keeping the handle alive past shutdown; a
+        /// dead handle yields no names.
+        #[cfg(feature = "discord-voice")]
+        fn keyterm_provider(&self) -> crate::bot::voice_intake::NameProvider {
+            let weak = Arc::downgrade(&self.slash.handle);
+            Arc::new(move || {
+                weak.upgrade()
+                    .map_or_else(Vec::new, |h| h.voice_member_keyterms())
+            })
+        }
+
+        /// Seed the voice-member roster with the channel's current occupants:
+        /// gateway cache first (GUILD_VOICE_STATES), one REST member lookup for
+        /// whoever the cache cannot name.
+        ///
+        /// Voice-state updates only report *changes*, so without this snapshot
+        /// every member present before the join stays unresolvable (N16). A
+        /// participant who just sits quietly misses all three cache lookups —
+        /// `VoiceState::member` is not always populated, `Guild::members` is
+        /// sparse without `GUILD_MEMBERS`, and the user cache only knows people
+        /// who *did* something — so cache-only resolution dropped exactly the
+        /// people the prompt most needs to see. REST fills that gap; the intent
+        /// gates gateway delivery, not `GET /guilds/{guild}/members/{user}`.
+        /// This is a join-time path, not the audio path, so the no-REST rule
+        /// (B-VM29) does not apply — the lookups are bounded by
+        /// [`ROSTER_FETCH_CONCURRENCY`](super::ROSTER_FETCH_CONCURRENCY) and
+        /// [`ROSTER_FETCH_BUDGET`](super::ROSTER_FETCH_BUDGET). No audio is at
+        /// risk while it resolves: `join_voice` registered the receivers and
+        /// its tick channel is unbounded, so packets buffer until intake starts.
+        #[cfg(feature = "discord-voice")]
+        async fn snapshot_voice_roster(
+            &self,
+            ctx: &Context,
+            gid: serenity::all::GuildId,
+            channel_id: ChannelId,
+        ) {
+            let seated = Self::seated_from_cache(ctx, gid, channel_id);
+            let fetcher = HttpMemberFetcher {
+                http: ctx.http.clone(),
+            };
+            let members = super::resolve_voice_roster(
+                gid.get() as i64,
+                seated,
+                &fetcher,
+                super::ROSTER_FETCH_BUDGET,
+            )
+            .await;
+            self.events.on_voice_roster(members);
+        }
+
+        /// Cache leg of the join-time roster read. Fully owned output: both the
+        /// dashmap `GuildRef` and the user-cache guard are dropped before the
+        /// caller awaits anything — a cache guard held across an await is worse
+        /// than the miss it would paper over.
+        #[cfg(feature = "discord-voice")]
+        fn seated_from_cache(
+            ctx: &Context,
+            gid: serenity::all::GuildId,
+            channel_id: ChannelId,
+        ) -> Vec<super::SeatedMember> {
+            let seated: Vec<(u64, Option<Member>)> =
+                ctx.cache.guild(gid).map_or_else(Vec::new, |guild| {
+                    guild
+                        .voice_states
+                        .iter()
+                        .filter(|(_, vs)| vs.channel_id == Some(channel_id))
+                        .map(|(uid, vs)| {
+                            let member = vs
+                                .member
+                                .clone()
+                                .or_else(|| guild.members.get(uid).cloned());
+                            (uid.get(), member)
+                        })
+                        .collect()
+                });
+            seated
+                .into_iter()
+                .map(|(uid, member)| {
+                    let cached = if let Some(m) = member {
+                        Some((m.user.bot, author_from_member(&m)))
+                    } else {
+                        ctx.cache
+                            .user(uid)
+                            .map(|user| (user.bot, author_from_user(&user)))
+                    };
+                    super::SeatedMember {
+                        member_id: uid as i64,
+                        cached,
+                    }
+                })
+                .collect()
+        }
+
         /// `/subscribe-voice`: join the caller's voice channel via songbird
         /// (songbird owns the DAVE/MLS handshake), wire the [`RecordingSink`] +
         /// per-speaker intake pipeline, populate the `voice_runtime` map, and
-        /// register the voice subscription (Python `bot.py::subscribe_voice`).
+        /// register the voice subscription.
         ///
         /// [`RecordingSink`]: crate::voice::recording_sink::RecordingSink
         #[cfg(feature = "discord-voice")]
@@ -1806,23 +2249,26 @@ mod serenity_glue {
             };
             let guild_id_u64 = gid.get();
             let guild_id = guild_id_u64 as i64;
-            let user_id = ack.command.user.id;
-            // Resolve the caller's current voice channel from the gateway cache
-            // (GUILD_VOICE_STATES). The dashmap ref is dropped before any await.
-            let resolved: Option<(u64, Option<String>)> = ctx.cache.guild(gid).and_then(|guild| {
-                let cid = guild
-                    .voice_states
-                    .get(&user_id)
-                    .and_then(|vs| vs.channel_id)?;
-                let name = guild.channels.get(&cid).map(|ch| ch.name.clone());
-                Some((cid.get(), name))
-            });
-            let Some((channel_id_u64, channel_name)) = resolved else {
+            let Some((channel_id_u64, channel_name, guild_name)) =
+                Self::resolve_voice_target(ctx, gid, ack.command.user.id)
+            else {
                 reply(ack, "You must be in a voice channel.").await;
                 return;
             };
             let channel_id = channel_id_u64 as i64;
-            let display = channel_name.unwrap_or_else(|| format!("#{channel_id}"));
+            let display = channel_name
+                .clone()
+                .unwrap_or_else(|| format!("#{channel_id}"));
+            // Every exit that keeps the subscription registers it with the
+            // names resolved above (#222).
+            let subscribe = || {
+                self.events.on_subscribe_voice(
+                    channel_id,
+                    Some(guild_id),
+                    channel_name.as_deref(),
+                    Some(&guild_name),
+                );
+            };
 
             // Idempotent: a second subscribe for the same live channel re-affirms.
             if self
@@ -1833,7 +2279,7 @@ mod serenity_glue {
                 .expect("voice_runtime mutex poisoned")
                 .contains_key(&channel_id)
             {
-                self.events.on_subscribe_voice(channel_id, Some(guild_id));
+                subscribe();
                 reply(ack, &format!("Already listening in {display}.")).await;
                 return;
             }
@@ -1852,18 +2298,12 @@ mod serenity_glue {
                     }
                 };
 
+            self.snapshot_voice_roster(ctx, gid, ChannelId::new(channel_id_u64))
+                .await;
+
             let template = self.slash.transcriber_template.clone();
             let has_transcriber = template.is_some();
-            // Feed live voice-member proper nouns to each per-user transcriber
-            // clone as STT keyterm biases (#198). A weak ref avoids keeping the
-            // handle alive past shutdown; a dead handle yields no names.
-            let handle_weak = Arc::downgrade(&self.slash.handle);
-            let name_provider: Option<crate::bot::voice_intake::NameProvider> =
-                Some(Arc::new(move || {
-                    handle_weak
-                        .upgrade()
-                        .map_or_else(Vec::new, |h| h.voice_member_keyterms())
-                }));
+            let name_provider = Some(self.keyterm_provider());
             let runtime = start_voice_intake(
                 voice_client,
                 template,
@@ -1877,8 +2317,7 @@ mod serenity_glue {
             // Re-check under the lock before inserting: `join_voice` awaited
             // above, so a concurrent `/subscribe-voice` for this same channel
             // could have won the race and already inserted. Keep the
-            // first-joined runtime (Python's idempotent `subscribe_voice`
-            // intent, bot.py:262) and tear down the one we just built rather
+            // first-joined runtime and tear down the one we just built rather
             // than overwriting — a bare `insert` would drop the live runtime
             // without `stop_voice_intake`, orphaning its intake tasks (which
             // would keep publishing transcripts) and leaking the songbird call.
@@ -1900,11 +2339,11 @@ mod serenity_glue {
                 // Loser of the race: stop only our intake tasks. Do NOT leave
                 // the songbird call — it is shared per-guild with the winner.
                 stop_voice_intake(orphan).await;
-                self.events.on_subscribe_voice(channel_id, Some(guild_id));
+                subscribe();
                 reply(ack, &format!("Already listening in {display}.")).await;
                 return;
             }
-            self.events.on_subscribe_voice(channel_id, Some(guild_id));
+            subscribe();
 
             let suffix = if has_transcriber {
                 ""
@@ -1917,7 +2356,7 @@ mod serenity_glue {
         /// `/unsubscribe-voice`: tear down the intake pipeline (cancel the
         /// router / source / per-speaker pumps + fan-ins, close the
         /// transcribers), leave the songbird call, and drop the voice
-        /// subscription (Python `bot.py::unsubscribe_voice`).
+        /// subscription.
         #[cfg(feature = "discord-voice")]
         async fn dispatch_unsubscribe_voice(&self, ctx: &Context, ack: &SlashCtx) {
             use crate::bot::voice_intake::stop_voice_intake;
@@ -1954,16 +2393,24 @@ mod serenity_glue {
     impl EventHandler for Handler {
         async fn ready(&self, ctx: Context, ready: Ready) {
             *self.presence.ctx.lock().expect("presence ctx mutex") = Some(ctx.clone());
+            // Warm-cache snapshot only. READY carries guilds as unavailable
+            // stubs and serenity's cache update drops them before dispatch, so
+            // on a cold start this yields nothing; `guild_create` is the real
+            // population path (#222). Sourced from the cache rather than
+            // `ready.guilds` so a retained guild is still picked up here.
             let mut channel_names = Vec::new();
             let mut guild_names = Vec::new();
-            for guild in &ready.guilds {
-                if let Some(channels) = ctx.cache.guild(guild.id).map(|g| g.channels.clone()) {
-                    for (cid, ch) in channels {
-                        channel_names.push((cid.get() as i64, ch.name.clone()));
-                        if let Some(name) = ctx.cache.guild(guild.id).map(|g| g.name.clone()) {
-                            guild_names.push((cid.get() as i64, name));
-                        }
-                    }
+            for gid in ctx.cache.guilds() {
+                let Some((guild_name, channels)) = ctx
+                    .cache
+                    .guild(gid)
+                    .map(|g| (g.name.clone(), g.channels.clone()))
+                else {
+                    continue;
+                };
+                for (cid, ch) in channels {
+                    channel_names.push((cid.get() as i64, ch.name));
+                    guild_names.push((cid.get() as i64, guild_name.clone()));
                 }
             }
             // Register the slash commands (best-effort).
@@ -1999,6 +2446,61 @@ mod serenity_glue {
                     user_id: ready.user.id.get() as i64,
                     channel_names,
                     guild_names,
+                })
+                .await;
+        }
+
+        /// Full guild data (channel list + server name) — the burst that
+        /// follows READY, and a mid-session guild join. The only place the
+        /// gateway hands over channel names on a cold start (#222).
+        async fn guild_create(&self, _ctx: Context, guild: Guild, _is_new: Option<bool>) {
+            let channels = guild
+                .channels
+                .into_iter()
+                .map(|(cid, ch)| (cid.get() as i64, ch.name))
+                .collect();
+            self.events
+                .on_guild_available(GuildInfo {
+                    guild_name: Some(guild.name),
+                    channels,
+                })
+                .await;
+        }
+
+        /// Channel rename (N14) — server name comes from the cache.
+        async fn channel_update(
+            &self,
+            ctx: Context,
+            _old: Option<GuildChannel>,
+            new: GuildChannel,
+        ) {
+            let guild_name = ctx.cache.guild(new.guild_id).map(|g| g.name.clone());
+            self.events
+                .on_guild_available(GuildInfo {
+                    guild_name,
+                    channels: vec![(new.id.get() as i64, new.name)],
+                })
+                .await;
+        }
+
+        /// Server rename (N14). `PartialGuild` has no channel list, so the
+        /// guild's channels come from the cache to re-key the guild names.
+        async fn guild_update(
+            &self,
+            ctx: Context,
+            _old_data_if_available: Option<Guild>,
+            new_data: PartialGuild,
+        ) {
+            let channels = ctx.cache.guild(new_data.id).map_or_else(Vec::new, |g| {
+                g.channels
+                    .iter()
+                    .map(|(cid, ch)| (cid.get() as i64, ch.name.clone()))
+                    .collect()
+            });
+            self.events
+                .on_guild_available(GuildInfo {
+                    guild_name: Some(new_data.name),
+                    channels,
                 })
                 .await;
         }
@@ -2101,8 +2603,8 @@ mod serenity_glue {
         async fn typing_start(&self, ctx: Context, event: TypingStartEvent) {
             // Discord attaches the full `Member` (carrying the user's `bot`
             // flag) on guild typing events; prefer it so the bot flag is read
-            // reliably (Python `on_typing` reads `user.bot` directly). Fall back
-            // to the user cache for DM typing, then to non-bot when uncached.
+            // reliably. Fall back to the user cache for DM typing, then to
+            // non-bot when uncached.
             let is_bot = event.member.as_ref().map_or_else(
                 || ctx.cache.user(event.user_id).is_some_and(|u| u.bot),
                 |m| m.user.bot,
@@ -2116,7 +2618,7 @@ mod serenity_glue {
 
         async fn voice_state_update(
             &self,
-            _ctx: Context,
+            ctx: Context,
             _old: Option<VoiceState>,
             new: VoiceState,
         ) {
@@ -2125,12 +2627,17 @@ mod serenity_glue {
             };
             let author = new.member.as_ref().map_or_else(
                 || Author::new("discord", new.user_id.get().to_string(), None, None),
-                |m| author_from_user(&m.user),
+                author_from_member,
+            );
+            let is_bot = new.member.as_ref().map_or_else(
+                || ctx.cache.user(new.user_id).is_some_and(|u| u.bot),
+                |m| m.user.bot,
             );
             self.events.on_voice_state_update(VoiceStateUpdateView {
                 member_id: new.user_id.get() as i64,
                 guild_id: guild_id.get() as i64,
                 after_channel_id: new.channel_id.map(|c| c.get() as i64),
+                is_bot,
                 author,
             });
         }
@@ -2164,6 +2671,9 @@ mod serenity_glue {
         pub bus: Arc<dyn crate::bus::protocols::EventBus>,
         /// The attentional focus controller.
         pub focus_manager: Option<Arc<FocusManager>>,
+        /// The live-call roster the prompt layer reads (carries the configured
+        /// event-decay window).
+        pub voice_roster: Arc<VoiceRoster>,
         /// The turn router the typing-interrupt policy cancels active turns on.
         pub router: Arc<crate::bus::router::TurnRouter>,
         /// `[discord.text]` config driving the typing-interrupt policy (the
@@ -2177,7 +2687,7 @@ mod serenity_glue {
         pub local_turn_detector: Option<Arc<crate::voice::turn_detection::LocalTurnDetector>>,
     }
 
-    /// Build the gateway client + [`BotHandle`], mirroring Python `create_bot`.
+    /// Build the gateway client + [`BotHandle`].
     ///
     /// Pure construction — no login. The caller drives `client.start()`.
     ///
@@ -2194,8 +2704,9 @@ mod serenity_glue {
         let mut handle = BotHandle::new(send_text, presence.clone());
         handle.trigger_typing = Some(trigger_typing);
         handle.focus_manager = deps.focus_manager.clone();
+        handle.voice_members = deps.voice_roster.clone();
         // Typing-interrupt policy: cancel the active turn when a real user types,
-        // back off when another bot types (Python `bot.py` constructs it here and
+        // back off when another bot types (constructed here and
         // stores it on the handle; the text responder + `on_typing` consume it).
         let typing_subs = deps.subscriptions.clone();
         let is_subscribed: crate::typing_interrupt::IsSubscribed = Arc::new(move |ch: i64| {
@@ -2289,7 +2800,7 @@ mod serenity_glue {
 // ---------------------------------------------------------------------------
 //
 // The router → per-user-pump → transcriber-clone → fan-in → VoiceSource topology
-// (spec 10 B-VI34-41) is serenity-free: it drains the `(user_id, mono_pcm)`
+// is serenity-free: it drains the `(user_id, mono_pcm)`
 // channel the landed [`RecordingSink`](crate::voice::recording_sink) fills.
 // Songbird owns only the voice connection + DAVE/MLS; the `VoiceTick` receiver
 // converts songbird's decoded per-SSRC audio into a landed `VoiceTick` and hands
@@ -2318,21 +2829,21 @@ pub mod voice_intake {
     use crate::voice::recording_sink::{AudioChunk, RecordingSink, SsrcResolver, VoiceTick};
     use crate::voice::turn_detection::{LocalTurnDetector, UtteranceEndpointer};
 
-    /// Idle-finalize gap (s) before a forced `finalize` when no local endpointer
-    /// owns endpointing (Python `stt.deepgram.DEFAULT_IDLE_FINALIZE_S`).
+    /// Idle-finalize gap (s) before a forced `finalize` when no local
+    /// endpointer owns endpointing.
     pub const DEFAULT_IDLE_FINALIZE_S: f64 = 0.5;
 
     /// A per-user transcriber clone, shared between its pump and teardown.
     type SharedTranscriber = Arc<AsyncMutex<Box<dyn Transcriber>>>;
-    /// The template, cloned per user (Python `familiar.transcriber`).
+    /// The template, cloned per user.
     type Template = Arc<Mutex<Box<dyn Transcriber>>>;
     /// Yields the current voice-channel member proper nouns to bias STT keyterms
     /// on each per-user transcriber clone (#198). Called on the audio path just
     /// before `start`, so it must not block (a cache read).
     pub type NameProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
-    /// Per-voice-channel intake state (Python `VoiceRuntime`), all per-user maps
-    /// keyed by Discord user id.
+    /// Per-voice-channel intake state, all per-user maps keyed by Discord user
+    /// id.
     #[derive(Default)]
     struct IntakeState {
         transcribers: HashMap<u64, SharedTranscriber>,
@@ -2592,6 +3103,10 @@ pub mod voice_intake {
     /// With no transcriber configured the returned runtime is **playback-only**
     /// (B-VI31): it carries the `voice_client` (so TTS still plays out) but
     /// spawns no intake tasks. The `template` is cloned per user on first audio.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "wiring seam: 8 independent collaborators, no natural grouping"
+    )]
     pub fn start_voice_intake(
         voice_client: Arc<dyn VoiceClientLike>,
         template: Option<Template>,
@@ -2811,14 +3326,50 @@ pub mod voice_intake {
         }
     }
 
+    /// Register the `VoiceTick` + `SpeakingStateUpdate` handlers on `call`.
+    ///
+    /// **Must run before the connect resolves.** `add_global_event` only
+    /// enqueues an `AddEvent` control message; songbird's events task drains
+    /// control and fired events in strict arrival order and never replays for
+    /// late registrants. `SpeakingStateUpdate` (op-5) is effectively one-shot
+    /// per user per session, so any Speaking event that fires during the
+    /// WS+UDP+crypto handshake reaches zero handlers and is lost permanently —
+    /// leaving every SSRC unmapped and every transcript anonymous (#199, #205).
+    /// Needs no live connection: the driver's tasks start with the `Call`.
+    ///
+    /// Clears prior global handlers first — the `Call` is per-guild and
+    /// outlives a channel hop, so a rejoin would otherwise stack receivers
+    /// feeding dead audio channels. Track events (`TrackEvent::End`) are
+    /// per-track and unaffected.
+    pub fn register_receivers(
+        call: &mut songbird::Call,
+        sink: &Arc<RecordingSink>,
+        ssrc_map: &Arc<SsrcMap>,
+    ) {
+        call.remove_all_global_events();
+        call.add_global_event(
+            songbird::CoreEvent::VoiceTick.into(),
+            TickReceiver::new(sink.clone(), ssrc_map.clone()),
+        );
+        call.add_global_event(
+            songbird::CoreEvent::SpeakingStateUpdate.into(),
+            TickReceiver::new(sink.clone(), ssrc_map.clone()),
+        );
+    }
+
     /// Join `channel_id` in `guild_id` via songbird (songbird owns the DAVE/MLS
     /// handshake) and wire the [`RecordingSink`] to its `VoiceTick` stream.
+    ///
+    /// Uses songbird's two-stage join rather than `Songbird::join` so
+    /// [`register_receivers`] runs before stage 1 sends the gateway request —
+    /// `Songbird::join` only hands back the `Call` once the handshake has
+    /// completed, by which point Speaking events are already lost.
     ///
     /// Returns the live voice client (for TTS playback) and the sink's audio
     /// channel receiver — the caller passes both to [`start_voice_intake`].
     ///
     /// # Errors
-    /// Propagates a songbird join failure.
+    /// Propagates a songbird join failure from either stage.
     pub async fn join_voice(
         manager: &songbird::Songbird,
         guild_id: u64,
@@ -2831,21 +3382,18 @@ pub mod voice_intake {
         let cid = songbird::id::ChannelId(
             std::num::NonZeroU64::new(channel_id).unwrap_or(std::num::NonZeroU64::MIN),
         );
-        let call_lock = manager.join(gid, cid).await?;
         let (audio_tx, audio_rx) = unbounded_channel();
         let sink = Arc::new(RecordingSink::new(audio_tx));
         let ssrc_map = Arc::new(SsrcMap::default());
-        {
+        let call_lock = manager.get_or_insert(gid);
+        let stage_2 = {
             let mut call = call_lock.lock().await;
-            call.add_global_event(
-                songbird::CoreEvent::VoiceTick.into(),
-                TickReceiver::new(sink.clone(), ssrc_map.clone()),
-            );
-            call.add_global_event(
-                songbird::CoreEvent::SpeakingStateUpdate.into(),
-                TickReceiver::new(sink, ssrc_map),
-            );
-        }
+            register_receivers(&mut call, &sink, &ssrc_map);
+            call.join(cid).await?
+        };
+        // Stage 2 awaits the driver's connection attempt and must not hold the
+        // `Call` mutex — songbird deadlocks otherwise.
+        stage_2.await?;
         let voice_client: Arc<dyn VoiceClientLike> = Arc::new(SongbirdVoiceClient::new(call_lock));
         Ok((voice_client, audio_rx))
     }
@@ -2854,12 +3402,13 @@ pub mod voice_intake {
 
     /// [`VoiceClientLike`] adapter over a songbird [`Call`](songbird::Call).
     ///
-    /// Bridges the synchronous 4-method player surface (DESIGN §4.8) onto
-    /// songbird's async call + [`TrackHandle`](songbird::tracks::TrackHandle):
+    /// Bridges the synchronous 4-method player surface onto songbird's async
+    /// call + [`TrackHandle`](songbird::tracks::TrackHandle):
     /// [`DiscordVoicePlayer`](crate::tts_player::DiscordVoicePlayer) hands us
     /// Discord-format stereo s16le @ 48 kHz PCM, which we convert to the
-    /// interleaved `f32` stream songbird's [`RawAdapter`](songbird::input::RawAdapter)
-    /// consumes. `is_playing` is tracked by an atomic flipped false by a
+    /// interleaved `f32` stream songbird's
+    /// [`RawAdapter`](songbird::input::RawAdapter) consumes. `is_playing` is
+    /// tracked by an atomic flipped false by a
     /// [`TrackEvent::End`](songbird::TrackEvent::End) handler.
     struct SongbirdVoiceClient {
         call: Arc<AsyncMutex<songbird::Call>>,
@@ -3026,6 +3575,60 @@ pub mod voice_intake {
             None
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{RecordingSink, SsrcMap, SsrcResolver, TickReceiver, register_receivers};
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+
+        fn speaking(ssrc: u32, user_id: u64) -> songbird::model::payload::Speaking {
+            songbird::model::payload::Speaking {
+                delay: Some(0),
+                speaking: songbird::model::SpeakingState::MICROPHONE,
+                ssrc,
+                user_id: Some(songbird::model::id::UserId(user_id)),
+            }
+        }
+
+        /// A Speaking event arriving before any tick must be recorded — that is
+        /// the whole point of registering handlers pre-connect (#199).
+        #[tokio::test]
+        async fn speaking_before_any_tick_is_recorded() {
+            use songbird::EventHandler as _;
+
+            let (audio_tx, _audio_rx) = unbounded_channel();
+            let sink = Arc::new(RecordingSink::new(audio_tx));
+            let ssrc_map = Arc::new(SsrcMap::default());
+            let receiver = TickReceiver::new(sink, ssrc_map.clone());
+
+            assert_eq!(ssrc_map.user_id(4242), None);
+            receiver
+                .act(&songbird::EventContext::SpeakingStateUpdate(speaking(
+                    4242, 99,
+                )))
+                .await;
+            assert_eq!(ssrc_map.user_id(4242), Some(99));
+        }
+
+        /// Handler registration must not need a live connection: `join_voice`
+        /// registers on a freshly inserted `Call` before stage 1 runs.
+        #[tokio::test]
+        async fn receivers_register_without_a_connection() {
+            let mut call = songbird::Call::standalone(
+                songbird::id::GuildId(std::num::NonZeroU64::new(1).expect("nonzero")),
+                songbird::id::UserId(std::num::NonZeroU64::new(2).expect("nonzero")),
+            );
+            assert!(call.current_connection().is_none());
+
+            let (audio_tx, _audio_rx) = unbounded_channel();
+            let sink = Arc::new(RecordingSink::new(audio_tx));
+            let ssrc_map = Arc::new(SsrcMap::default());
+            register_receivers(&mut call, &sink, &ssrc_map);
+
+            assert!(call.current_connection().is_none());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3037,11 +3640,13 @@ pub mod voice_intake {
 mod tests {
     use super::{
         Author, BotEvents, BotHandle, DM_BOT_DISCLAIMER, DM_BOT_DISCLAIMER_DELETE_EMOJI,
-        DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, InteractionAck, InteractionGone,
-        MentionView, MessageEditView, MessageView, Presence, PresenceSink, PresenceStatus,
-        ReactionPayloadView, ReadyInfo, SentMessage, TypingEventView, apply_message_edit,
-        apply_reaction_clear, apply_reaction_delta, build_activity_presence_cb, collect_images,
-        compose_content_with_embeds, defer_interaction, emoji_repr, message_pings_bot, reply,
+        DM_BOT_DISCLAIMER_DISMISS_HINT, EmbedView, EmojiView, FetchedMember, GuildInfo,
+        InteractionAck, InteractionGone, MemberFetcher, MentionView, MessageEditView, MessageView,
+        Presence, PresenceSink, PresenceStatus, ROSTER_FETCH_CONCURRENCY, ReactionPayloadView,
+        ReadyInfo, SeatedMember, SentMessage, TypingEventView, VoiceMemberView,
+        VoiceStateUpdateView, apply_message_edit, apply_reaction_clear, apply_reaction_delta,
+        build_activity_presence_cb, collect_images, compose_content_with_embeds, defer_interaction,
+        emoji_repr, message_pings_bot, reply, resolve_voice_roster,
     };
     use crate::bot::{ActivityResync, ChannelSender};
     use crate::focus::{FocusManager, FocusStore};
@@ -3051,6 +3656,7 @@ mod tests {
     use crate::sources::discord_embed_text::{EmbedFieldView, EmbedImageView};
     use crate::sources::discord_text::{PublishText, TextPublisher};
     use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry};
+    use crate::voice_roster::RosterEventKind;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3746,6 +4352,160 @@ mod tests {
         assert_eq!(calls[0].status, PresenceStatus::Online);
     }
 
+    // --- guild_create naming + presence resync (#222, N14) -----------------
+
+    /// Events + focus manager + presence recorder, no engine, presence ready.
+    fn naming_fixture() -> (Arc<BotEvents>, Arc<FocusManager>, Arc<RecordingPresence>) {
+        let presence = Arc::new(RecordingPresence::default());
+        presence.ready.store(true, Ordering::SeqCst);
+        let fm = focus_manager();
+        let handle = Arc::new(
+            BotHandle::new(
+                Arc::new(NoopSendText),
+                presence.clone() as Arc<dyn PresenceSink>,
+            )
+            .with_focus_manager(Arc::clone(&fm)),
+        );
+        let events = Arc::new(BotEvents::new(
+            "fam",
+            Arc::new(Mutex::new(Some(99))),
+            empty_subs_mut(),
+            vec![],
+            Arc::new(RecordingStore::default()),
+            Arc::new(RecordingPublisher::default()),
+            handle,
+        ));
+        (events, fm, presence)
+    }
+
+    fn guild_info(guild: &str, channels: &[(i64, &str)]) -> GuildInfo {
+        GuildInfo {
+            guild_name: Some(guild.to_owned()),
+            channels: channels
+                .iter()
+                .map(|(cid, name)| (*cid, (*name).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn guild_create_names_channels_focused_before_names_arrive() {
+        // Real ordering: focus is seeded at boot from subscriptions, GUILD_CREATE
+        // lands after. Presence must stop reading `unnamed channel (id N)`.
+        let (events, fm, _presence) = naming_fixture();
+        fm.set_focus_immediately(1_221_605_022_102_458_421, "text");
+        assert_eq!(
+            fm.presence_text().as_deref(),
+            Some("unnamed channel (id 1221605022102458421)")
+        );
+        events
+            .on_guild_available(guild_info(
+                "Aetheria",
+                &[(1_221_605_022_102_458_421, "the-annex"), (7, "general")],
+            ))
+            .await;
+        assert_eq!(fm.presence_text().as_deref(), Some("#the-annex"));
+        assert_eq!(fm.presence_guild().as_deref(), Some("Aetheria"));
+        assert_eq!(fm.channel_label(Some(7)), "#general(7)");
+    }
+
+    #[tokio::test]
+    async fn guild_create_resyncs_presence_for_the_focused_channel() {
+        let (events, fm, presence) = naming_fixture();
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        let calls = presence.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].activity_state.as_deref(),
+            Some("\u{2728} Aetheria -> #general")
+        );
+    }
+
+    #[tokio::test]
+    async fn naming_batch_missing_the_focused_channel_skips_presence() {
+        // Presence updates are rate-limited: one resync per batch, and only
+        // when the focused channel's rendered label actually moved.
+        let (events, fm, presence) = naming_fixture();
+        fm.set_channel_name(5, "general");
+        fm.set_guild_name(5, "Aetheria");
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Other", &[(9, "elsewhere")]))
+            .await;
+        assert!(presence.calls.lock().unwrap().is_empty());
+        // Re-announcing identical names is not a change either.
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        assert!(presence.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_updates_cache_and_presence() {
+        let (events, fm, presence) = naming_fixture();
+        fm.set_channel_name(5, "general");
+        fm.set_guild_name(5, "Aetheria");
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "the-annex")]))
+            .await;
+        assert_eq!(fm.channel_label(Some(5)), "#the-annex(5)");
+        let calls = presence.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].activity_state.as_deref(),
+            Some("\u{2728} Aetheria -> #the-annex")
+        );
+    }
+
+    #[tokio::test]
+    async fn guild_rename_updates_presence_server_name() {
+        let (events, fm, presence) = naming_fixture();
+        fm.set_channel_name(5, "general");
+        fm.set_guild_name(5, "Old Name");
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        assert_eq!(fm.guild_name_for(Some(5)).as_deref(), Some("Aetheria"));
+        assert_eq!(presence.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn naming_batch_mid_activity_ends_with_away_presence() {
+        // Same B-PR24 ordering as on_ready: the online focus presence must not
+        // clobber an in-flight activity's away presence.
+        let (events, fm, presence) = naming_fixture();
+        events.handle.set_activity_engine(Arc::new(AwayResync {
+            presence: presence.clone() as Arc<dyn PresenceSink>,
+        }));
+        fm.set_focus_immediately(5, "text");
+        events
+            .on_guild_available(guild_info("Aetheria", &[(5, "general")]))
+            .await;
+        let calls = presence.calls.lock().unwrap();
+        assert_eq!(calls.first().unwrap().status, PresenceStatus::Online);
+        assert_eq!(calls.last().unwrap().status, PresenceStatus::Dnd);
+    }
+
+    #[tokio::test]
+    async fn naming_batch_without_a_guild_name_keeps_the_cached_one() {
+        // channel_update with a cold guild cache carries no server name.
+        let (events, fm, _presence) = naming_fixture();
+        fm.set_guild_name(5, "Aetheria");
+        events
+            .on_guild_available(GuildInfo {
+                guild_name: None,
+                channels: vec![(5, "the-annex".to_owned())],
+            })
+            .await;
+        assert_eq!(fm.guild_name_for(Some(5)).as_deref(), Some("Aetheria"));
+        assert_eq!(fm.channel_label(Some(5)), "#the-annex(5)");
+    }
+
     // --- on_message DM allowlist + disclaimer + reactions (B-OM/B-RX) ------
 
     #[derive(Default)]
@@ -3928,11 +4688,8 @@ mod tests {
             Some("blue".into()),
             Some("BlueSheep".into()),
         );
-        {
-            let mut members = handle.voice_members.lock().expect("voice members");
-            members.insert(1, ada);
-            members.insert(2, blue);
-        }
+        handle.voice_members.member_joined(1, ada);
+        handle.voice_members.member_joined(2, blue);
         let mut got = handle.voice_member_keyterms();
         got.sort();
         // all_known_names() (display / username / aliases) ∪ guild_nick for both
@@ -3991,7 +4748,7 @@ mod tests {
     fn subscribe_text_in_dm_refuses_and_leaves_registry_untouched() {
         let fx = dm_fixture(vec![]);
         // Global command, so invocable in a DM (guild_id None).
-        let msg = fx.events.on_subscribe_text(555, None);
+        let msg = fx.events.on_subscribe_text(555, None, None, None);
         assert!(msg.contains("allowlist"));
         assert!(
             fx.subs
@@ -4014,7 +4771,7 @@ mod tests {
             .unwrap()
             .add(555, SubscriptionKind::Text, None, Some(123))
             .unwrap();
-        let _ = fx.events.on_subscribe_text(555, None);
+        let _ = fx.events.on_subscribe_text(555, None, None, None);
         let reloaded = SubscriptionRegistry::new(&fx.subs_path).unwrap();
         let sub = reloaded.get(555, SubscriptionKind::Text).unwrap();
         assert_eq!(sub.dm_user_id, Some(123));
@@ -4023,7 +4780,7 @@ mod tests {
     #[test]
     fn subscribe_text_in_guild_adds_row() {
         let fx = dm_fixture(vec![]);
-        let msg = fx.events.on_subscribe_text(888, Some(7));
+        let msg = fx.events.on_subscribe_text(888, Some(7), None, None);
         assert_eq!(msg, "Listening in this channel.");
         let sub = fx
             .subs
@@ -4032,6 +4789,53 @@ mod tests {
             .get(888, SubscriptionKind::Text)
             .unwrap();
         assert_eq!(sub.guild_id, Some(7));
+    }
+
+    // --- /subscribe-text runtime naming (#222) -----------------------------
+
+    #[test]
+    fn subscribe_text_records_channel_and_guild_names() {
+        // A channel created after boot is absent from the `on_ready` snapshot;
+        // the interaction's own names are the only chance to label it.
+        let fx = dm_fixture(vec![]);
+        let _ = fx
+            .events
+            .on_subscribe_text(888, Some(7), Some("the-annex"), Some("Aetheria"));
+        assert_eq!(fx.fm.channel_label(Some(888)), "#the-annex(888)");
+        assert_eq!(fx.fm.guild_name_for(Some(888)).as_deref(), Some("Aetheria"));
+    }
+
+    #[test]
+    fn subscribe_text_presence_never_shows_a_bare_snowflake() {
+        let fx = dm_fixture(vec![]);
+        let _ = fx.events.on_subscribe_text(
+            1_221_605_022_102_458_421,
+            Some(7),
+            Some("the-annex"),
+            Some("Aetheria"),
+        );
+        fx.fm
+            .set_focus_immediately(1_221_605_022_102_458_421, "text");
+        assert_eq!(fx.fm.presence_text().as_deref(), Some("#the-annex"));
+    }
+
+    #[test]
+    fn subscribe_text_without_names_leaves_caches_unset() {
+        let fx = dm_fixture(vec![]);
+        let _ = fx.events.on_subscribe_text(888, Some(7), None, Some(""));
+        assert!(fx.fm.channel_names().is_empty());
+        assert!(fx.fm.guild_names().is_empty());
+    }
+
+    #[test]
+    fn subscribe_text_in_dm_records_no_naming() {
+        // The DM refusal path never touches the registry — nor the caches.
+        let fx = dm_fixture(vec![]);
+        let _ = fx
+            .events
+            .on_subscribe_text(555, None, Some("nope"), Some("nope"));
+        assert!(fx.fm.channel_names().is_empty());
+        assert!(fx.fm.guild_names().is_empty());
     }
 
     #[tokio::test]
@@ -4400,7 +5204,7 @@ mod tests {
         assert_eq!(f.name.as_deref(), Some("k"));
     }
 
-    // --- composition-root wiring seams (parity-audit §3a/§3b + spec 10) -----
+    // --- composition-root wiring seams -------------------------------------
 
     fn wiring_events(subs: Arc<Mutex<SubscriptionRegistry>>, handle: Arc<BotHandle>) -> BotEvents {
         BotEvents::new(
@@ -4534,11 +5338,11 @@ mod tests {
         let events = wiring_events(subs, handle);
 
         assert!(!fm.is_subscribed(555));
-        events.on_subscribe_voice(555, Some(7));
+        events.on_subscribe_voice(555, Some(7), None, None);
         assert!(fm.is_subscribed(555));
     }
 
-    // spec 10 §B — `/subscribe-voice` registers a persisted voice row and marks
+    // `/subscribe-voice` registers a persisted voice row and marks
     // the channel active in the `voice_channels` proxy the activity engine reads.
     #[test]
     fn subscribe_voice_registers_and_marks_active() {
@@ -4546,13 +5350,404 @@ mod tests {
         let handle = wiring_handle();
         let events = wiring_events(subs.clone(), handle.clone());
 
-        events.on_subscribe_voice(555, Some(7));
+        events.on_subscribe_voice(555, Some(7), None, None);
         let row = subs.lock().unwrap().get(555, SubscriptionKind::Voice);
         assert_eq!(row.map(|s| s.guild_id), Some(Some(7)));
         assert!(handle.voice_channels.lock().unwrap().contains(&555));
     }
 
-    // spec 10 §B — `/unsubscribe-voice` finds the guild's voice sub, removes it,
+    // `/subscribe-voice` names the channel it just joined (#222) — a voice
+    // channel created after boot is missing from the `on_ready` snapshot.
+    #[test]
+    fn subscribe_voice_records_channel_and_guild_names() {
+        let subs = empty_subs_mut();
+        let subs_view: Arc<dyn crate::subscriptions::SubscriptionView> = subs.clone();
+        let fm = Arc::new(FocusManager::new(
+            "fam",
+            Arc::new(NullFocusStore),
+            subs_view,
+        ));
+        let handle = Arc::new(wiring_handle_inner().with_focus_manager(fm.clone()));
+        let events = wiring_events(subs, handle);
+
+        events.on_subscribe_voice(555, Some(7), Some("Lounge"), Some("Aetheria"));
+        assert_eq!(fm.channel_label(Some(555)), "#Lounge(555)");
+        assert_eq!(fm.guild_name_for(Some(555)).as_deref(), Some("Aetheria"));
+    }
+
+    // ---- voice-member roster (N16 / N17) ----
+
+    fn voice_author(id: i64, name: &str) -> Author {
+        Author::new(
+            "discord",
+            id.to_string(),
+            Some(name.to_lowercase()),
+            Some(name.to_owned()),
+        )
+    }
+
+    /// Roster membership, join order (the labels the prompt layer renders).
+    fn roster_labels(handle: &BotHandle) -> Vec<String> {
+        handle.voice_members.view().members
+    }
+
+    fn roster_event_kinds(handle: &BotHandle) -> Vec<RosterEventKind> {
+        handle
+            .voice_members
+            .view()
+            .events
+            .iter()
+            .map(|e| e.kind)
+            .collect()
+    }
+
+    fn voice_state(member_id: i64, after: Option<i64>, is_bot: bool) -> VoiceStateUpdateView {
+        VoiceStateUpdateView {
+            member_id,
+            guild_id: 7,
+            after_channel_id: after,
+            is_bot,
+            author: voice_author(member_id, &format!("User{member_id}")),
+        }
+    }
+
+    // The bot only ever saw voice-state *changes*, so anyone already seated
+    // when it joined stayed invisible all session (N16).
+    #[test]
+    fn voice_roster_snapshot_seeds_cache_and_skips_bots_and_self() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+
+        events.on_voice_roster(vec![
+            VoiceMemberView {
+                member_id: 1,
+                is_bot: false,
+                author: voice_author(1, "Ada"),
+            },
+            VoiceMemberView {
+                member_id: 2,
+                is_bot: true,
+                author: voice_author(2, "OtherBot"),
+            },
+            // `wiring_events` runs as user 999.
+            VoiceMemberView {
+                member_id: 999,
+                is_bot: true,
+                author: voice_author(999, "Self"),
+            },
+        ]);
+
+        assert_eq!(roster_labels(&handle), vec!["Ada".to_owned()]);
+        assert!(handle.voice_member_keyterms().contains(&"Ada".to_owned()));
+        // The familiar joined a call in progress — nobody "just joined".
+        assert!(handle.voice_members.view().events.is_empty());
+    }
+
+    // Bots are vocabulary, not company: a sibling familiar sharing the guild is
+    // said constantly, so its name must bias STT — without ever reaching the
+    // "In the call: …" line.
+    #[test]
+    fn voice_roster_snapshot_biases_bots_without_seating_them() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+
+        events.on_voice_roster(vec![
+            VoiceMemberView {
+                member_id: 1,
+                is_bot: false,
+                author: voice_author(1, "Ada"),
+            },
+            VoiceMemberView {
+                member_id: 2,
+                is_bot: true,
+                author: voice_author(2, "Sapphire"),
+            },
+        ]);
+
+        assert_eq!(roster_labels(&handle), vec!["Ada".to_owned()]);
+        let terms = handle.voice_member_keyterms();
+        assert!(terms.contains(&"Sapphire".to_owned()), "got {terms:?}");
+        assert!(terms.contains(&"Ada".to_owned()));
+
+        // A re-join with no bots present clears the last call's bots.
+        events.on_voice_roster(vec![VoiceMemberView {
+            member_id: 1,
+            is_bot: false,
+            author: voice_author(1, "Ada"),
+        }]);
+        assert!(
+            !handle
+                .voice_member_keyterms()
+                .contains(&"Sapphire".to_owned()),
+            "a stale bot would bias the next call"
+        );
+    }
+
+    // A re-join replaces the roster rather than merging into a stale one.
+    #[test]
+    fn voice_roster_snapshot_replaces_previous_roster() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        handle
+            .voice_members
+            .member_joined(5, voice_author(5, "Gone"));
+
+        events.on_voice_roster(vec![VoiceMemberView {
+            member_id: 1,
+            is_bot: false,
+            author: voice_author(1, "Ada"),
+        }]);
+
+        assert_eq!(roster_labels(&handle), vec!["Ada".to_owned()]);
+    }
+
+    // ---- join-time REST member resolution (quiet-participant gap) ----
+
+    /// Scripted [`MemberFetcher`]: known ids resolve, unknown ids error, and
+    /// every call is recorded (so a cache hit that fetches anyway is a failure).
+    struct FakeMemberFetcher {
+        known: HashMap<i64, (bool, String)>,
+        calls: Mutex<Vec<i64>>,
+        stall_ms: u64,
+        in_flight: AtomicUsize,
+        peak_in_flight: AtomicUsize,
+    }
+
+    impl FakeMemberFetcher {
+        fn new(known: &[(i64, bool, &str)]) -> Self {
+            Self {
+                known: known
+                    .iter()
+                    .map(|(id, bot, name)| (*id, (*bot, (*name).to_owned())))
+                    .collect(),
+                calls: Mutex::new(Vec::new()),
+                stall_ms: 0,
+                in_flight: AtomicUsize::new(0),
+                peak_in_flight: AtomicUsize::new(0),
+            }
+        }
+
+        const fn stalling(mut self, ms: u64) -> Self {
+            self.stall_ms = ms;
+            self
+        }
+
+        fn calls(&self) -> Vec<i64> {
+            self.calls.lock().expect("calls mutex").clone()
+        }
+    }
+
+    #[async_trait]
+    impl MemberFetcher for FakeMemberFetcher {
+        async fn fetch(&self, _guild_id: i64, user_id: i64) -> anyhow::Result<FetchedMember> {
+            self.calls.lock().expect("calls mutex").push(user_id);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+            if self.stall_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.stall_ms)).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let (is_bot, name) = self
+                .known
+                .get(&user_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown member"))?;
+            Ok(FetchedMember {
+                is_bot,
+                author: voice_author(user_id, &name),
+            })
+        }
+    }
+
+    const fn budget() -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
+
+    // A participant who never speaks or types misses `VoiceState::member`,
+    // the sparse `Guild::members` map, and the user cache alike — one REST
+    // lookup is the only way to learn their name.
+    #[tokio::test]
+    async fn voice_roster_rest_resolves_cache_missed_member() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[(1, false, "Quiet")]);
+
+        let members =
+            resolve_voice_roster(7, vec![SeatedMember::unresolved(1)], &fetcher, budget()).await;
+        events.on_voice_roster(members);
+
+        assert_eq!(roster_labels(&handle), vec!["Quiet".to_owned()]);
+        assert_eq!(fetcher.calls(), vec![1]);
+    }
+
+    // A failed name lookup must not cost the identity — that regression made
+    // every unresolved speaker fuse into one anonymous voice (N16).
+    #[tokio::test]
+    async fn voice_roster_rest_failure_degrades_to_id_only() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[]);
+
+        let members =
+            resolve_voice_roster(7, vec![SeatedMember::unresolved(42)], &fetcher, budget()).await;
+        events.on_voice_roster(members);
+
+        assert_eq!(roster_labels(&handle), vec!["42".to_owned()]);
+    }
+
+    // Same for a lookup that outruns the budget: id-only, never dropped.
+    #[tokio::test]
+    async fn voice_roster_rest_over_budget_degrades_to_id_only() {
+        let fetcher = FakeMemberFetcher::new(&[(42, false, "Slow")]).stalling(10_000);
+
+        let members = resolve_voice_roster(
+            7,
+            vec![SeatedMember::unresolved(42)],
+            &fetcher,
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].author.label(), "42");
+        assert!(!members[0].is_bot);
+    }
+
+    // Bot-ness comes back with the REST member, so a bot the cache never saw
+    // still stays out of the roster.
+    #[tokio::test]
+    async fn voice_roster_rest_resolved_bot_is_excluded() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[(2, true, "MusicBot")]);
+
+        let members = resolve_voice_roster(
+            7,
+            vec![SeatedMember::unresolved(1), SeatedMember::unresolved(2)],
+            &fetcher,
+            budget(),
+        )
+        .await;
+        assert!(members.iter().any(|m| m.member_id == 2 && m.is_bot));
+        events.on_voice_roster(members);
+
+        assert_eq!(roster_labels(&handle), vec!["1".to_owned()]);
+    }
+
+    // Cache hits owe no request — the REST leg is the exception, not the path.
+    #[tokio::test]
+    async fn voice_roster_cache_hits_make_no_rest_call() {
+        let fetcher = FakeMemberFetcher::new(&[(1, false, "Wrong")]);
+        let seated = vec![SeatedMember::cached(1, false, voice_author(1, "Ada"))];
+
+        let members = resolve_voice_roster(7, seated, &fetcher, budget()).await;
+
+        assert!(fetcher.calls().is_empty());
+        assert_eq!(members[0].author.label(), "Ada");
+    }
+
+    // Nobody in the channel may be missing from the roster, whatever mix of
+    // cache hit / REST hit / REST failure produced it. Order is the input order.
+    #[tokio::test]
+    async fn voice_roster_mixed_resolution_keeps_everyone() {
+        let handle = wiring_handle();
+        let events = wiring_events(empty_subs_mut(), handle.clone());
+        let fetcher = FakeMemberFetcher::new(&[(2, false, "Quiet")]);
+        let seated = vec![
+            SeatedMember::cached(1, false, voice_author(1, "Ada")),
+            SeatedMember::unresolved(2),
+            SeatedMember::unresolved(3),
+        ];
+
+        let members = resolve_voice_roster(7, seated, &fetcher, budget()).await;
+        assert_eq!(
+            members.iter().map(|m| m.member_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        events.on_voice_roster(members);
+
+        assert_eq!(
+            roster_labels(&handle),
+            vec!["Ada".to_owned(), "Quiet".to_owned(), "3".to_owned()]
+        );
+    }
+
+    // A crowded channel must not fan out one request per occupant at once.
+    #[tokio::test]
+    async fn voice_roster_rest_fan_out_is_bounded() {
+        let seated: Vec<SeatedMember> = (1..=9).map(SeatedMember::unresolved).collect();
+        let fetcher = FakeMemberFetcher::new(&[]).stalling(5);
+
+        let members = resolve_voice_roster(7, seated, &fetcher, budget()).await;
+
+        assert_eq!(members.len(), 9);
+        assert!(fetcher.peak_in_flight.load(Ordering::SeqCst) <= ROSTER_FETCH_CONCURRENCY);
+    }
+
+    // Insert on join, remove on leave / move away — the map used to only grow
+    // (N17). Keyterms follow the roster.
+    #[test]
+    fn voice_state_updates_add_and_remove_roster_members() {
+        let subs = empty_subs_mut();
+        let handle = wiring_handle();
+        let events = wiring_events(subs, handle.clone());
+        events.on_subscribe_voice(555, Some(7), None, None);
+
+        // Joins the subscribed channel.
+        events.on_voice_state_update(voice_state(1, Some(555), false));
+        assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
+
+        // A bot joining stays out of the line but keeps biasing keyterms.
+        events.on_voice_state_update(voice_state(2, Some(555), true));
+        // The familiar itself stays out.
+        events.on_voice_state_update(voice_state(999, Some(555), false));
+        assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
+        assert!(handle.voice_member_keyterms().contains(&"User2".to_owned()));
+
+        // Moves to another channel in the guild.
+        events.on_voice_state_update(voice_state(1, Some(556), false));
+        assert!(roster_labels(&handle).is_empty());
+        assert!(!handle.voice_member_keyterms().contains(&"User1".to_owned()));
+
+        // The bot moving away drops its keyterms too.
+        events.on_voice_state_update(voice_state(2, Some(556), true));
+        assert!(handle.voice_member_keyterms().is_empty());
+
+        // Moves back in, then disconnects entirely.
+        events.on_voice_state_update(voice_state(1, Some(555), false));
+        assert_eq!(roster_labels(&handle), vec!["User1".to_owned()]);
+        events.on_voice_state_update(voice_state(1, None, false));
+        assert!(roster_labels(&handle).is_empty());
+
+        // Every transition the prompt layer narrates — the excluded bot and
+        // the familiar's own update contribute nothing.
+        assert_eq!(
+            roster_event_kinds(&handle),
+            vec![
+                RosterEventKind::Joined,
+                RosterEventKind::Left,
+                RosterEventKind::Joined,
+                RosterEventKind::Left,
+            ]
+        );
+    }
+
+    // Leaving voice drops the whole roster; a stale one would keep feeding
+    // STT keyterms for the next call.
+    #[test]
+    fn unsubscribe_voice_clears_roster() {
+        let subs = empty_subs_mut();
+        let handle = wiring_handle();
+        let events = wiring_events(subs, handle.clone());
+        events.on_subscribe_voice(555, Some(7), None, None);
+        events.on_voice_state_update(voice_state(1, Some(555), false));
+
+        assert_eq!(events.on_unsubscribe_voice(7), Some(555));
+        assert!(roster_labels(&handle).is_empty());
+        assert!(handle.voice_members.view().events.is_empty());
+    }
+
+    // `/unsubscribe-voice` finds the guild's voice sub, removes it,
     // clears the proxy, and returns the channel id for pipeline teardown.
     #[test]
     fn unsubscribe_voice_removes_and_returns_channel() {
@@ -4560,7 +5755,7 @@ mod tests {
         let handle = wiring_handle();
         let events = wiring_events(subs.clone(), handle.clone());
 
-        events.on_subscribe_voice(555, Some(7));
+        events.on_subscribe_voice(555, Some(7), None, None);
         assert_eq!(events.on_unsubscribe_voice(7), Some(555));
         assert!(
             subs.lock()

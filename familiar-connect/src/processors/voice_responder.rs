@@ -1,4 +1,4 @@
-//! Voice reply orchestrator (subsystem 06; Python `processors/voice_responder.py`).
+//! Voice reply orchestrator (subsystem 06).
 //!
 //! Consumes `voice.activity.start` + `voice.transcript.final`, produces an LLM
 //! reply and speaks it through the injected [`TtsPlayer`]. The dispatcher hands
@@ -21,6 +21,7 @@ use crate::bus::topics::{TOPIC_VOICE_ACTIVITY_START, TOPIC_VOICE_TRANSCRIPT_FINA
 use crate::context::assembler::{Assembler, AssemblyContext};
 use crate::context::final_reminder::FinalReminder;
 use crate::diagnostics::cold_cache::log_signals;
+use crate::diagnostics::llm_mirror::{CallContext, with_call_context};
 use crate::diagnostics::voice_budget::{
     PHASE_LLM_FIRST_TOKEN, PHASE_TTS_FIRST_AUDIO, get_voice_budget_recorder,
 };
@@ -35,13 +36,14 @@ use crate::processors::{
 };
 use crate::sentence_streamer::SentenceStreamer;
 use crate::silence::{StreamDecision, StreamGate};
+use crate::support::text::is_speakable;
 use crate::tools::agentic::{
-    AgenticHooks, agentic_loop, guard_leaked_content, tool_content_as_text,
+    AgenticHooks, agentic_loop, calls_opt_into_speech, guard_leaked_content, tool_content_as_text,
 };
 use crate::tools::registry::ToolRegistry;
 use crate::tts_player::protocol::TtsPlayer;
 
-// Cold-cache signal thresholds (Python `log_signals` defaults).
+// Cold-cache signal thresholds.
 const TOPIC_SHIFT_THRESHOLD: f64 = 0.15;
 const TOPIC_SHIFT_MIN_TOKENS: usize = 4;
 const SILENCE_GAP_THRESHOLD_S: f64 = 300.0;
@@ -80,6 +82,8 @@ struct VoiceInner {
     tool_filler_phrases: Vec<String>,
     tool_filler_idx: AtomicUsize,
     post_history_instructions: String,
+    mode_instructions: HashMap<String, String>,
+    voice_tool_ack: String,
     display_tz: String,
     focus_manager: Option<Arc<dyn FocusManagerApi>>,
     loop_max_iterations: usize,
@@ -121,6 +125,8 @@ impl VoiceResponder {
                     .collect(),
                 tool_filler_idx: AtomicUsize::new(0),
                 post_history_instructions: String::new(),
+                mode_instructions: HashMap::new(),
+                voice_tool_ack: String::new(),
                 display_tz: "UTC".to_owned(),
                 focus_manager: None,
                 loop_max_iterations: 5,
@@ -161,6 +167,19 @@ impl VoiceResponder {
         self.inner_mut().post_history_instructions = text.into();
         self
     }
+    /// Set the per-mode operating directives (`[prompt].operating_mode_*`);
+    /// the same map `OperatingModeLayer` is built from.
+    #[must_use]
+    pub fn with_mode_instructions(mut self, modes: HashMap<String, String>) -> Self {
+        self.inner_mut().mode_instructions = modes;
+        self
+    }
+    /// Set the voice tool-preamble nudge (`[prompt].voice_tool_ack`).
+    #[must_use]
+    pub fn with_voice_tool_ack(mut self, text: impl Into<String>) -> Self {
+        self.inner_mut().voice_tool_ack = text.into();
+        self
+    }
     /// Set the trailing-reminder clock timezone.
     #[must_use]
     pub fn with_display_tz(mut self, tz: impl Into<String>) -> Self {
@@ -196,7 +215,11 @@ impl VoiceResponder {
     ///
     /// # Errors
     /// Never fails at dispatch (spawned work handles its own errors).
-    #[allow(clippy::unused_async, reason = "processor contract is async")]
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "processor contract is async"
+    )]
     pub async fn handle(&self, event: &Event, _bus: &dyn EventBus) -> anyhow::Result<()> {
         if event.topic == TOPIC_VOICE_ACTIVITY_START {
             self.inner.on_activity_start(event);
@@ -209,7 +232,7 @@ impl VoiceResponder {
     /// Await every in-flight final-handling task (tests + graceful shutdown).
     ///
     /// Never raises: a task aborted mid-flight yields a `JoinError` that is
-    /// swallowed, mirroring the Python `gather(return_exceptions=True)`.
+    /// swallowed.
     pub async fn wait_until_idle(&self) {
         let handles: Vec<tokio::task::JoinHandle<()>> = {
             let mut inflight = self.inner.inflight.lock().expect("inflight mutex");
@@ -239,9 +262,7 @@ impl VoiceInner {
         let inner = Arc::clone(self);
         let key = scope_key.clone();
         // Take the inflight lock BEFORE spawning and hold it across the insert.
-        // Python installs `self._inflight[key] = task` synchronously (asyncio's
-        // create_task cannot run the coroutine until the current one awaits), so
-        // the done-callback never fires before the entry exists. On a
+        // The entry must exist before the done-callback can fire. On a
         // multi-thread tokio runtime the spawned task can begin — and, for a
         // fast stale-turn/empty-text drop, finish — on another worker thread
         // before this function returns; holding the lock across spawn+insert
@@ -302,14 +323,20 @@ impl VoiceInner {
         if let Some(a) = &author {
             append = append.author(a.clone());
         }
-        self.history.append_turn(append).await?;
+        let user_turn = self.history.append_turn(append).await?;
 
         // Per-channel reply gate.
         let gate = self.gate_for(channel_id);
         let _guard = gate.lock().await;
         self.assembler.set_rag_cue(&text);
 
-        let reply = self.stream_and_speak(&scope, channel_id).await;
+        // Name the turn for every LLM call made under it, so a mirrored row
+        // joins back to `turns` (subsystem 01's call mirror).
+        let reply = with_call_context(
+            CallContext::new(Some(user_turn.id), &scope.turn_id, channel_id),
+            self.stream_and_speak(&scope, channel_id),
+        )
+        .await;
         let Some(reply) = reply else {
             return Ok(());
         };
@@ -350,15 +377,24 @@ impl VoiceInner {
         )
     }
 
+    /// Resolve the speaker, degrading to an id-only author on a cache miss.
+    ///
+    /// A miss loses the *name*, not the *identity*: dropping the author
+    /// entirely wrote the turn with a NULL user id too, fusing every unresolved
+    /// speaker into one anonymous voice (N16). `label()` falls back to the id,
+    /// so unnamed speakers stay distinguishable in the transcript.
     fn resolve_author(&self, channel_id: i64, user_id: Option<i64>) -> Option<Author> {
         let uid = user_id?;
-        let resolver = self.member_resolver.as_ref()?;
-        resolver(channel_id, uid)
+        self.member_resolver
+            .as_ref()
+            .and_then(|resolve| resolve(channel_id, uid))
+            .or_else(|| Some(Author::new("discord", uid.to_string(), None, None)))
     }
 
     async fn stream_and_speak(&self, scope: &TurnScope, channel_id: i64) -> Option<String> {
-        let ctx =
-            AssemblyContext::new(&self.familiar_id, Some(channel_id)).with_viewer_mode("voice");
+        let ctx = AssemblyContext::new(&self.familiar_id, Some(channel_id))
+            .with_viewer_mode("voice")
+            .with_model(self.llm.model());
         let prompt = self.assembler.assemble(&ctx).await;
         let tool_mode = self.tool_registry.is_some()
             && self.tool_context_factory.is_some()
@@ -379,7 +415,9 @@ impl VoiceInner {
         let mut trailing_b = FinalReminder::new("voice")
             .display_tz(&self.display_tz)
             .include_mode_instruction(true)
+            .mode_instructions(self.mode_instructions.clone())
             .tools_enabled(tool_mode)
+            .voice_tool_ack(&self.voice_tool_ack)
             .post_history_instructions(&self.post_history_instructions);
         if let Some(fm) = &self.focus_manager {
             trailing_b = trailing_b
@@ -434,8 +472,8 @@ impl VoiceInner {
             // Cancellation check FIRST, unconditionally (spec V12): a barge-in
             // that lands while the stream is emitting content-empty deltas
             // (finish/role-only frames) must still log `decision=preempted` and
-            // bail, exactly as Python's `chat_stream` loop checks
-            // `scope.is_cancelled()` as its first per-delta statement. Skipping
+            // bail: `scope.is_cancelled()` is the first per-delta statement.
+            // Skipping
             // empty deltas ahead of this check would let a cancelled turn slip
             // past without the preempted marker.
             if scope.is_cancelled() {
@@ -456,6 +494,9 @@ impl VoiceInner {
             if !gate_open {
                 match gate.feed(&delta.content) {
                     StreamDecision::Silent => {
+                        // Deliberate abandon, not a barge-in — say so before the
+                        // stream drops (issue #220).
+                        stream.note_abandon_status("silent");
                         self.log_silent(&scope.turn_id, channel_id);
                         return None;
                     }
@@ -463,6 +504,7 @@ impl VoiceInner {
                         // A leaked tool-call block must never reach TTS or the
                         // persisted turn (issue #109); drop the buffered
                         // sentences and abandon the turn as empty.
+                        stream.note_abandon_status("suppressed");
                         self.log_leak(&scope.turn_id, channel_id);
                         return None;
                     }
@@ -498,10 +540,8 @@ impl VoiceInner {
             gate_open = true;
         }
         if gate_open {
-            let tail = streamer.flush();
-            if !tail.trim().is_empty() {
-                pending.push_back(tail);
-            }
+            // `speak` is the single speakable gate; push the tail as-is.
+            pending.push_back(streamer.flush());
             while let Some(sentence) = pending.pop_front() {
                 if scope.is_cancelled() {
                     if !decision_logged {
@@ -542,11 +582,13 @@ impl VoiceInner {
                 gate_open: false,
                 first_delta_seen: false,
                 decision_logged: false,
+                saw_tool_calls: false,
+                speak_opt_in: false,
             }),
         };
         let llm: &dyn LlmClient = self.llm.as_ref();
 
-        if let Err(exc) = agentic_loop(
+        let result = match agentic_loop(
             llm,
             &mut messages,
             registry,
@@ -556,24 +598,33 @@ impl VoiceInner {
         )
         .await
         {
-            log_agentic_error(&exc);
-            return None;
-        }
+            Ok(r) => r,
+            Err(exc) => {
+                log_agentic_error(&exc);
+                return None;
+            }
+        };
 
         let mut st = hooks.state.lock().await;
-        // A leaked `<silent>` / tool-call block that led the stream (issue #109):
-        // abandon the turn as silent/empty so nothing is spoken or persisted.
+        // A leaked tool-call block that led the stream (issue #109): abandon the
+        // turn as silent/empty so nothing is spoken or persisted.
         if matches!(
             st.gate.decided(),
             Some(StreamDecision::Silent | StreamDecision::Suppress)
         ) {
             return None;
         }
+        // A silent turn (no call opted into speech) persists nothing — unless
+        // audio already went out, which cannot be recalled: what was said has to
+        // be recorded.
+        if result.is_silent && !st.gate_open {
+            self.log_silent(&scope.turn_id, channel_id);
+            return None;
+        }
         if st.gate_open {
+            // `speak` is the single speakable gate; push the tail as-is.
             let tail = st.streamer.flush();
-            if !tail.trim().is_empty() {
-                st.pending.push_back(tail);
-            }
+            st.pending.push_back(tail);
             while let Some(sentence) = st.pending.pop_front() {
                 if scope.is_cancelled() {
                     break;
@@ -603,7 +654,12 @@ impl VoiceInner {
     }
 
     async fn speak(&self, text: &str, scope: &TurnScope) {
-        if text.trim().is_empty() {
+        // A chunk with nothing to voice (whitespace, punctuation, or a trailing
+        // emoji left alone by the splitter) is a 400 at Cartesia, not audio.
+        // Skipping keeps the turn intact: chunks are spoken serially, so the
+        // rest still play in order.
+        if !is_speakable(text) {
+            log_skip_unspeakable(&scope.turn_id, text);
             return;
         }
         // First call per turn marks tts_first_audio (the recorder dedupes).
@@ -693,6 +749,18 @@ impl VoiceInner {
     }
 }
 
+/// Debug `[Voice] skip=unspeakable turn=<id> text=<trunc>` — a chunk with
+/// nothing to voice never reaches TTS. Routine, so debug, not warn.
+fn log_skip_unspeakable(turn_id: &str, text: &str) {
+    tracing::debug!(
+        "{} {} {} {}",
+        ls::tag("Voice", ls::Y),
+        ls::kv_styled("skip", "unspeakable", ls::W, ls::LY),
+        ls::kv_styled("turn", turn_id, ls::W, ls::LC),
+        ls::kv_styled("text", &ls::trunc(text, 40), ls::W, ls::LW),
+    );
+}
+
 fn log_preempted(turn_id: &str) {
     tracing::info!(
         "{} {} {}",
@@ -722,6 +790,10 @@ fn log_agentic_error(exc: &anyhow::Error) {
 // Voice tool-path hooks
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent latches on one streaming turn, not a state enum"
+)]
 struct VoiceToolState {
     accumulated: String,
     streamer: SentenceStreamer,
@@ -730,6 +802,10 @@ struct VoiceToolState {
     gate_open: bool,
     first_delta_seen: bool,
     decision_logged: bool,
+    /// The turn has called at least one tool.
+    saw_tool_calls: bool,
+    /// Some call passed `silent: false` — latches for the turn.
+    speak_opt_in: bool,
 }
 
 struct VoiceToolHooks<'a> {
@@ -746,6 +822,11 @@ impl AgenticHooks for VoiceToolHooks<'_> {
             return;
         }
         let mut st = self.state.lock().await;
+        // A turn already known silent (a tool called with no `silent: false`)
+        // speaks nothing further — including a later iteration's prose.
+        if st.saw_tool_calls && !st.speak_opt_in {
+            return;
+        }
         if !st.first_delta_seen {
             get_voice_budget_recorder().record(&self.scope.turn_id, PHASE_LLM_FIRST_TOKEN, None);
             st.first_delta_seen = true;
@@ -788,13 +869,21 @@ impl AgenticHooks for VoiceToolHooks<'_> {
     }
 
     async fn on_before_tools(&self, assistant: &Message) {
+        let calls = assistant.tool_calls.as_deref().unwrap_or_default();
+        let speaking = {
+            let mut st = self.state.lock().await;
+            if !calls.is_empty() {
+                st.saw_tool_calls = true;
+                st.speak_opt_in |= calls_opt_into_speech(calls);
+            }
+            st.speak_opt_in || !st.saw_tool_calls
+        };
         {
             let mut st = self.state.lock().await;
             if st.gate_open {
+                // `speak` is the single speakable gate; push the tail as-is.
                 let tail = st.streamer.flush();
-                if !tail.trim().is_empty() {
-                    st.pending.push_back(tail);
-                }
+                st.pending.push_back(tail);
                 while let Some(sentence) = st.pending.pop_front() {
                     if self.scope.is_cancelled() {
                         break;
@@ -804,12 +893,10 @@ impl AgenticHooks for VoiceToolHooks<'_> {
             }
         }
         // Filler backstop: an imminent tool call with no spoken content →
-        // speak the next filler phrase BEFORE the handler runs.
-        let has_calls = assistant
-            .tool_calls
-            .as_ref()
-            .is_some_and(|tc| !tc.is_empty());
-        if has_calls && assistant.content_str().trim().is_empty() {
+        // speak the next filler phrase BEFORE the handler runs. Skipped on a
+        // silent turn: nothing else will be said, so the filler would be the
+        // only thing heard.
+        if !calls.is_empty() && speaking && assistant.content_str().trim().is_empty() {
             let phrase = self.inner.next_filler_phrase();
             if !phrase.is_empty() && !self.scope.is_cancelled() {
                 self.inner.speak(&phrase, self.scope).await;

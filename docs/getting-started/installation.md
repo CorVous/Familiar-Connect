@@ -9,13 +9,19 @@
   ([portal](https://discord.com/developers/applications)) with the
   `message_content`, `messages`, and `voice_states` intents enabled
 - An OpenRouter API key
-- *(optional, voice only)* One of: Azure Cognitive Services key + region, a Cartesia API key, or a Google Gemini API key
+- *(optional, voice only)* A Cartesia API key, or an Azure Speech key + region, for speech synthesis
 - *(optional, voice only)* A Deepgram API key for speech transcription
 - *(voice builds only)* CMake — the `discord-voice` feature compiles libopus
   from source (`songbird → opus2 → libopus_sys`). Windows especially needs it
   installed; text-only builds (`--features discord`) never need it. See the
-  [DAVE runbook](../rust-port/DAVE-RUNBOOK.md) for the full voice
+  [DAVE runbook](dave-runbook.md) for the full voice
   prerequisites and platform notes.
+- *(local-ML builds only)* OpenSSL headers — `local-turn` / `local-embed` pull
+  `ort`, whose **build script** (`ort-sys → ureq → native-tls`) links system
+  OpenSSL to fetch the ONNX Runtime binary. Debian/Ubuntu: `libssl-dev`;
+  Fedora: `openssl-devel`. Build-time only — the crate itself is rustls-only.
+  Missing it fails with `Could not find openssl via pkg-config`, which reads
+  like a TLS-stack regression but is not one.
 
 ## Environment variables
 
@@ -35,15 +41,12 @@ FAMILIAR_ID=aria
 
 # TTS credentials — set the one matching [tts].provider in character.toml
 
-# Azure Speech (default provider):
-AZURE_SPEECH_KEY=<azure cognitive services key>
-AZURE_SPEECH_REGION=<azure region, e.g. eastus>
-
-# Cartesia (provider="cartesia"):
+# Cartesia (provider="cartesia", the default):
 CARTESIA_API_KEY=<cartesia key>
 
-# Google Gemini TTS (provider="gemini"):
-GOOGLE_API_KEY=<google ai studio key>
+# Azure Speech (provider="azure"; build with --features ...,azure-tts):
+AZURE_SPEECH_KEY=<azure speech key>
+AZURE_SPEECH_REGION=<azure region, e.g. eastus>
 
 # optional — Deepgram speech transcription (voice channels only)
 DEEPGRAM_API_KEY=<deepgram key>
@@ -69,14 +72,17 @@ cp -r data/familiars/_default "$FAMILIARS_ROOT/my-familiar"
 # then edit "$FAMILIARS_ROOT/my-familiar/character.toml"
 ```
 
-If a slot points at a vision-capable model, also set
-`multimodal = true` in that `[llm.<slot>]` table: it defaults to
-`false`, which sends the model only a text description of any image
-rather than the image itself. Nothing can detect vision capability from
-a model name, so this stays your call — but startup logs a warning
-naming the model whenever `view_image` is wired up text-only, and a
-combination that could never show the model anything fails the config
-load outright. See
+Leave `multimodal` out of the `[llm.<slot>]` tables unless you mean to
+override it: omitted, it is auto-detected from the model's OpenRouter
+metadata, so a vision-capable slot starts receiving images natively on
+its own. Writing `true` or `false` pins the flag and detection will not
+argue. To keep images in long-term memory, also set
+`[llm].image_caption_model` to something cheap — the raw image never
+survives a turn, so that caption is all the memory pipeline ever sees.
+
+Startup logs a warning naming the model whenever `view_image` ends up
+wired text-only, and a combination that could never show the model
+anything fails the config load outright. See
 [Tuning — Vision wiring checks](../architecture/tuning.md#vision-wiring-checks).
 
 ## Start
@@ -107,6 +113,9 @@ cargo build --release --features discord,discord-voice,stt-deepgram
 
 # Local ML extras (ONNX turn detection, local embeddings)
 cargo build --release --features local-turn,local-embed
+
+# Azure Speech TTS ([tts].provider = "azure"), added to a voice build
+cargo build --release --features discord,discord-voice,stt-deepgram,azure-tts
 ```
 
 ## CLI reference
@@ -122,6 +131,7 @@ Usage: familiar-connect [OPTIONS] [COMMAND]
 Commands:
   run       Start the Discord bot
   diagnose  Aggregate span timings from log files
+  prompts   Print mirrored LLM prompts/responses from `history.db`
   version   Display package version
   help      Print this message or the help of the given subcommand(s)
 

@@ -1,11 +1,10 @@
-//! In-process event bus + turn router (subsystem 01; Python `bus/`).
+//! In-process event bus + turn router (subsystem 01).
 //!
 //! Topic-keyed in-process fan-out: sources publish topic-addressed [`Event`]
 //! envelopes; processors consume them via per-subscription queues with
 //! per-subscription [`BackpressurePolicy`]. [`TurnRouter`]/[`TurnScope`] express
 //! barge-in. This subsystem imports nothing from any other subsystem (layer 0);
-//! nearly everything else imports it. See `rust/DESIGN.md` §4.4 and
-//! `rust/specs/01-bus-and-diagnostics.md`.
+//! nearly everything else imports it. See `docs/architecture/streaming-bus.md`.
 
 pub mod envelope;
 pub mod in_process;

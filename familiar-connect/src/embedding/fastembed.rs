@@ -1,30 +1,28 @@
-//! FastEmbed ONNX embedder (subsystem 04; Python `embedding/fastembed.py`;
-//! feature `local-embed`).
+//! FastEmbed ONNX embedder (subsystem 04; feature `local-embed`).
 //!
 //! An ONNX-compiled sentence-transformer wrapper — the intended production
 //! backend for paraphrase-tolerant fact recall, replacing the `hash` baseline's
 //! token-overlap proxy with real semantic similarity. Default model is
 //! BGE-small (384-dim), per the ecosystem report.
 //!
-//! **Lazy load** (spec 04 §3): the underlying ONNX model is constructed on the
-//! first non-empty [`embed`](FastEmbedEmbedder::embed) call, double-checked under
-//! a lock so exactly one model is built even under concurrent first calls. Both
+//! **Lazy load**: the underlying ONNX model is constructed on the first
+//! non-empty [`embed`](FastEmbedEmbedder::embed) call, double-checked under a
+//! lock so exactly one model is built even under concurrent first calls. Both
 //! the construction and the (CPU-bound) inference run on a blocking worker via
 //! [`tokio::task::spawn_blocking`] so the reactor keeps draining. `embed([])`
 //! returns `[]` without loading.
 //!
-//! **`dim` is mutable state** (spec 04 §4, Rust port note): known models seed
+//! **`dim` is mutable state**: known models seed
 //! `dim` at construction from a static table; an unknown model reports `0` until
 //! the first real vector probes it (a nonzero pre-known dim is never overwritten
 //! by the probe). The interior [`AtomicUsize`] backs the `&self` [`Embedder::dim`]
 //! accessor.
 //!
 //! **The model loader is a seam** ([`ModelLoader`]): the production
-//! [`FastembedLoader`] wraps the `fastembed` crate, but the lazy-load / dim-probe
-//! / single-load / cache-dir behaviors are pinned by tests through stub loaders
-//! that never touch ONNX (Python stubbed `sys.modules["fastembed"]`; here we
-//! inject the loader). Tests needing a real ~130 MB model download are
-//! `#[ignore]`.
+//! [`FastembedLoader`] wraps the `fastembed` crate, but the lazy-load /
+//! dim-probe / single-load / cache-dir behaviors are pinned by tests through
+//! stub loaders that never touch ONNX. Tests needing a real ~130 MB model
+//! download are `#[ignore]`.
 #![cfg(feature = "local-embed")]
 
 use std::sync::Arc;
@@ -36,24 +34,17 @@ use tokio::sync::Mutex;
 
 use crate::embedding::protocol::Embedder;
 
-/// Default model name (BGE-small; 384-dim). Matches the Python
-/// `DEFAULT_MODEL_NAME` and the `[providers.embedding].fastembed_model` default.
+/// Default model name (BGE-small; 384-dim).
 pub const DEFAULT_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 
-/// Known model dimensionalities, so `dim` can be advertised before the first
-/// embed lands. A model not listed here reports `dim == 0` until the first
-/// embed probes a real vector (Python `_KNOWN_DIMS`).
+/// Known model dimensionality, so `dim` can be advertised before the first
+/// embed lands. Delegates to the always-compiled
+/// [`crate::embedding::FASTEMBED_NATIVE_DIMS`] table (shared with config
+/// validation). An unmapped model reports `0` until the first embed probes a
+/// real vector.
 #[must_use]
 fn known_dim(model_name: &str) -> usize {
-    match model_name {
-        "BAAI/bge-small-en-v1.5"
-        | "sentence-transformers/all-MiniLM-L6-v2"
-        | "intfloat/e5-small-v2"
-        | "intfloat/multilingual-e5-small" => 384,
-        "BAAI/bge-base-en-v1.5" => 768,
-        "BAAI/bge-large-en-v1.5" => 1024,
-        _ => 0,
-    }
+    crate::embedding::fastembed_native_dim(model_name).unwrap_or(0)
 }
 
 /// Seam: a loaded text-embedding model, callable synchronously (CPU-bound).
@@ -133,11 +124,12 @@ impl FastEmbedEmbedder {
         let loader = self.loader.clone();
         let model_name = self.model_name.clone();
         let cache_dir = self.cache_dir.clone();
-        let loaded =
+        let built =
             tokio::task::spawn_blocking(move || loader.load(&model_name, cache_dir.as_deref()))
                 .await??;
-        let model: Arc<dyn TextModel> = Arc::from(loaded);
+        let model: Arc<dyn TextModel> = Arc::from(built);
         *guard = Some(model.clone());
+        drop(guard);
         Ok(model)
     }
 }
@@ -168,8 +160,7 @@ impl Embedder for FastEmbedEmbedder {
         let vectors = tokio::task::spawn_blocking(move || model.embed(&owned)).await??;
         // Probe `dim` opportunistically the first time we see a real vector —
         // covers models absent from `known_dim`. A nonzero pre-known dim is
-        // never overwritten (guard is "current dim == 0"), matching Python's
-        // `if vectors and not self.dim`.
+        // never overwritten (guard is "current dim == 0").
         if self.dim.load(Ordering::Relaxed) == 0 {
             if let Some(first) = vectors.first() {
                 self.dim.store(first.len(), Ordering::Relaxed);
@@ -237,11 +228,13 @@ struct FastembedModel {
 
 impl TextModel for FastembedModel {
     fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-        let mut model = self
-            .model
-            .lock()
-            .map_err(|_| anyhow::anyhow!("fastembed model mutex poisoned"))?;
-        let vectors = model.embed(texts, None)?;
+        let vectors = {
+            let mut model = self
+                .model
+                .lock()
+                .map_err(|_| anyhow::anyhow!("fastembed model mutex poisoned"))?;
+            model.embed(texts, None)?
+        };
         Ok(vectors)
     }
 }
@@ -296,8 +289,8 @@ mod tests {
             _cache_dir: Option<&str>,
         ) -> anyhow::Result<Box<dyn TextModel>> {
             anyhow::bail!(
-                "FastEmbedEmbedder requires the 'local-embed' extra. \
-                 Install with `uv sync --extra local-embed`."
+                "FastEmbedEmbedder requires the 'local-embed' feature. \
+                 Rebuild with `cargo build --release --features local-embed`."
             )
         }
     }
@@ -305,6 +298,11 @@ mod tests {
     /// Records the loader kwargs (pins cache-dir threading).
     struct CapturingLoader {
         seen_model: Arc<std::sync::Mutex<Option<String>>>,
+        // Outer `None` = never loaded; inner `None` = loaded with no cache dir.
+        #[allow(
+            clippy::option_option,
+            reason = "distinguishes not-called from called-with-None"
+        )]
         seen_cache: Arc<std::sync::Mutex<Option<Option<String>>>>,
     }
 
@@ -352,6 +350,24 @@ mod tests {
         );
     }
 
+    /// Drift guard: every table entry the loader can actually resolve must
+    /// carry the dim the `fastembed` crate itself reports. `get_model_info` is
+    /// a static registry lookup — no download, no ONNX session.
+    #[test]
+    fn native_dim_table_matches_fastembed_metadata() {
+        use crate::embedding::FASTEMBED_NATIVE_DIMS;
+        use fastembed::TextEmbedding;
+
+        for (name, dim) in FASTEMBED_NATIVE_DIMS {
+            let Ok(model) = super::resolve_model(name) else {
+                continue; // Unmapped names have no crate metadata to compare
+            };
+            let info = TextEmbedding::get_model_info(&model)
+                .unwrap_or_else(|e| panic!("model info for {name}: {e}"));
+            assert_eq!(info.dim, *dim, "native dim drift for {name}");
+        }
+    }
+
     #[test]
     fn dim_zero_for_unknown_model_until_first_embed() {
         assert_eq!(FastEmbedEmbedder::new("custom/model", None).dim(), 0);
@@ -391,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_extra_surfaces_pointed_error() {
+    async fn missing_feature_surfaces_pointed_error() {
         let e = with_loader("BAAI/bge-small-en-v1.5", None, Arc::new(FailingLoader));
         let err = e
             .embed(&["any text".to_owned()])

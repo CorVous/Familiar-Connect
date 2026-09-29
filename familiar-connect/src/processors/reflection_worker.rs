@@ -1,4 +1,4 @@
-//! ReflectionWorker higher-order reflections (subsystem 07; Python `processors/reflection_worker.py`).
+//! ReflectionWorker higher-order reflections (subsystem 07).
 //!
 //! Compounds higher-order syntheses over recent turns + facts. Fires when at
 //! least `turns_threshold` new turns have accumulated past the
@@ -42,6 +42,7 @@ pub struct ReflectionWorker {
     max_turns_per_tick: usize,
     recent_facts_limit: i64,
     tick_interval: Duration,
+    persona: String,
 }
 
 impl ReflectionWorker {
@@ -64,6 +65,7 @@ impl ReflectionWorker {
             max_turns_per_tick: 50,
             recent_facts_limit: 20,
             tick_interval: Duration::from_secs_f64(60.0),
+            persona: String::new(),
         }
     }
 
@@ -102,6 +104,14 @@ impl ReflectionWorker {
         self
     }
 
+    /// Persona prose for the reflection writer (`[prompt].reflection_system`).
+    /// The reply contract is appended in code and is not overridable.
+    #[must_use]
+    pub fn persona(mut self, text: impl Into<String>) -> Self {
+        self.persona = text.into();
+        self
+    }
+
     /// The projector's log/task label.
     #[must_use]
     pub const fn name(&self) -> &'static str {
@@ -131,8 +141,8 @@ impl ReflectionWorker {
 
     /// One pass; write reflections if enough new turns accumulated.
     ///
-    /// The watermark ALWAYS advances to `latest_turn` — mirroring the Python
-    /// `try/finally` — so an empty/malformed/all-filtered reply, or a mid-tick
+    /// The watermark ALWAYS advances to `latest_turn` — advanced on every exit
+    /// path — so an empty/malformed/all-filtered reply, or a mid-tick
     /// transport error, cannot pin the worker to an ever-growing window.
     pub async fn tick(&self) -> anyhow::Result<()> {
         timed_async("reflection.tick", async move {
@@ -190,7 +200,7 @@ impl ReflectionWorker {
             .await?;
 
         let schema = reflection_schema(self.max_per_tick);
-        let prompt = build_reflection_prompt(&new_turns, &recent_facts, &schema);
+        let prompt = build_reflection_prompt(&self.persona, &new_turns, &recent_facts, &schema);
         let result =
             request_structured(self.llm.as_ref(), &prompt, &schema, DEFAULT_MAX_RETRIES).await?;
         let items = normalize_reflection_items(result.value.as_ref());
@@ -260,8 +270,7 @@ impl ReflectionWorker {
 }
 
 /// Most-frequent channel id across `turns`; `None` for a cross-channel batch
-/// with no majority winner. Ties go to the first-encountered channel (Python
-/// `max` over the insertion-ordered count dict).
+/// with no majority winner. Ties go to the first-encountered channel.
 fn dominant_channel(turns: &[HistoryTurn]) -> Option<i64> {
     let mut order: Vec<i64> = Vec::new();
     let mut counts: HashMap<i64, i64> = HashMap::new();
@@ -305,21 +314,18 @@ fn reflection_schema(max_reflections: i64) -> Schema {
     .with_empty_note("If nothing of substance is happening, reply with [].")
 }
 
+/// Persona prose (config) plus the code-rendered reply contract.
 fn build_reflection_prompt(
+    persona: &str,
     new_turns: &[HistoryTurn],
     recent_facts: &[Fact],
     schema: &Schema,
 ) -> Vec<Message> {
-    let persona = "You write short, high-level reflections over recent chat \
-        history — patterns, recurring tensions, open questions, \
-        themes the participants keep circling back to. Skip blow-by-\
-        blow recaps; that's what summaries are for. Each reflection \
-        is one or two sentences.";
     let header = format!("{persona}\n\n{}", render_contract(schema));
     let mut lines: Vec<String> = vec!["Recent turns (id prefixed):".to_string()];
     for t in new_turns {
-        // Python: `who = t.author.display_name if t.author is not None else
-        // t.role`, then f-string-rendered. An author present with a `None`
+        // `who` is the author's display name when an author is present, else the
+        // role. An author present with a `None`
         // display name renders the literal `"None"` (not empty, not `role`).
         let who = t.author.as_ref().map_or_else(
             || t.role.clone(),
@@ -358,7 +364,7 @@ fn normalize_reflection_items(parsed: Option<&Value>) -> Vec<ReflectionItem> {
         let Value::Object(map) = item else {
             continue;
         };
-        let text = map.get("text").map_or_else(String::new, py_str);
+        let text = map.get("text").map_or_else(String::new, json_value_str);
         let cited_turn_ids = int_list(map.get("cited_turn_ids"));
         let cited_fact_ids = int_list(map.get("cited_fact_ids"));
         out.push(ReflectionItem {
@@ -371,7 +377,7 @@ fn normalize_reflection_items(parsed: Option<&Value>) -> Vec<ReflectionItem> {
 }
 
 /// Integer-only citation list: keeps JSON integers, drops strings, floats,
-/// bools (JSON `true`/`false` are distinct variants — the Python `True == 1`
+/// bools (JSON `true`/`false` are distinct variants, so the `true == 1`
 /// hazard cannot occur here), and non-array input.
 fn int_list(raw: Option<&Value>) -> Vec<i64> {
     let Some(Value::Array(arr)) = raw else {
@@ -385,8 +391,8 @@ fn int_list(raw: Option<&Value>) -> Vec<i64> {
         .collect()
 }
 
-/// Python `str(value)` for the JSON `text` field (identity on strings).
-fn py_str(v: &Value) -> String {
+/// Stringify the JSON `text` field (identity on strings).
+fn json_value_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => "None".to_string(),
@@ -485,9 +491,9 @@ mod tests {
         let turns = [named, none_dn, role_only];
         let facts: Vec<Fact> = Vec::new();
         let schema = reflection_schema(3);
-        let body = build_reflection_prompt(&turns, &facts, &schema)[1].content_str();
-        // display_name present → the name; author present + display_name None →
-        // literal "None" (Python f-string parity); author None → role.
+        let body = build_reflection_prompt("", &turns, &facts, &schema)[1].content_str();
+        // display_name present → the name; author present + display_name None
+        // → literal "None"; author None → role.
         assert!(body.contains("[Cass] m1"), "{body}");
         assert!(body.contains("[None] m2"), "{body}");
         assert!(body.contains("[user] m3"), "{body}");

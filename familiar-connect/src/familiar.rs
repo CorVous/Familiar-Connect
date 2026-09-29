@@ -1,4 +1,4 @@
-//! `Familiar` — the per-character DI bundle (subsystem 02; Python `familiar.py`).
+//! `Familiar` — the per-character DI bundle (subsystem 02).
 //!
 //! One process per character (selected by `FAMILIAR_ID`). The bundle carries the
 //! parsed config, the history store, the LLM clients (keyed by slot), the bus,
@@ -7,10 +7,9 @@
 //! walks `data/familiars/<id>/`, loads and validates the config, and opens (thus
 //! creates) `history.db` as a side effect.
 //!
-//! Per DESIGN D3 the two Python deferred registry imports
-//! (`known_projectors()` / `known_embedders()`) are injected as `&BTreeSet`
-//! parameters rather than reached via a module cycle — the config validator
-//! seam the whole port uses.
+//! The two registry lookups (`known_projectors` /
+//! `known_embedders`) are injected as `&BTreeSet` parameters rather than
+//! reached via a module cycle — the config validator seam used throughout.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -75,9 +74,9 @@ impl Familiar {
     /// Build a bundle from the on-disk `data/familiars/<id>/` layout.
     ///
     /// `defaults_path` overrides the default profile path (tests use it to skip
-    /// staging a sibling `_default/` folder); it defaults to
-    /// `root.parent / "_default" / "character.toml"`. `known_projectors` /
-    /// `known_embedders` are the injected config validator sets (DESIGN D3).
+    /// staging a sibling `_default/` folder); it defaults to `root.parent /
+    /// "_default" / "character.toml"`. `known_projectors` / `known_embedders`
+    /// are the injected config validator sets.
     ///
     /// Side effect: opens (thus creates) `root / "history.db"`.
     ///
@@ -142,7 +141,7 @@ impl Familiar {
     }
 }
 
-/// Python `str.title()`: uppercase the first letter of each alphabetic run,
+/// Title-case: uppercase the first letter of each alphabetic run,
 /// lowercase the rest. Ids are simple lowercase words in practice
 /// (`"sapphire"` → `"Sapphire"`).
 fn title_case(s: &str) -> String {
@@ -167,9 +166,9 @@ fn title_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Familiar, title_case};
-    use crate::llm::{LlmClient, LlmDelta, Message};
+    use crate::llm::{LlmClient, Message};
     use async_trait::async_trait;
-    use futures::stream::{self, BoxStream};
+    use futures::stream;
     use serde_json::Value;
     use std::collections::{BTreeSet, HashMap};
     use std::path::{Path, PathBuf};
@@ -187,8 +186,8 @@ mod tests {
             &self,
             _messages: Vec<Message>,
             _tools: Option<Vec<Value>>,
-        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-            Ok(Box::pin(stream::empty()))
+        ) -> anyhow::Result<crate::llm::LlmStream> {
+            Ok(crate::llm::LlmStream::new(stream::empty()))
         }
         fn slot(&self) -> Option<&str> {
             Some(&self.0)
@@ -303,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn title_case_matches_python_title() {
+    fn title_case_uppercases_each_run() {
         assert_eq!(title_case("sapphire"), "Sapphire");
         assert_eq!(title_case("test-familiar"), "Test-Familiar");
         assert_eq!(title_case("aria"), "Aria");

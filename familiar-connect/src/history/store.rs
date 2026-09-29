@@ -1,5 +1,5 @@
-//! `HistoryStore`: turns log + watermarked side-index projections
-//! (subsystem 03; Python `history/store.py`).
+//! `HistoryStore`: turns log + watermarked side-index projections (subsystem
+//! 03).
 //!
 //! One SQLite database per familiar. The append-only `turns` table is the
 //! source of truth; every side-index (summaries, facts, fact embeddings, people
@@ -10,7 +10,7 @@
 //!
 //! Timestamps are always emitted through [`iso_utc`] (fixed-width microseconds,
 //! `+00:00`) so lexicographic ordering equals chronological ordering — a
-//! correctness dependency in five query paths (DESIGN §4.2).
+//! correctness dependency in five query paths.
 //!
 //! Author identity is [`crate::identity::Author`] (re-exported at the module
 //! root as `history::Author`): the store round-trips its `platform` / `user_id`
@@ -39,7 +39,7 @@ pub const FOCUS_STREAM_CHANNEL_ID: i64 = -1;
 /// ActivityEngine.
 const DEFAULT_CATCH_UP_LIMIT: usize = 20;
 
-/// Promotion `UPDATE ... WHERE id IN (...)` chunk size (SQLite param cap).
+/// Promotion `UPDATE... WHERE id IN (...)` chunk size (SQLite param cap).
 const STAMP_CHUNK: usize = 500;
 
 const TURN_COLS: &str = "id, timestamp, role, author_platform, author_user_id, \
@@ -60,6 +60,11 @@ const FACT_COLS_F: &str = "f.id, f.familiar_id, f.channel_id, f.text, f.source_t
 
 const REFLECTION_COLS: &str = "id, familiar_id, channel_id, text, cited_turn_ids, cited_fact_ids, \
      created_at, last_turn_id, last_fact_id";
+
+const LLM_CALL_COLS: &str = "c.id, c.familiar_id, c.created_at, c.turn_id, c.turn_scope, \
+     c.channel_id, c.slot, c.model, c.provider, c.status, c.system_prompt, c.messages_json, \
+     c.response_text, c.tool_calls_json, c.tool_results_json, c.ttfb_ms, c.ttft_ms, c.total_ms, \
+     c.est_in_tokens, c.in_tokens, c.out_tokens, c.cached";
 
 const ACTIVITY_COLS: &str = "id, familiar_id, type_id, label, started_at, planned_return_at, note, \
      status, actual_return_at, experience_text";
@@ -288,10 +293,41 @@ CREATE TABLE IF NOT EXISTS activities (
 
 CREATE INDEX IF NOT EXISTS idx_activities_active
     ON activities (familiar_id, actual_return_at, id);
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    familiar_id       TEXT    NOT NULL,
+    created_at        TEXT    NOT NULL,
+    turn_id           INTEGER,
+    turn_scope        TEXT,
+    channel_id        INTEGER,
+    slot              TEXT,
+    model             TEXT    NOT NULL,
+    provider          TEXT,
+    status            TEXT    NOT NULL,
+    system_prompt     TEXT    NOT NULL,
+    messages_json     TEXT    NOT NULL,
+    response_text     TEXT    NOT NULL,
+    tool_calls_json   TEXT,
+    tool_results_json TEXT,
+    ttfb_ms           INTEGER,
+    ttft_ms           INTEGER,
+    total_ms          INTEGER,
+    est_in_tokens     INTEGER,
+    in_tokens         INTEGER,
+    out_tokens        INTEGER,
+    cached            INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_calls_familiar
+    ON llm_calls (familiar_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_llm_calls_turn
+    ON llm_calls (familiar_id, turn_id, id);
 ";
 
 // ---------------------------------------------------------------------------
-// Value types (Python frozen dataclasses / NamedTuples)
+// Value types
 // ---------------------------------------------------------------------------
 
 /// A single persisted conversational turn.
@@ -323,6 +359,71 @@ pub struct HistoryTurn {
     pub consumed_at: Option<DateTime<Utc>>,
     /// Did the incoming message ping the bot?
     pub pings_bot: bool,
+}
+
+/// One mirrored LLM call, ready to insert.
+///
+/// Built by the mirror sink (subsystem 01) from a single request/response pair,
+/// so every field belongs to the same call — nothing is correlated after the
+/// fact. Optional fields stay `None` when the call never produced them (a failed
+/// call reports no usage; a background worker has no turn).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppendLlmCall {
+    pub familiar_id: String,
+    /// `turns.id` of the turn this call served; `None` off the turn path.
+    pub turn_id: Option<i64>,
+    /// Bus turn-scope id — the `turn=` value in log lines.
+    pub turn_scope: Option<String>,
+    pub channel_id: Option<i64>,
+    pub slot: Option<String>,
+    pub model: String,
+    pub provider: Option<String>,
+    /// Open vocabulary (`ok` / `error` / `cancelled` / `silent` / …).
+    pub status: String,
+    /// Every system-role message, joined — the assembled prompt, greppable.
+    pub system_prompt: String,
+    /// The full message array as sent, JSON.
+    pub messages_json: String,
+    pub response_text: String,
+    /// Tool calls the model requested, JSON array.
+    pub tool_calls_json: Option<String>,
+    /// Results of those calls, JSON array; set by the agentic loop.
+    pub tool_results_json: Option<String>,
+    pub ttfb_ms: Option<i64>,
+    pub ttft_ms: Option<i64>,
+    pub total_ms: Option<i64>,
+    pub est_in_tokens: Option<i64>,
+    pub in_tokens: Option<i64>,
+    pub out_tokens: Option<i64>,
+    pub cached: Option<i64>,
+}
+
+/// A mirrored LLM call read back, plus the anchoring turn's text when joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmCallRow {
+    pub id: i64,
+    pub created_at: DateTime<Utc>,
+    pub turn_id: Option<i64>,
+    pub turn_scope: Option<String>,
+    pub channel_id: Option<i64>,
+    pub slot: Option<String>,
+    pub model: String,
+    pub provider: Option<String>,
+    pub status: String,
+    pub system_prompt: String,
+    pub messages_json: String,
+    pub response_text: String,
+    pub tool_calls_json: Option<String>,
+    pub tool_results_json: Option<String>,
+    pub ttfb_ms: Option<i64>,
+    pub ttft_ms: Option<i64>,
+    pub total_ms: Option<i64>,
+    pub est_in_tokens: Option<i64>,
+    pub in_tokens: Option<i64>,
+    pub out_tokens: Option<i64>,
+    pub cached: Option<i64>,
+    /// `turns.content` of the anchoring turn; `None` when unanchored.
+    pub turn_content: Option<String>,
 }
 
 /// Staged-turn tally for one channel: total unread + bot-ping subset.
@@ -457,8 +558,7 @@ pub struct SupersedeResult {
     pub skipped: Vec<(i64, String)>,
 }
 
-/// Replacement shape for [`HistoryStore::supersede`] (Python's
-/// `FactDraft | Fact | int | None` union).
+/// Replacement shape for [`HistoryStore::supersede`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewFact {
     /// Retire each obsolete row (`superseded_by` stays NULL).
@@ -500,7 +600,7 @@ pub struct Fact {
     pub importance: Option<i64>,
 }
 
-/// One pending/terminal alarm row (Python returned raw dicts).
+/// One pending/terminal alarm row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmRow {
     pub id: String,
@@ -521,7 +621,7 @@ pub struct AlarmRow {
 
 /// Builder for [`HistoryStore::append_turn`] / [`HistoryStore::stage_turn`].
 ///
-/// `consumed` defaults to `true` (matching the Python default); `stage_turn`
+/// `consumed` defaults to `true`; `stage_turn`
 /// forces it to `false`.
 #[derive(Debug, Clone)]
 pub struct AppendTurn {
@@ -729,7 +829,7 @@ impl FtsIndex for NoopFtsIndex {
 }
 
 // ---------------------------------------------------------------------------
-// Free helpers (Python module-level functions)
+// Free helpers
 // ---------------------------------------------------------------------------
 
 fn v_str(s: impl Into<String>) -> Value {
@@ -766,7 +866,7 @@ fn placeholders(n: usize) -> String {
     vec!["?"; n].join(",")
 }
 
-/// Deterministic key for near-duplicate fact detection (behavior 26).
+/// Deterministic key for near-duplicate fact detection.
 fn normalize_fact_text(text: &str) -> String {
     let collapsed = text
         .to_lowercase()
@@ -829,11 +929,10 @@ fn parse_id_array(raw: &str) -> Vec<i64> {
     serde_json::from_str::<Vec<i64>>(raw).unwrap_or_default()
 }
 
-/// Coerce a `subjects_json` field value to a string, mirroring Python
-/// `_row_to_fact`'s `str(item["canonical_key"])` / `str(item["display_at_write"])`:
-/// a JSON string passes through unchanged; any other present value is stringified
-/// (so `{"canonical_key": 5, ...}` yields `"5"` rather than a dropped item). Bool
-/// and null follow Python's `str()` (`True`/`False`/`None`); arrays/objects are
+/// Coerce a `subjects_json` field value to a string: a JSON string passes
+/// through unchanged; any other present value is stringified (so
+/// `{"canonical_key": 5,...}` yields `"5"` rather than a dropped item). Bool
+/// and null render as `True`/`False`/`None`; arrays/objects are
 /// absurd inputs no writer produces, so their exact rendering is not pinned.
 fn subject_field_to_string(value: &serde_json::Value) -> String {
     match value {
@@ -855,9 +954,6 @@ fn parse_subjects(raw: Option<&str>) -> Vec<FactSubject> {
     let Some(items) = value.as_array() else {
         return Vec::new();
     };
-    // Mirror Python `_row_to_fact`: keep any object that has BOTH keys present
-    // (even with non-string values), coercing each value via `str(...)`; skip
-    // non-object items and objects missing either key.
     items
         .iter()
         .filter_map(|item| {
@@ -888,7 +984,7 @@ fn subjects_to_json(subjects: &[FactSubject]) -> Option<String> {
     Some(serde_json::Value::Array(arr).to_string())
 }
 
-/// SQL fragment + params for the `facts` validity filter (behavior 28). `now`
+/// SQL fragment + params for the `facts` validity filter. `now`
 /// is captured per call so lexicographic text comparison stays chronological.
 fn facts_validity_where(
     include_superseded: bool,
@@ -922,6 +1018,34 @@ fn facts_validity_where(
 // ---------------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------------
+
+fn map_llm_call(row: &Row) -> rusqlite::Result<LlmCallRow> {
+    let created_at: String = row.get("created_at")?;
+    Ok(LlmCallRow {
+        id: row.get("id")?,
+        created_at: parse_required(&created_at),
+        turn_id: row.get("turn_id")?,
+        turn_scope: row.get("turn_scope")?,
+        channel_id: row.get("channel_id")?,
+        slot: row.get("slot")?,
+        model: row.get("model")?,
+        provider: row.get("provider")?,
+        status: row.get("status")?,
+        system_prompt: row.get("system_prompt")?,
+        messages_json: row.get("messages_json")?,
+        response_text: row.get("response_text")?,
+        tool_calls_json: row.get("tool_calls_json")?,
+        tool_results_json: row.get("tool_results_json")?,
+        ttfb_ms: row.get("ttfb_ms")?,
+        ttft_ms: row.get("ttft_ms")?,
+        total_ms: row.get("total_ms")?,
+        est_in_tokens: row.get("est_in_tokens")?,
+        in_tokens: row.get("in_tokens")?,
+        out_tokens: row.get("out_tokens")?,
+        cached: row.get("cached")?,
+        turn_content: row.get("turn_content")?,
+    })
+}
 
 fn map_turn(row: &Row) -> rusqlite::Result<HistoryTurn> {
     let author_platform: Option<String> = row.get("author_platform")?;
@@ -1064,7 +1188,7 @@ impl HistoryStore {
         let (fts_turns, turns_recreated) = TantivyFts::open_dir(&fts_root.join("turns"))?;
         let (fts_facts, facts_recreated) = TantivyFts::open_dir(&fts_root.join("facts"))?;
         // An index that was wiped-and-recreated, or is otherwise empty, has lost
-        // whatever the retired Python impl indexed; repopulate it from the DB.
+        // whatever the retired implementation indexed; repopulate it from the DB.
         let turns_stale = turns_recreated || fts_turns.is_empty();
         let facts_stale = facts_recreated || fts_facts.is_empty();
         let store = Self::init(Db::open(path)?, Box::new(fts_turns), Box::new(fts_facts))?;
@@ -1075,8 +1199,7 @@ impl HistoryStore {
     /// Open a store with caller-supplied FTS indexes. The DB is set up exactly
     /// as [`open`](Self::open) (in-memory for `":memory:"`, file otherwise) but
     /// no tantivy index is created. This is the injection seam behind the
-    /// "append survives an FTS failure" test (Python monkeypatched
-    /// `store._fts_turns.add`).
+    /// "append survives an FTS failure" test.
     pub fn open_with_fts(
         db_path: impl AsRef<Path>,
         fts_turns: Box<dyn FtsIndex>,
@@ -1097,9 +1220,9 @@ impl HistoryStore {
     /// Wire the DB + FTS into a store and run the schema repair pass. `SCHEMA`
     /// uses `CREATE TABLE/INDEX IF NOT EXISTS` throughout, so it is the whole of
     /// construction: every column the store queries is declared there. The
-    /// Python era's incremental `_migrate()` (ALTER-in the attentional columns,
+    /// earlier incremental `_migrate()` (ALTER-in the attentional columns,
     /// re-add `pings_bot`, the issue #154 ego-key rewrite) was folded into
-    /// `SCHEMA` and removed — see issue #202 and spec 03 §8-10.
+    /// `SCHEMA` and removed — see issue #202.
     fn init(
         db: Db,
         fts_turns: Box<dyn FtsIndex>,
@@ -1114,7 +1237,7 @@ impl HistoryStore {
         Ok(store)
     }
 
-    /// The DB actor handle (mirrors Python `store._conn`; test/diagnostic use).
+    /// The DB actor handle.
     #[must_use]
     pub const fn conn(&self) -> &Db {
         &self.db
@@ -1134,8 +1257,8 @@ impl HistoryStore {
 
     // -- turns -----------------------------------------------------------
 
-    /// Append a single turn; return its persisted form. Note the QUIRK
-    /// (behavior 11): the returned value leaves `guild_id` /
+    /// Append a single turn; return its persisted form. Note the QUIRK:
+    /// the returned value leaves `guild_id` /
     /// `platform_message_id` / `reply_to_message_id` at `None` even when
     /// persisted — callers that need them re-read.
     pub fn append_turn(&self, p: AppendTurn) -> Result<HistoryTurn, StoreError> {
@@ -1937,7 +2060,7 @@ impl HistoryStore {
     ///   still at watermark `w`. Zero rows affected means a concurrent supersede
     ///   deleted it (or another writer already moved the watermark); the write
     ///   is dropped and the next tick rebuilds cleanly from `prior = None`.
-    /// - `None` — no prior at read time: `INSERT ... ON CONFLICT DO NOTHING`, so
+    /// - `None` — no prior at read time: `INSERT... ON CONFLICT DO NOTHING`, so
     ///   a racing writer that already created the row is not clobbered.
     ///
     /// Returns whether the write landed.
@@ -2366,7 +2489,7 @@ impl HistoryStore {
             .collect())
     }
 
-    /// Unified mutation: retire, merge, or repoint obsolete facts (behavior 31).
+    /// Unified mutation: retire, merge, or repoint obsolete facts.
     pub fn supersede(
         &self,
         familiar_id: &str,
@@ -3355,8 +3478,8 @@ impl HistoryStore {
     }
 
     /// Repopulate any FTS index that was wiped/recreated or is empty while its
-    /// source table still holds rows (the Python-index migration failure mode).
-    /// Synchronous — the live corpus is ~10k rows.
+    /// source table still holds rows. Synchronous — the live corpus is ~10k
+    /// rows.
     fn repopulate_stale_fts(&self, turns_stale: bool, facts_stale: bool) -> Result<(), StoreError> {
         if turns_stale && self.table_has_rows("turns")? {
             let rows = self.rebuild_turns_fts()?;
@@ -3475,6 +3598,123 @@ impl HistoryStore {
         });
         scored.truncate(clamp_usize(limit));
         Ok(scored)
+    }
+
+    // -- LLM call mirror ------------------------------------------------
+
+    /// Append one mirrored LLM call, then prune to `max_rows` newest for the
+    /// familiar (`max_rows <= 0` prunes nothing).
+    ///
+    /// Insert + prune share one transaction so the cap holds even when two
+    /// mirror writes land back to back.
+    pub fn append_llm_call(&self, p: AppendLlmCall, max_rows: i64) -> Result<i64, StoreError> {
+        let created_at = iso_utc(Utc::now());
+        self.db.run(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO llm_calls \
+                    (familiar_id, created_at, turn_id, turn_scope, channel_id, slot, model, \
+                     provider, status, system_prompt, messages_json, response_text, \
+                     tool_calls_json, tool_results_json, ttfb_ms, ttft_ms, total_ms, \
+                     est_in_tokens, in_tokens, out_tokens, cached) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
+                     ?16, ?17, ?18, ?19, ?20, ?21)",
+                params![
+                    p.familiar_id,
+                    created_at,
+                    p.turn_id,
+                    p.turn_scope,
+                    p.channel_id,
+                    p.slot,
+                    p.model,
+                    p.provider,
+                    p.status,
+                    p.system_prompt,
+                    p.messages_json,
+                    p.response_text,
+                    p.tool_calls_json,
+                    p.tool_results_json,
+                    p.ttfb_ms,
+                    p.ttft_ms,
+                    p.total_ms,
+                    p.est_in_tokens,
+                    p.in_tokens,
+                    p.out_tokens,
+                    p.cached,
+                ],
+            )?;
+            let id = conn.last_insert_rowid();
+            if max_rows > 0 {
+                tx.execute(
+                    "DELETE FROM llm_calls WHERE familiar_id = ?1 AND id NOT IN \
+                     (SELECT id FROM llm_calls WHERE familiar_id = ?1 \
+                      ORDER BY id DESC LIMIT ?2)",
+                    params![p.familiar_id, max_rows],
+                )?;
+            }
+            tx.commit()?;
+            Ok(id)
+        })
+    }
+
+    /// Mirrored calls for one `turns.id`, oldest first.
+    ///
+    /// Inner join: a row whose `turn_id` names no turn is unanchored and never
+    /// answers a turn query.
+    pub fn llm_calls_for_turn(
+        &self,
+        familiar_id: &str,
+        turn_id: i64,
+    ) -> Result<Vec<LlmCallRow>, StoreError> {
+        self.db.query_map(
+            format!(
+                "SELECT {LLM_CALL_COLS}, t.content AS turn_content \
+                 FROM llm_calls AS c \
+                 JOIN turns AS t ON t.id = c.turn_id AND t.familiar_id = c.familiar_id \
+                 WHERE c.familiar_id = ? AND c.turn_id = ? ORDER BY c.id"
+            ),
+            vec![v_str(familiar_id), v_int(turn_id)],
+            map_llm_call,
+        )
+    }
+
+    /// Newest mirrored calls, optionally filtered by slot; newest first.
+    pub fn recent_llm_calls(
+        &self,
+        familiar_id: &str,
+        slot: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LlmCallRow>, StoreError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut params = vec![v_str(familiar_id)];
+        let slot_clause = slot.map_or("", |s| {
+            params.push(v_str(s));
+            "AND c.slot = ? "
+        });
+        params.push(v_int(limit));
+        self.db.query_map(
+            format!(
+                "SELECT {LLM_CALL_COLS}, t.content AS turn_content \
+                 FROM llm_calls AS c \
+                 LEFT JOIN turns AS t ON t.id = c.turn_id AND t.familiar_id = c.familiar_id \
+                 WHERE c.familiar_id = ? {slot_clause}ORDER BY c.id DESC LIMIT ?"
+            ),
+            params,
+            map_llm_call,
+        )
+    }
+
+    /// Mirrored-call count for one familiar.
+    pub fn count_llm_calls(&self, familiar_id: &str) -> Result<i64, StoreError> {
+        Ok(self
+            .db
+            .query_scalar_i64(
+                "SELECT COUNT(*) FROM llm_calls WHERE familiar_id = ?",
+                vec![v_str(familiar_id)],
+            )?
+            .unwrap_or(0))
     }
 }
 
@@ -3606,8 +3846,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_subjects_coerces_non_string_values_like_python_str() {
-        // Python `_row_to_fact` keeps any dict with BOTH keys, coercing each via
+    fn parse_subjects_coerces_non_string_values() {
+        // Keep any object with BOTH keys, coercing each via
         // `str(...)`; only non-dict items or items missing a key are dropped.
         let blob = "[{\"canonical_key\": \"discord:1\", \"display_at_write\": \"Cor\"}, \
              {\"canonical_key\": 5, \"display_at_write\": \"X\"}, \

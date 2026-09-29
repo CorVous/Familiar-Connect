@@ -10,15 +10,15 @@
     clippy::significant_drop_tightening
 )]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use serde_json::{Value, json};
 
 use familiar_connect::bus::envelope::{Event, payload as wrap_payload};
@@ -27,11 +27,14 @@ use familiar_connect::bus::protocols::{BackpressurePolicy, EventBus};
 use familiar_connect::bus::topics::{
     TOPIC_DISCORD_TEXT, TOPIC_VOICE_ACTIVITY_START, TOPIC_VOICE_TRANSCRIPT_FINAL,
 };
-use familiar_connect::context::{Assembler, CharacterCardLayer, RecentHistoryLayer};
+use familiar_connect::config::{CharacterConfig, load_character_config};
+use familiar_connect::context::{
+    Assembler, AssemblyContext, CharacterCardLayer, Layer, RecentHistoryLayer,
+};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
 use familiar_connect::identity::Author;
-use familiar_connect::llm::{LlmClient, LlmDelta, Message};
+use familiar_connect::llm::{AbandonStatus, LlmClient, LlmDelta, LlmStream, Message};
 use familiar_connect::processors::{
     ActivityGate, DiscordTextPayload, FocusManagerApi, GateDecision, ResponderLlm, SendText,
     ToolContextFactory, TriggerTyping, TypingIndicator, VoiceActivityStart, VoiceTranscriptFinal,
@@ -62,6 +65,84 @@ pub fn make_card() -> PathBuf {
 }
 
 /// An assembler with a character-card layer + a recent-history slot (window 20).
+/// The shipped `_default/character.toml`, loaded as a `CharacterConfig`.
+///
+/// Reminder prose has no in-code default (#151); production threads the merged
+/// config, so the fixtures thread the shipped profile.
+#[must_use]
+pub fn default_config() -> CharacterConfig {
+    let profile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml");
+    let projectors: BTreeSet<String> = [
+        "rolling_summary",
+        "rich_note",
+        "people_dossier",
+        "reflection",
+        "fact_supersede",
+        "fact_embedding",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    let embedders: BTreeSet<String> = ["off", "hash", "fastembed"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    load_character_config(&profile, &profile, &projectors, &embedders)
+        .expect("load the shipped default profile")
+}
+
+/// The shipped per-mode operating directives, keyed by viewer mode.
+#[must_use]
+pub fn default_modes() -> HashMap<String, String> {
+    let cfg = default_config();
+    [
+        ("voice".to_owned(), cfg.operating_mode_voice),
+        ("text".to_owned(), cfg.operating_mode_text),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Records the `model` every `build` saw — the #183 threading probe.
+#[derive(Default)]
+pub struct ModelSpyLayer {
+    seen: Mutex<Vec<String>>,
+}
+
+impl ModelSpyLayer {
+    /// Models observed, in build order.
+    pub fn seen(&self) -> Vec<String> {
+        self.seen.lock().expect("spy seen").clone()
+    }
+}
+
+#[async_trait]
+impl Layer for ModelSpyLayer {
+    fn name(&self) -> &'static str {
+        "model_spy"
+    }
+    async fn build(&self, ctx: &AssemblyContext) -> String {
+        self.seen.lock().expect("spy seen").push(ctx.model.clone());
+        String::new()
+    }
+    async fn invalidation_key(&self, ctx: &AssemblyContext) -> String {
+        ctx.model.clone()
+    }
+}
+
+/// [`make_assembler`] plus a [`ModelSpyLayer`] the caller keeps a handle on.
+pub fn spy_assembler(store: Arc<AsyncHistoryStore>, spy: &Arc<ModelSpyLayer>) -> Arc<Assembler> {
+    let card = make_card();
+    Arc::new(
+        Assembler::builder()
+            .layer(Arc::new(CharacterCardLayer::new(card)))
+            .layer(Arc::clone(spy) as Arc<dyn Layer>)
+            .recent_history(RecentHistoryLayer::builder(store).window_size(20).build())
+            .build(),
+    )
+}
+
 pub fn make_assembler(store: Arc<AsyncHistoryStore>) -> Arc<Assembler> {
     let card = make_card();
     Arc::new(
@@ -170,6 +251,21 @@ pub fn tc_delta(call_id: &str, name: &str, args: Value) -> LlmDelta {
     }
 }
 
+/// A tool-call delta at an explicit accumulator index, so one iteration can
+/// carry several calls.
+pub fn tc_delta_at(index: i64, call_id: &str, name: &str, args: Value) -> LlmDelta {
+    LlmDelta {
+        content: String::new(),
+        tool_calls: vec![json!({
+            "index": index,
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": args.to_string()},
+        })],
+        finish_reason: None,
+    }
+}
+
 /// A terminal finish-reason delta.
 pub fn finish(reason: &str) -> LlmDelta {
     LlmDelta {
@@ -189,6 +285,8 @@ pub struct ScriptedLlm {
     delay_ms: u64,
     tool_calling: bool,
     image_tools: bool,
+    abandon: AbandonStatus,
+    model: String,
 }
 
 impl ScriptedLlm {
@@ -198,12 +296,28 @@ impl ScriptedLlm {
             delay_ms: 0,
             tool_calling: false,
             image_tools: false,
+            abandon: AbandonStatus::default(),
+            model: String::new(),
         }
     }
+
+    /// Name a model, as an OpenRouter client would (#183 calibration key).
+    #[must_use]
+    pub fn with_model(mut self, model: &str) -> Self {
+        model.clone_into(&mut self.model);
+        self
+    }
+
     pub fn with_delay(deltas: &[&str], delay_ms: u64) -> Self {
         let mut s = Self::new(deltas);
         s.delay_ms = delay_ms;
         s
+    }
+
+    /// Status word the responder noted before abandoning the stream —
+    /// `cancelled` unless it noted otherwise (issue #220).
+    pub fn abandon_status(&self) -> &'static str {
+        self.abandon.get()
     }
 }
 
@@ -216,7 +330,7 @@ impl LlmClient for ScriptedLlm {
         &self,
         _messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<LlmStream> {
         let deltas = self.deltas.clone();
         let delay = self.delay_ms;
         let s = stream::unfold(deltas.into_iter(), move |mut it| async move {
@@ -226,10 +340,13 @@ impl LlmClient for ScriptedLlm {
             }
             Some((Ok(text_delta(&d)), it))
         });
-        Ok(Box::pin(s))
+        Ok(LlmStream::with_abandon(Box::pin(s), self.abandon.clone()))
     }
     fn slot(&self) -> Option<&str> {
         None
+    }
+    fn model(&self) -> &str {
+        &self.model
     }
     fn multimodal(&self) -> bool {
         false
@@ -275,12 +392,12 @@ impl LlmClient for CapturingLlm {
         &self,
         messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<LlmStream> {
         self.captured.lock().expect("captured").push(messages);
         let reply = self.reply.clone();
-        Ok(Box::pin(stream::once(
-            async move { Ok(text_delta(&reply)) },
-        )))
+        Ok(LlmStream::new(stream::once(async move {
+            Ok(text_delta(&reply))
+        })))
     }
     fn slot(&self) -> Option<&str> {
         None
@@ -336,7 +453,7 @@ impl LlmClient for ScriptedToolLlm {
         &self,
         messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
+    ) -> anyhow::Result<LlmStream> {
         self.calls.lock().expect("calls").push(messages);
         let script = {
             let mut scripts = self.scripts.lock().expect("scripts");
@@ -346,7 +463,7 @@ impl LlmClient for ScriptedToolLlm {
                 scripts.remove(0)
             }
         };
-        Ok(Box::pin(stream::iter(script.into_iter().map(Ok))))
+        Ok(LlmStream::new(stream::iter(script.into_iter().map(Ok))))
     }
     fn slot(&self) -> Option<&str> {
         None
@@ -554,6 +671,7 @@ pub struct TestFocusManager {
     guild_names: HashMap<i64, String>,
     end_turn_count: AtomicUsize,
     nudge_count: AtomicUsize,
+    shifts: Mutex<Vec<i64>>,
 }
 
 impl TestFocusManager {
@@ -566,6 +684,7 @@ impl TestFocusManager {
             guild_names: HashMap::new(),
             end_turn_count: AtomicUsize::new(0),
             nudge_count: AtomicUsize::new(0),
+            shifts: Mutex::new(Vec::new()),
         }
     }
     pub fn unfocused() -> Self {
@@ -577,6 +696,7 @@ impl TestFocusManager {
             guild_names: HashMap::new(),
             end_turn_count: AtomicUsize::new(0),
             nudge_count: AtomicUsize::new(0),
+            shifts: Mutex::new(Vec::new()),
         }
     }
     pub const fn with_should_wake(mut self, v: bool) -> Self {
@@ -601,6 +721,10 @@ impl TestFocusManager {
     pub fn nudge_count(&self) -> usize {
         self.nudge_count.load(Ordering::SeqCst)
     }
+    /// Channels `shift_now` was called with, in order.
+    pub fn shifts(&self) -> Vec<i64> {
+        self.shifts.lock().expect("shifts").clone()
+    }
 }
 
 #[async_trait]
@@ -610,6 +734,9 @@ impl FocusManagerApi for TestFocusManager {
     }
     fn should_wake(&self, _channel_id: i64) -> bool {
         self.should_wake
+    }
+    async fn shift_now(&self, channel_id: i64) {
+        self.shifts.lock().expect("shifts").push(channel_id);
     }
     fn get_focus(&self, modality: &str) -> Option<i64> {
         if modality == "text" {
@@ -634,7 +761,7 @@ impl FocusManagerApi for TestFocusManager {
         match channel_id {
             Some(c) => match self.channel_names.get(&c) {
                 Some(n) => format!("#{n}({c})"),
-                None => format!("#{c}"),
+                None => format!("#unnamed({c})"),
             },
             None => "none".to_owned(),
         }

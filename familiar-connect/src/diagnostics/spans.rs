@@ -1,19 +1,18 @@
 //! `@span` timing — structured timing logs.
 //!
-//! Port of `familiar_connect/diagnostics/spans.py`. Python exposes a `@span`
-//! decorator that wraps sync **or** async callables; Rust has no decorators, so
-//! this exposes two helpers — [`timed_sync`] and [`timed_async`] — that time an
-//! operation, emit one DEBUG line per call on the `familiar_connect.diagnostics`
-//! target, and record into the process-wide [`SpanCollector`](super::collector).
+//! Rust has no decorators, so this exposes two helpers — [`timed_sync`] and
+//! [`timed_async`] — that time an operation, emit one DEBUG line per call on
+//! the `familiar_connect.diagnostics` target, and record into the process-wide
+//! [`SpanCollector`](super::collector).
 //!
 //! Timing is a wall-clock delta reported as `int(elapsed_seconds * 1000)`
-//! (truncation toward zero, DESIGN §4.3). Status is `"ok"` on normal return,
-//! `"error"` on **any** early exit — a panic (the Rust analog of a raised
-//! exception) or, for [`timed_async`], the future being dropped before it
-//! completes (cancellation: barge-in, a `JoinSet`/task abort of an `@span`
-//! worker tick — the Rust analog of `CancelledError`). The span line and record
-//! are emitted in a `finally`-like position on every path (spec 01 §20); a panic
-//! is re-raised unchanged afterwards.
+//! (truncation toward zero). Status is `"ok"` on normal return, `"error"` on
+//! **any** early exit — a panic (the Rust analog of a raised exception) or,
+//! for [`timed_async`], the future being dropped before it completes
+//! (cancellation: barge-in, a `JoinSet`/task abort of an `@span` worker tick
+//! — the Rust analog of `CancelledError`). The span line and record are
+//! emitted in a `finally`-like position on every path; a panic is re-raised
+//! unchanged afterwards.
 
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
@@ -37,13 +36,12 @@ pub fn timed_sync<T, F: FnOnce() -> T>(name: &str, f: F) -> T {
 
 /// Time a future, emitting the span line and recording the result.
 ///
-/// The span line + collector record are emitted on **every** exit path, exactly
-/// like Python's `try/finally` (spec 01 §20): normal completion reports
-/// `status="ok"`; a panic while polling **or** the future being dropped before it
-/// completes (cancellation — barge-in, a `JoinSet`/task abort of an `@span`
-/// worker tick) reports `status="error"`, matching Python re-raising
-/// `CancelledError` through its `except BaseException` arm. A panic propagates
-/// unchanged after the span is emitted.
+/// The span line + collector record are emitted on **every** exit path.
+/// Normal completion reports `status="ok"`; a
+/// panic while polling **or** the future being dropped before it completes
+/// (cancellation — barge-in, a `JoinSet`/task abort of an `@span` worker
+/// tick) reports `status="error"`. A panic propagates unchanged after the span
+/// is emitted.
 ///
 /// Cancellation matters here because Rust has no async `Drop`: dropping the
 /// future runs no user code except `Drop` impls, so the emit is anchored in a
@@ -63,11 +61,10 @@ pub async fn timed_async<T, F: Future<Output = T>>(name: &str, fut: F) -> T {
 
 /// Emits a span exactly once, on the first of [`SpanGuard::finish`] or `Drop`.
 ///
-/// [`timed_async`] arms one across the awaited future. Reaching normal completion
-/// calls `finish` (explicit status, disarms). If instead the future panics or is
-/// dropped mid-poll (cancellation), the value is never produced and `Drop` emits
-/// `status="error"` — the Rust analog of Python's `finally` running after
-/// `except BaseException` (spec 01 §20).
+/// [`timed_async`] arms one across the awaited future. Reaching normal
+/// completion calls `finish` (explicit status, disarms). If instead the future
+/// panics or is dropped mid-poll (cancellation), the value is never produced
+/// and `Drop` emits `status="error"`.
 struct SpanGuard<'a> {
     name: &'a str,
     start: Instant,
@@ -99,10 +96,10 @@ impl Drop for SpanGuard<'_> {
 
 /// Emit the DEBUG span line and record into the singleton collector.
 ///
-/// The line is a wire format (spec 01 §21): after ANSI stripping it reads
-/// `[span] span=<name> ms=<int> status=<ok|error>` in that order. DEBUG level is
-/// pinned by test — visible at `-vv` only. Recording never raises into the
-/// caller (the collector is poison-safe).
+/// The line is a wire format: after ANSI stripping it reads `[span] span=<name>
+/// ms=<int> status=<ok|error>` in that order. DEBUG level is pinned by test —
+/// visible at `-vv` only. Recording never raises into the caller (the collector
+/// is poison-safe).
 fn emit(name: &str, elapsed: Duration, status: &str) {
     // `@span` ms truncates toward zero (distinct from voice-budget rounding).
     #[allow(clippy::cast_possible_truncation)]
@@ -205,8 +202,7 @@ mod tests {
     }
 
     // A future dropped before completion (barge-in / JoinSet abort) must still
-    // emit an `error` span — Rust's analog of Python's `finally` firing on
-    // `CancelledError`. Drive it by entering the async body (which arms the
+    // emit an `error` span. Drive it by entering the async body (which arms the
     // guard) and parking at the inner await, then dropping without completing.
     #[test]
     fn emits_error_span_when_future_dropped_cancelled() {

@@ -1,5 +1,4 @@
-//! Author identity + canonical_key / slug / label + ego keys (subsystem 02;
-//! Python `identity.py`).
+//! Author identity + canonical_key / slug / label + ego keys (subsystem 02).
 //!
 //! Replaces a bare `speaker: String` threading history, context, memory,
 //! providers. [`Author`] carries an immutable platform key (`platform` +
@@ -77,8 +76,7 @@ pub trait DiscordMemberLike {
 ///
 /// [`Author::canonical_key`] is the storage-stable id; [`Author::label`] the
 /// human-readable string for prompts; `aliases` + the on-disk index map many
-/// display names / nicknames onto one author. Immutable once constructed
-/// (Python's frozen dataclass).
+/// display names / nicknames onto one author. Immutable once constructed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Author {
     /// `"discord"` / `"twitch"` / `"ego"` (kept as a string so slug

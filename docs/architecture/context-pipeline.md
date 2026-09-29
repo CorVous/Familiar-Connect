@@ -75,11 +75,17 @@ pub trait Layer: Send + Sync {
 `(layer.name, invalidation_key)`. Two `assemble` calls with the same
 context re-run `build` only for layers whose key changed.
 
+`AssemblyContext` carries the familiar id, channel, viewer mode, guild,
+and the target `model`. The responders set `model` from
+`LlmClient::model()`; layers key it into the token-calibration store when
+they trim (see [tuning](tuning.md#token-count-calibration)). It is fixed
+for an assembler's lifetime, so no invalidation key includes it.
+
 ### Static, file-sourced
 
 | Layer | Source | Invalidation |
 |---|---|---|
-| `CharacterCardLayer` | `data/familiars/<id>/character.md` (persona plus operational essentials — `<silent>` token, first-person, conciseness) | BLAKE2b content hash — catches sub-second edits |
+| `CharacterCardLayer` | `data/familiars/<id>/character.md` (persona plus operational essentials — how to stay silent, first-person, conciseness) | BLAKE2b content hash — catches sub-second edits |
 | `OperatingModeLayer` | in-memory `modes` dict, keyed on `viewer_mode` | `viewer_mode` |
 | `LorebookLayer` | `data/familiars/<id>/lorebook.toml` (optional) | file content hash + matched entry indices |
 
@@ -90,6 +96,7 @@ context re-run `build` only for layers whose key changed.
 | `ConversationSummaryLayer` | `summaries` table — the single per-familiar focus-stream row at `FOCUS_STREAM_CHANNEL_ID` (`ctx.channel_id` ignored) | `focus:<last_consumed_at>:<last_summarised_id>` |
 | `PeopleDossierLayer` | `people_dossiers` table, candidate set from recent authors + `turn_mentions`, plus the always-present `ego:<id>` subject | `t<latest_id>:cap<n>:<key>:f<last_fact_id>` concatenated |
 | `ReflectionLayer` | `reflections` table, channel-scoped (channel-agnostic rows always surface) | `ch<id>:r<latest_reflection_id>:cap<n>` |
+| `VoiceRosterLayer` | in-memory `VoiceRoster` (who is in the voice call + a decaying join/leave log) | `voice|r<revision>` — one counter covering membership *and* the live event set |
 | `RagContextLayer` | `fts/turns/` + `fts/facts/` tantivy search | `(current_cue, latest_fts_id, latest_fact_id)` |
 | `RecentHistoryLayer` | `turns.recent_cross_channel(window_size)` — all **consumed** turns across all channels, ordered by `arrived_at, id` | not cached — it *is* the query |
 
@@ -108,6 +115,21 @@ separate per-channel summary. Each user turn renders with a
 which channel a line came from once multiple channels share the
 window.
 
+The `HH:MM` is local to `display_tz` and deliberately carries no date
+and no offset: the final-reminder clock anchor
+(`"It is now: 2026-05-04 2:30PM PDT (-07:00)"`) supplies both once per
+prompt, and repeating them on every line would spend the
+`[budget.<tier>]` allowance on redundant tokens. Two markers are
+interleaved into the window instead, each emitted only when the
+surviving turns actually span more than one value:
+
+- a `YYYY-MM-DD:` day marker (same shape as the RAG date headers)
+  before each new local calendar day;
+- a `{server}/{channel}` marker before each channel change.
+
+A single-day single-channel window — the common case — passes through
+byte-for-byte with no markers at all.
+
 Past `tool` turns (e.g. `view_image` results) are **folded into
 user-side narration text**, not replayed as protocol `tool`
 messages. Recent-history replay carries no tool-call linkage, so a bare
@@ -121,6 +143,94 @@ assistant-side replay teaches the model to open fresh replies with the
 `[tool result] …` prefix (and even fabricate tool results inline) by
 mimicking its own apparent past output — the same mimicry trap the
 `[#id]` message-id tag avoids by being dropped from assistant turns.
+
+**Consequence for images.** The fold is unconditional, so a `view_image`
+result replays as text no matter what the slot's `multimodal` flag says:
+the picture itself is seen exactly once, on the turn it was fetched, and
+never again. Every downstream memory consumer — the fact extractor,
+rolling summaries, people dossiers, RAG — reads that folded text and
+nothing else. That is why `view_image` still writes a caption for a
+model that can see the image perfectly well; see
+[Image viewing](overview.md#image-viewing).
+
+## Voice call roster
+
+Voice membership already lived in the gateway's side cache — read by the
+speaker resolver and STT keyterm biasing (see [Voice pipeline — Voice
+member roster](voice-pipeline.md#voice-member-roster)) — but never
+reached the prompt, so the bot had no idea who was in the call.
+`VoiceRosterLayer` renders it.
+
+```
+In the call: Cor, Cassidy, Tam.
+Tam just joined. pixel left.
+```
+
+Two lines, both optional. The roster line lists current members by
+`Author::label()` (display name → username → user id), in join order,
+capped at 12 names with a `+N more` tail. The narration line reports the
+most recent 6 undecayed join/leave events, oldest first. An empty call
+renders **nothing at all** — never "In the call: nobody."
+
+**Voice turns only.** `build` returns the empty string whenever
+`ctx.viewer_mode != "voice"`, and `default_assembler` only installs the
+layer for the voice tier. Call membership is meaningless on a text turn,
+and letting it churn there would cost tokens on every message and
+invalidate the text path's cache prefix for no benefit.
+
+### The shared roster type
+
+`VoiceRoster` (`familiar-connect/src/voice_roster.rs`) is a standalone,
+never-feature-gated type — the same seam shape as `FocusManager`. The
+`discord` gateway glue writes it through `BotHandle::voice_members`
+(which *is* this type, not a second copy): `/subscribe-voice` snapshots
+the channel's current occupants, `on_voice_state_update` records
+arrivals and departures, `/unsubscribe-voice` clears it. The ungated
+layer reads the very same `Arc`, so the roster the model sees can never
+drift from the roster the STT biasing uses.
+
+Only the narration is new to the gateway path. Bots and the familiar's
+own user id are excluded exactly as before, at both the snapshot and the
+update, and a snapshot never narrates — nobody "just joined" when the
+familiar walked into a call already in progress.
+
+### Decay and bounds
+
+Events are timestamped on an injectable monotonic clock and pruned on
+read: anything older than `[voice].roster_event_window_seconds`
+(default `120.0`) stops being narrated. Membership itself never decays —
+only the narration ages out. The log is additionally hard-capped at 16
+entries, so a long call with heavy churn cannot grow it without bound.
+
+### Why it sits late, and how its cache key stays still
+
+`default_assembler` orders layers stability-descending. The roster
+changes whenever anyone joins or leaves, so it sits **next-to-last** —
+after `people_dossier`, before `rag_context`. A join therefore
+invalidates only the roster block and the RAG block behind it, never the
+persona / lorebook / summary / dossier prefix. It does not go last
+because `rag_context` is strictly more volatile (its cue changes every
+single turn).
+
+The subtlety is time decay. A key containing a clock reading would
+change every turn and re-render a block that nobody touched; a key
+ignoring time would keep serving "Tam just joined." after it should have
+aged out. Instead the roster carries a monotonic `revision` counter that
+every mutation bumps — *and pruning bumps too*, because pruning happens
+inside the read path (`view()` / `revision()` both prune first). So the
+key is just `voice|r<revision>`: stable while nothing happens, however
+much time passes, and different the moment membership changes or an
+event falls out of the window.
+
+### Token cost
+
+Around 8-15 tokens on a typical 3-4 person call (`In the call: Cor,
+Cassidy, Tam.` estimates at 8; each narrated event adds ~5). Worst case —
+12 names plus a `+N more` tail and 6 narrated events — is ~56.
+That is small and self-bounding, so the layer has no `TierBudget` entry —
+unlike history / RAG / dossier / summary / reflections / lorebook, whose
+sizes are driven by unbounded stored data, the roster is bounded by the
+size of a Discord voice channel.
 
 ## Watermark-driven workers
 
@@ -286,11 +396,30 @@ silently mislead the model long after they stopped being true.
 1. **Prompt-side**: the extractor's system message explicitly
    instructs the LLM not to emit facts about itself, the assistant,
    or its own limitations.
-2. **Post-filter**: `_is_self_capability(text)` matches a small set of
+2. **Post-filter**: `is_self_capability(text, …)` matches a small set of
    first-person and "the assistant/AI/model" patterns at the start of
    the fact. Matched facts are dropped (logged at DEBUG) before
    `append_fact`. Belt-and-braces — even if the model ignores the
    prompt, the row never lands.
+
+The post-filter is deliberately weak-handed (issue #153). Every
+alternative needs a negation or inability tail, not just an opening
+word: *the familiar loves rainy days*, *I can juggle*, *I have no
+siblings*, *I don't like Mondays*, and *as an AI researcher, Cor works
+on alignment* are prose and survive, while *the assistant cannot browse
+the web*, *the familiar has no internet access*, *as an AI, I have no
+personal preferences*, and *I don't have access to the internet* still
+drop. A separate, narrower rail matches the familiar's own display name
+followed by an inability tail (*Sapphire cannot remember names*), so
+third-person self-descriptions are caught without touching narrative
+(*Sapphire cancelled the movie night*).
+
+Operators tune it under `[providers.memory.rich_note]`:
+`self_capability_filter = false` disables the drop entirely (both
+rails); `self_capability_pattern = "<regex>"` replaces the built-in
+matcher. The pattern is compiled at config load, so a typo fails startup
+rather than the first tick. See
+[Configuration model](configuration-model.md#2-character-config).
 
 The capability ban is **narrow**: it drops *capabilities/limitations*,
 not the familiar's *narrative*. The familiar's own bits/performances,
@@ -480,7 +609,9 @@ about.
   worker already iterates every subject with facts). `resolve_label` has
   no account row for the self key, so the worker substitutes the
   familiar's display name for the dossier header. The self-record uses a
-  distinct compaction prompt: it **preserves settled opinions, stances,
+  distinct compaction prompt (`[prompt].dossier_self_system`, against
+  `.dossier_other_system` for everyone else): it **preserves settled
+  opinions, stances,
   and feelings** (the views the familiar holds consistently) and drops
   only momentary reactions — unlike the person-dossier prompt, which
   sheds transient feelings wholesale. The self-record also drops
@@ -694,10 +825,10 @@ silently degrade to threading on the inbound message.
 ### Final reminder
 
 Every system prompt closes with a small block restating *current time*
-(`YYYY-MM-DD H:MMpm UTC`) and the literal sentinels the responder
+(`YYYY-MM-DD H:MMpm UTC`) and the literal input markers the responder
 honours. Rebuilt per-call (cheap), so the model never sees a stale
 clock — useful when the prompt cache lives across long-tailed turns.
-Voice channels see only `<silent>`; text channels also list
+Voice channels see no markers; text channels list
 `[@DisplayName]` and `[↩ <message_id>]`. Source:
 `familiar-connect/src/context/final_reminder.rs`.
 
@@ -707,20 +838,46 @@ When a `FocusManager` is wired, the block also carries a prose
 `channel_names`:
 
 > Your attention is currently on #general. There is a new message in
-> #other-channel — use shift_focus if it pulls your attention.
+> #other-channel (id 456) — use shift_focus if one pulls your
+> attention: it moves you there quietly, or pass silent: false to
+> arrive and speak.
 
 The focus clause names the active channel; the unread clause lists
 channels with staged (unconsumed) turns and nudges toward the
-`shift_focus` tool. Counts > 1 render as `#channel (N)`. Both clauses
-omit when their source is empty. This is the model-facing surface of
-the attentional stream (see [below](#attentional-stream)).
+`shift_focus` tool. Every unread entry carries its numeric id, because
+that id is what `shift_focus` takes as an argument. Counts > 1 render
+as `#channel (id N) (2)`; DMs render as `DM from <name> (id N)`, and a
+channel the gateway name cache missed as `unnamed channel (id N)` —
+never a bare `#<snowflake>`, which would claim the channel is *named*
+after its id (issue #222). Digest ids come from staged turns in the
+history store while names come from the gateway cache, so an id with
+no name is routine rather than exceptional. Both clauses omit when
+their source is empty. This is the model-facing surface of the
+attentional stream (see [below](#attentional-stream)).
+
+The trailing coaching half of the unread clause is
+`[prompt].shift_focus_coaching`, spliced in after an em dash. It is
+gated on `tools_enabled`, which both responders set from the slot's own
+tool mode; a blank value drops it too. A slot that cannot call tools
+sees the plain `There is a new message in #other-channel (id 456).`
+instead: coaching a model toward a tool it has no way to call only
+invites it to type the call out as prose (issue #221).
+
+The shipped wording names both ways to use the tool. Since every tool
+call defaults to `silent: true`, a bare `shift_focus` is "move and say
+nothing" — strictly `silent` plus a side effect — so a model told only
+to "use shift_focus if it pulls your attention" reaches for the plainly
+described `silent` every time and never shifts. Spelling out the quiet
+move *and* the `silent: false` opt-in makes the choice legible.
 
 Both responders also append a *second* copy of the same block as a
 trailing `system` message, after recent history, with
 `include_mode_instruction=True`. This appends the per-mode operating
-directive (`"You are speaking aloud. Keep replies short (one or two
-sentences). Avoid markdown."` for voice; the text-channel equivalent
-for text) to the tail copy. The directive is still set up-front by
+directive (`[prompt].operating_mode_voice`, shipped as `"You are
+speaking aloud. Keep replies short (one or two sentences). Avoid
+markdown."`; `.operating_mode_text` for text) to the tail copy. Both
+consumers read that one config pair — the reminder holds no in-code
+copy. The directive is still set up-front by
 `OperatingModeLayer` — the trailing copy is recency insurance: long
 contexts make models drift away from format gates buried at the top
 of the system prompt, and a final-position reminder is the cheapest
@@ -733,7 +890,7 @@ turn, where behavioral nudges land hardest. It is rendered verbatim
 (markdown fine) and only in the trailing copy, never the up-front one,
 so "post-history" stays literal. Empty string omits it. The shipped
 default is a short roleplay-etiquette note steering the familiar
-toward `<silent>` so it doesn't over-talk on voice. Source of the
+toward silence so it doesn't over-talk on voice. Source of the
 default: `data/familiars/_default/character.toml` `[prompt]`.
 
 There is **no per-channel enumeration** of pingable users. The LLM
@@ -796,7 +953,7 @@ opt in; production wiring sets it).
 **Rendering.** Retrieved hits are no longer flat ``- [Alice] text``
 lines — each hit pulls ``id ± context_window`` neighbours from the
 same channel (default 1, dropping any neighbour the recent-history
-window already shows) and the result is grouped by UTC date:
+window already shows) and the result is grouped by `display_tz` date:
 
 ```
 ## Possibly relevant earlier turns
@@ -868,30 +1025,29 @@ turn for me?" without a separate gating LLM call:
 
 1. **Message format carries speaker + time.** `RecentHistoryLayer`
    renders user turns as `[HH:MM Display Name #channel_id] content`
-   (UTC). Different speakers get different prefixes; the rhythm of
+   (in `display_tz`). Different speakers get different prefixes; the rhythm of
    timestamps tells the model whether a conversation is flowing
    between humans. The `#channel_id` disambiguates source once the
    cross-channel window mixes multiple channels.
-2. **Silent sentinel in the reply.** The system prompt instructs the
-   model to emit the literal token `<silent>` as its *entire* reply
-   when the latest message isn't for it. `SilentDetector`
-   (`familiar_connect::silence`) inspects the streaming reply
-   delta-by-delta; on a prefix match it short-circuits the stream, the
-   responder skips Discord posting / TTS, and no assistant turn is
-   appended. The user turn is still recorded — observation is not
-   gated by response.
+2. **Silence as a tool call.** When the latest message isn't for it, the
+   model calls a tool instead of writing a reply. Every tool call is
+   silent unless it passes `silent: false`, and `silent(reasoning)` is
+   the explicit "do nothing, say nothing" case: it returns a sentinel
+   that makes `agentic_loop` return `AgenticResult(is_silent=true)`
+   without re-prompting, and the responder skips Discord posting / TTS
+   with no assistant turn appended. The user turn is still recorded —
+   observation is not gated by response.
 
-The sentinel is best-effort: it relies on the model following the
-system-prompt instruction. A stray `<silent>` mid-reply is treated as
-content (prefix-only match); the decision latches once made and
-subsequent deltas don't re-open it.
+There is no `<silent>` text sentinel; the literal string in model output
+is ordinary prose and gets spoken like any other text. What survives on
+the tool-less streaming path is the leak guard: a `silent(…)` or
+`<invoke …>` block the model emits as *text* is caught mid-stream by
+`StreamGate` (`familiar_connect::silence`) and honoured as silence
+(`silent`) or suppressed (any other tool). Prefix-only — a stray
+mention mid-reply is content — and the decision latches once made.
 
-Under tool calling the same decision is also reachable as a tool: the
-`silent(reasoning)` tool returns a sentinel that makes `agentic_loop`
-return `AgenticResult(is_silent=True)` without re-prompting, and the
-responder bails exactly as it does on the `<silent>` text token. The
-two coexist — `<silent>` gates the bare streaming path, `silent()`
-gates the agentic path.
+Because silence needs a tool, `[llm.<slot>].tool_calling` is mandatory:
+it defaults to `true` and `false` is refused at config load.
 
 ## Attentional stream
 
@@ -931,6 +1087,8 @@ inbound message:
   responder returns early: **no assembly, no LLM call, no reply.** The
   message surfaces only as an unread digest entry on the next focused
   turn.
+- **Unfocused channel, direct ping, no tool path** — the one exception
+  (issue #221). See [non-tool focus fallback](#non-tool-focus-fallback).
 
 `VoiceResponder` calls `end_turn()` after each completed voice turn
 too.
@@ -977,17 +1135,92 @@ moves her off her current channel until she shifts back. The unread
 digest (and the unread nudge) is the mechanism for noticing
 other channels without leaving.
 
+#### Non-tool focus fallback
+
+`shift_focus` is the only way the *model* moves focus, which strands a
+familiar whose slot has no tool path at all: it can never leave the
+channel it booted on (issue #221). The text responder therefore keeps
+one fallback. A message that **directly pings the bot** in a
+subscribed-but-unfocused channel calls `shift_now` on that channel and
+then replies there, instead of staging and returning.
+
+It is gated on the responder having no agentic loop for this turn —
+no tool registry / context factory wired (`tool_calling` itself can no
+longer be turned off). The same flag gates the reminder's
+`shift_focus` coaching, so the two always agree. When tools *are*
+available the behavior is unchanged: `shift_focus` is the model's own
+deliberate control and an automatic shift underneath it would fight
+its per-turn send routing. Ambient (non-ping) traffic still stages in
+both configurations — only a direct ping earns the move. The shift runs
+through the same `shift_now` path the tool uses, so the just-staged ping
+is promoted along with the target's catch-up window. Logs
+`[🔀 Focus] … reason=ping_no_tools`.
+
+A tool-less slot cannot be *told* about tools either, and the tool-less
+text stream now runs the same `StreamGate` the voice path does — so a
+model that imitates `shift_focus(…)` or `<invoke …>` as prose is
+suppressed rather than posted (the tool path already had the
+return-time strip guard in `tools::agentic`).
+
 Pointers persist in the `focus_pointers` table
 (`familiar_id PK, text_channel_id, voice_channel_id, updated_at`); on
 startup `initialize()` loads them, **dropping any pointer whose channel
 is no longer subscribed** (a since-removed subscription would otherwise
 strand focus on a dead channel), then falling back to the first text and
-first voice subscription as defaults (`set_focus_immediately`). The
-`channel_names` map (channel_id → display name) is populated from
-Discord on `on_ready` purely for readable logs and the unread digest.
+first voice subscription as defaults (`set_focus_immediately`).
+
+The `channel_names` map (channel_id → display name) and its
+`guild_names` sibling drive readable logs, the unread digest, and the
+Discord presence line (`✨ <server> -> #<channel>`). These sites
+populate them:
+
+- `guild_create` — the gateway's full guild payload (channel list plus
+  server name). This is where naming actually arrives: the READY payload
+  lists guilds as *unavailable stubs*, with the real data following as a
+  burst of `GUILD_CREATE` events, so a ready-time snapshot sees nothing
+  on a cold start. The same handler covers joining a guild mid-session.
+- `channel_update` and `guild_update` — mid-session renames of a
+  channel or a server.
+- `/subscribe-text` and `/subscribe-voice` — the interaction's own
+  channel object plus the gateway-cached server name, so a channel
+  created *after* boot is named the moment it is subscribed.
+- `register_dm_channel` — the DM peer's display name, refreshed on
+  every DM, under the `Private Message` sentinel server name.
+- `rehydrate_dm_naming` at boot — the peer name recovered from history,
+  falling back to `user <peer_id>` when a freshly-allowlisted peer has
+  no history yet.
+
+`on_ready` still snapshots whatever guilds the gateway cache already
+holds. That covers a warm reconnect only and is empty on a cold start,
+which is why it was never the fix for #222.
+
+Every naming batch re-syncs the presence line, but only when the focused
+channel's rendered label actually changed — one presence update per
+batch, because Discord rate-limits presence updates. Without that
+re-sync, focus seeded at boot (before any name is known) would keep the
+`unnamed channel` fallback in the status until the next focus shift. As
+on ready, an in-flight activity re-asserts its away presence afterwards,
+so the online focus line never clobbers an idle/dnd status.
+
+A channel that still misses the cache never renders as a bare snowflake:
+labels read `unnamed channel (id <cid>)` (presence, focus line, unread
+digest) or `#unnamed(<cid>)` (logs, tool labels), which says *name
+unknown* instead of implying the channel is named after its id.
+
+Naming is guild-driven, not subscription-driven: nothing walks the
+subscription list to fill gaps, and there is no REST fetch when the
+cache misses. `message_create` carries no channel name either (the DM
+branch is the exception — it names the channel after the peer). So a
+channel can stage unread turns, and therefore appear in the digest,
+while never having been named: threads and forum posts are absent from
+`Guild.channels` and so are never named by the `guild_create` path, and
+a guild whose `guild_create` never arrives (joined out of band, resume
+gap, shard still working through the post-READY burst) leaves all of
+its channels nameless until a rename event lands.
 
 Logs: `[Focus] loaded/default` on init, `[🔀 Focus] text=… promoted=N
-missed=N` on a text shift, `[👁️ Focus]` once names are known on ready.
+missed=N` on a text shift, `[Focus] guild=… named=N` (debug) per naming
+batch.
 
 #### Unread nudge
 
@@ -1006,6 +1239,40 @@ sees the unread digest and can choose to `shift_focus` — but the nudge
 events skip the user-turn persist (no transcript pollution) and
 `mark_nudge_pending()` dedupes arrival bursts for the
 `nudge_debounce_seconds` window. Logs `[⏰ Nudge]`.
+
+##### The wake turn's message shape
+
+Skipping the user-turn persist means a wake turn stages nothing, so
+replayed history ends on the familiar's own last reply and the array
+reads `[system, …, assistant, system]`. Some providers treat a trailing
+assistant message as a request to *continue* it — prefix completion —
+which they refuse to combine with a `tools` array: DeepSeek answers
+`Function call should not be used with prefix` and the turn 400s. (This
+is provider-specific tolerance, not a universal rule; the same shape
+runs fine on GLM, and Anthropic supports trailing-assistant prefill
+deliberately.)
+
+So a wake turn appends one short **user** message naming the wake event
+itself, immediately before the trailing reminder — the array ends
+`[…, assistant, user, system]`. The text is
+`final_reminder.wake_notice(unread_digest, channel_names)`:
+
+> (You notice new messages in #art.)
+
+Singular when the digest totals one; channels with no unread are
+skipped; an empty or absent digest degrades to `(You notice unread
+messages waiting elsewhere.)`. The labels carry no ids — the digest in
+the reminder just above already lists them with ids for `shift_focus`.
+
+This is honest content rather than a role workaround: a wake genuinely
+is an event she is reacting to. It is also **wake-only** — the trailing
+reminder stays a `system` message on every turn, and an ordinary turn's
+array is byte-identical to what it was before, because an ordinary turn
+already ends on the user message that triggered it. Alarm wakes are
+unaffected too: they carry `alarm: True`, not `wake`, and persist an
+`[alarm fired: …]` user turn of their own. Voice has no wake path at
+all — `VoiceResponder` never sets `unread_digest` and only ever runs off
+a transcript, which is always a user turn.
 
 ### Unread digest
 
@@ -1034,13 +1301,19 @@ Discord text on channel C
       focused = FocusManager.is_focused(C)  (True when no FocusManager)
       appends user turn to `turns` with consumed=focused
         (fts_turns trigger fires; row indexed)
-      if not focused: log [📥 Staged]; return  (no assembly, no LLM, no reply)
+      if not focused:
+        if direct ping AND no tool path: shift_now(C); fall through (#221)
+        else: log [📥 Staged]; return  (no assembly, no LLM, no reply)
       seeds RagContextLayer cue = content
       Assembler.assemble(ctx, viewer_mode="text")
-      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
+      LLMClient.chat_stream (cancellable via scope; StreamGate watches deltas
+       for leaked tool calls)
       (shift_focus, if called, already moved focus + promoted staged, and is
-       recorded turn-locally as this turn's send target)
-      if `<silent>` detected: bail (no send, no assistant turn)
+       recorded turn-locally as this turn's send target; its call is persisted
+       even when the turn is silent)
+      if the turn is silent (any tool call without `silent: false`, the
+       `silent` tool, or a leaked `silent(` call): bail (no send, no
+       assistant prose turn)
       if wake turn AND no shift this turn: suppress (shift-or-silent, #170)
       else: BotHandle.send_text(this turn's shift target, else channel C, reply)
             append assistant turn to that same channel  (never the global focus
@@ -1060,8 +1333,8 @@ Voice transcript final on channel C (voice:C)
         → PeopleDossierLayer: read from people_dossiers, capped at max_people
         → RagContextLayer: FTS search on cue
         → RecentHistoryLayer: last N consumed turns across all channels
-      LLMClient.chat_stream (cancellable via scope; SilentDetector watches deltas)
-      if `<silent>` detected: bail (no TTS, no assistant turn)
+      LLMClient.chat_stream (cancellable via scope; StreamGate watches deltas)
+      if the turn is silent: bail (no TTS, no assistant turn)
       else: TTSPlayer.speak; append assistant turn
       router.end_turn(scope); FocusManager.end_turn()
 

@@ -1,8 +1,9 @@
-//! Text reply orchestrator (subsystem 06; Python `processors/text_responder.py`).
+//! Text reply orchestrator (subsystem 06).
 //!
 //! Consumes `discord.text` events, assembles a layered prompt (05), streams an
-//! LLM reply (08), gates it through the `<silent>` sentinel, rewrites its
-//! ping/thread markers, and delivers it via the injected [`SendText`] callback,
+//! LLM reply (08), gates it through the leaked-tool-call guard and the turn's
+//! silence decision, rewrites its ping/thread markers, and delivers it via the
+//! injected [`SendText`] callback,
 //! persisting user + assistant turns to history (03). Everything runs inline
 //! under a per-turn [`TurnScope`] so a typing-cancel or a newer event's
 //! `begin_turn` supersedes in-flight work cooperatively.
@@ -22,7 +23,8 @@ use crate::bus::protocols::EventBus;
 use crate::bus::router::TurnRouter;
 use crate::bus::topics::TOPIC_DISCORD_TEXT;
 use crate::context::assembler::{Assembler, AssemblyContext};
-use crate::context::final_reminder::FinalReminder;
+use crate::context::final_reminder::{FinalReminder, wake_notice};
+use crate::diagnostics::llm_mirror::{CallContext, with_call_context};
 use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::AppendTurn;
 use crate::identity::Author;
@@ -32,7 +34,7 @@ use crate::processors::{
     ActivityGate, DiscordTextPayload, FocusManagerApi, GateAction, ResponderLlm, SendText,
     ToolContextFactory, TriggerTyping, TypingIndicator,
 };
-use crate::silence::SilentDetector;
+use crate::silence::{StreamDecision, StreamGate};
 use crate::tools::agentic::{
     AgenticHooks, DEFAULT_MAX_ITERATIONS, agentic_loop, tool_content_as_text,
 };
@@ -174,6 +176,8 @@ pub struct TextResponder {
     tool_registry: Option<Arc<ToolRegistry>>,
     tool_context_factory: Option<ToolContextFactory>,
     post_history_instructions: String,
+    shift_focus_coaching: String,
+    mode_instructions: HashMap<String, String>,
     display_tz: String,
     focus_manager: Option<Arc<dyn FocusManagerApi>>,
     loop_max_iterations: usize,
@@ -208,6 +212,8 @@ impl TextResponder {
             tool_registry: None,
             tool_context_factory: None,
             post_history_instructions: String::new(),
+            shift_focus_coaching: String::new(),
+            mode_instructions: HashMap::new(),
             display_tz: "UTC".to_owned(),
             focus_manager: None,
             loop_max_iterations: 5,
@@ -239,6 +245,20 @@ impl TextResponder {
     #[must_use]
     pub fn with_post_history_instructions(mut self, text: impl Into<String>) -> Self {
         self.post_history_instructions = text.into();
+        self
+    }
+    /// Set the unread-digest `shift_focus` clause
+    /// (`[prompt].shift_focus_coaching`); empty = omitted.
+    #[must_use]
+    pub fn with_shift_focus_coaching(mut self, text: impl Into<String>) -> Self {
+        self.shift_focus_coaching = text.into();
+        self
+    }
+    /// Set the per-mode operating directives (`[prompt].operating_mode_*`);
+    /// the same map `OperatingModeLayer` is built from.
+    #[must_use]
+    pub fn with_mode_instructions(mut self, modes: HashMap<String, String>) -> Self {
+        self.mode_instructions = modes;
         self
     }
     /// Set the trailing-reminder clock timezone.
@@ -276,6 +296,15 @@ impl TextResponder {
     #[must_use]
     pub const fn topics(&self) -> [&'static str; 1] {
         [TOPIC_DISCORD_TEXT]
+    }
+
+    /// Whether this turn runs the agentic loop — i.e. whether the model can
+    /// reach `shift_focus` at all. Gates the tool-referencing reminder prose and
+    /// the no-tools ping fallback (#221).
+    fn tool_mode(&self) -> bool {
+        self.tool_registry.is_some()
+            && self.tool_context_factory.is_some()
+            && (self.llm.tool_calling_enabled() || self.llm.image_tools_enabled())
     }
 
     /// Handle one `discord.text` event: the whole turn, inline.
@@ -359,6 +388,9 @@ impl TextResponder {
             .as_ref()
             .is_none_or(|fm| fm.is_focused(channel_id));
 
+        // The turn every LLM call this handler makes is answering; `None` on a
+        // wake nudge, which appends no user turn.
+        let mut anchor_turn_id: Option<i64> = None;
         if !is_wake {
             let mut append = AppendTurn::new(&self.familiar_id, channel_id, "user", &content)
                 .consumed(focused && !suppressed)
@@ -376,6 +408,7 @@ impl TextResponder {
                 append = append.reply_to_message_id(rid);
             }
             let user_turn = self.history.append_turn(append).await?;
+            anchor_turn_id = Some(user_turn.id);
             if !mentions.is_empty() {
                 let keys: Vec<String> = mentions.iter().map(Author::canonical_key).collect();
                 self.history.record_mentions(user_turn.id, keys).await?;
@@ -399,22 +432,31 @@ impl TextResponder {
                 return Ok(());
             }
             if !focused {
-                let (ch, srv) = self.origin_fields(channel_id);
-                let label = author.as_ref().map_or("unknown", author_display);
-                tracing::info!(
-                    "{} {}{}{} {}",
-                    ls::tag("\u{1f4e5} Staged", ls::Y),
-                    ch,
-                    srv,
-                    ls::kv_styled("from", label, ls::W, ls::LW),
-                    ls::kv_styled("text", &content, ls::W, ls::LW),
-                );
-                if let Some(fm) = &self.focus_manager {
-                    if fm.should_wake(channel_id) {
-                        self.emit_unread_nudge(bus).await;
+                // Non-tool fallback (#221): with no agentic loop the model can
+                // never call `shift_focus`, so a direct ping would strand her
+                // forever. Answer it — move focus here and fall through. With
+                // tools on, `shift_focus` is her deliberate control and an
+                // automatic shift would fight it, so staging stands.
+                if pings_bot && !self.tool_mode() {
+                    self.shift_for_ping(channel_id).await;
+                } else {
+                    let (ch, srv) = self.origin_fields(channel_id);
+                    let label = author.as_ref().map_or("unknown", author_display);
+                    tracing::info!(
+                        "{} {}{}{} {}",
+                        ls::tag("\u{1f4e5} Staged", ls::Y),
+                        ch,
+                        srv,
+                        ls::kv_styled("from", label, ls::W, ls::LW),
+                        ls::kv_styled("text", &content, ls::W, ls::LW),
+                    );
+                    if let Some(fm) = &self.focus_manager {
+                        if fm.should_wake(channel_id) {
+                            self.emit_unread_nudge(bus).await;
+                        }
                     }
+                    return Ok(());
                 }
-                return Ok(());
             }
         } else if suppressed {
             return Ok(());
@@ -433,16 +475,19 @@ impl TextResponder {
         // records the channel it moved to here, so the send target follows THIS
         // turn's own shift rather than the mutable global focus (#170).
         let shift_target: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
-        let reply = self
-            .stream_reply(
+        let reply = with_call_context(
+            CallContext::new(anchor_turn_id, &scope.turn_id, channel_id),
+            self.stream_reply(
                 &scope,
                 channel_id,
                 guild_id,
                 images,
                 activity_state_line,
                 &shift_target,
-            )
-            .await;
+                is_wake,
+            ),
+        )
+        .await;
 
         let Some(reply) = reply else {
             if let Some(engine) = &self.activity_engine {
@@ -606,6 +651,22 @@ impl TextResponder {
         (ch, srv)
     }
 
+    /// Move focus to a channel that just pinged her, tool-free (#221).
+    async fn shift_for_ping(&self, channel_id: i64) {
+        let Some(fm) = &self.focus_manager else {
+            return;
+        };
+        fm.shift_now(channel_id).await;
+        let (ch, srv) = self.origin_fields(channel_id);
+        tracing::info!(
+            "{} {}{}{}",
+            ls::tag("\u{1f500} Focus", ls::LC),
+            ch,
+            srv,
+            ls::kv_styled("reason", "ping_no_tools", ls::W, ls::LW),
+        );
+    }
+
     async fn emit_unread_nudge(&self, bus: &dyn EventBus) {
         let Some(fm) = &self.focus_manager else {
             return;
@@ -627,7 +688,9 @@ impl TextResponder {
         let event = Event {
             event_id: synth_id,
             turn_id,
-            session_id: focus_ch.to_string(),
+            // Same session key the real text source uses — the router keys
+            // barge-in on the exact string.
+            session_id: format!("discord:{focus_ch}"),
             parent_event_ids: Vec::new(),
             topic: TOPIC_DISCORD_TEXT.to_owned(),
             timestamp: chrono::Utc::now(),
@@ -674,6 +737,11 @@ impl TextResponder {
         Ok(label_to_key)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one turn's assembly inputs, taken whole"
+    )]
     async fn stream_reply(
         &self,
         scope: &TurnScope,
@@ -682,9 +750,11 @@ impl TextResponder {
         images: HashMap<String, String>,
         activity_state_line: Option<String>,
         shift_target: &Arc<Mutex<Option<i64>>>,
+        is_wake: bool,
     ) -> Option<String> {
-        let mut ctx =
-            AssemblyContext::new(&self.familiar_id, Some(channel_id)).with_viewer_mode("text");
+        let mut ctx = AssemblyContext::new(&self.familiar_id, Some(channel_id))
+            .with_viewer_mode("text")
+            .with_model(self.llm.model());
         if let Some(g) = guild_id {
             ctx = ctx.with_guild_id(g);
         }
@@ -720,8 +790,11 @@ impl TextResponder {
             .map(|fm| fm.guild_names())
             .unwrap_or_default();
 
+        let tool_mode = self.tool_mode();
         let mut head = FinalReminder::new("text")
             .include_time(false)
+            .tools_enabled(tool_mode)
+            .shift_focus_coaching(&self.shift_focus_coaching)
             .channel_names(ch_names.clone())
             .guild_names(gn_names.clone());
         if let Some(fc) = focus_ch {
@@ -737,6 +810,15 @@ impl TextResponder {
         );
         let mut messages: Vec<Message> = vec![Message::new("system", system)];
         messages.extend(prompt.recent_history);
+        // A wake stages no user turn, so history ends on her own reply; trailing
+        // assistant + a tools array reads as prefix completion on some providers
+        // and 400s. Name the wake event itself — honest content, wake turns only.
+        if is_wake {
+            messages.push(Message::new(
+                "user",
+                wake_notice(unread_digest.as_deref().unwrap_or_default(), &ch_names),
+            ));
+        }
 
         let guild_name = self
             .focus_manager
@@ -745,6 +827,9 @@ impl TextResponder {
         let mut trailing_b = FinalReminder::new("text")
             .display_tz(&self.display_tz)
             .include_mode_instruction(true)
+            .mode_instructions(self.mode_instructions.clone())
+            .tools_enabled(tool_mode)
+            .shift_focus_coaching(&self.shift_focus_coaching)
             .post_history_instructions(&self.post_history_instructions)
             .channel_names(ch_names)
             .guild_names(gn_names);
@@ -763,9 +848,6 @@ impl TextResponder {
         }
         messages.push(Message::new("system", trailing));
 
-        let tool_mode = self.tool_registry.is_some()
-            && self.tool_context_factory.is_some()
-            && (self.llm.tool_calling_enabled() || self.llm.image_tools_enabled());
         if tool_mode {
             self.stream_reply_with_tools(
                 scope,
@@ -805,7 +887,10 @@ impl TextResponder {
         typing: &mut Option<Box<dyn TypingIndicator>>,
     ) -> Option<String> {
         let mut accumulated = String::new();
-        let mut silent = SilentDetector::new();
+        // Same gate voice uses: the leaked-tool-call guard, so a tool-less model
+        // imitating `shift_focus(…)` never reaches Discord (#221; the tool path
+        // has the return-time strip guard too).
+        let mut gate = StreamGate::new();
         let mut stream = match self.llm.stream_completion(messages, None).await {
             Ok(s) => s,
             Err(exc) => {
@@ -836,8 +921,10 @@ impl TextResponder {
                 continue;
             }
             accumulated.push_str(&delta.content);
-            match silent.feed(&delta.content) {
-                Some(true) => {
+            match gate.feed(&delta.content) {
+                StreamDecision::Silent => {
+                    // Deliberate abandon, not a barge-in (issue #220).
+                    stream.note_abandon_status("silent");
                     tracing::info!(
                         "{} {} {}",
                         ls::tag("\u{1f4a4} Text", ls::B),
@@ -846,14 +933,24 @@ impl TextResponder {
                     );
                     return None;
                 }
-                Some(false) => {
+                StreamDecision::Suppress => {
+                    stream.note_abandon_status("suppressed");
+                    tracing::warn!(
+                        "{} {} {}",
+                        ls::tag("Text", ls::Y),
+                        ls::kv_styled("decision", "leaked_tool_suppressed", ls::W, ls::LY),
+                        ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
+                    );
+                    return None;
+                }
+                StreamDecision::Speak => {
                     if typing.is_none()
                         && let Some(trigger) = &self.trigger_typing
                     {
                         *typing = Some(trigger.open(channel_id).await);
                     }
                 }
-                None => {}
+                StreamDecision::Pending => {}
             }
         }
         Some(accumulated)
@@ -888,7 +985,7 @@ impl TextResponder {
             scope,
             channel_id,
             guild_id,
-            silent: Mutex::new(SilentDetector::new()),
+            gate: Mutex::new(StreamGate::new()),
             typing: Mutex::new(None),
             typing_started: AtomicBool::new(false),
             bail_silent: AtomicBool::new(false),
@@ -917,8 +1014,8 @@ impl TextResponder {
                 }
             };
             // qwen leak quirk: an empty completion (no text, no tool, not
-            // silent) earns exactly one retry (D17: the retry keeps Python's
-            // library-default iteration cap).
+            // silent) earns exactly one retry (the retry keeps the
+            // default iteration cap).
             if result.final_content.is_empty()
                 && !result.is_silent
                 && result.tool_calls_made == 0
@@ -989,7 +1086,7 @@ struct TextToolHooks<'a> {
     scope: &'a TurnScope,
     channel_id: i64,
     guild_id: Option<i64>,
-    silent: Mutex<SilentDetector>,
+    gate: Mutex<StreamGate>,
     typing: Mutex<Option<Box<dyn TypingIndicator>>>,
     typing_started: AtomicBool,
     bail_silent: AtomicBool,
@@ -1005,15 +1102,18 @@ impl AgenticHooks for TextToolHooks<'_> {
             return;
         }
         let decision = self
-            .silent
+            .gate
             .lock()
-            .expect("tool silent mutex")
+            .expect("tool stream gate mutex")
             .feed(&delta.content);
         match decision {
-            Some(true) => {
+            // A leaked `silent(…)` reply: abandon before the typing indicator
+            // flickers. A leaked non-silent call is left to the return-time
+            // strip, which keeps any prose that trailed it.
+            StreamDecision::Silent => {
                 self.bail_silent.store(true, Ordering::SeqCst);
             }
-            Some(false) => {
+            StreamDecision::Speak => {
                 if !self.typing_started.swap(true, Ordering::SeqCst)
                     && let Some(trigger) = &self.responder.trigger_typing
                 {
@@ -1021,7 +1121,7 @@ impl AgenticHooks for TextToolHooks<'_> {
                     *self.typing.lock().expect("typing mutex") = Some(ind);
                 }
             }
-            None => {}
+            StreamDecision::Suppress | StreamDecision::Pending => {}
         }
     }
 
@@ -1041,8 +1141,7 @@ impl AgenticHooks for TextToolHooks<'_> {
         if let Some(g) = self.guild_id {
             append = append.guild_id(g);
         }
-        // Hook returns `()`; a store failure here is logged and dropped (Python
-        // propagated it out of the loop — see the port summary).
+        // Hook returns ``; a store failure here is logged and dropped.
         if let Err(e) = self.responder.history.append_turn(append).await {
             tracing::warn!("{} tool-turn persist failed: {e}", ls::tag("Text", ls::R));
         }

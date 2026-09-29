@@ -1,9 +1,11 @@
-//! Integration tests for `config::load_character_config` (subsystem 02;
-//! ports `tests/test_config.py`). These exercise the TOML deep-merge over the
+//! Integration tests for `config::load_character_config` (subsystem 02).
+//! These exercise the TOML deep-merge over the
 //! checked-in `_default/character.toml`, per-section validation, and the
 //! byte-stable `ConfigError` message contract.
 
-use familiar_connect::config::{CharacterConfig, ConfigError, load_character_config};
+use familiar_connect::config::{
+    CharacterConfig, ConfigError, DEFAULT_LLM_MIRROR_CALLS, load_character_config,
+};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -12,9 +14,9 @@ fn default_profile() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml")
 }
 
-/// The registry validator sets, injected per DESIGN D3. These mirror the real
-/// `known_projectors()` / `known_embedders()` registries closely enough to load
-/// the shipped default profile and exercise the override paths.
+/// The registry validator sets, injected the D3. These mirror the real
+/// `known_projectors` / `known_embedders` registries closely enough to load the
+/// shipped default profile and exercise the override paths.
 fn projectors() -> BTreeSet<String> {
     [
         "rolling_summary",
@@ -85,7 +87,7 @@ fn assert_err(result: Result<CharacterConfig, ConfigError>, needle: &str) {
 }
 
 /// Assert the *entire* `ConfigError` message matches byte-for-byte. Used where
-/// the numeric `got {value}` tail must match Python exactly (a negative TOML
+/// the numeric `got {value}` tail is pinned exactly (a negative TOML
 /// integer prints as `-1`, not `-1.0`).
 #[track_caller]
 fn assert_err_eq(result: Result<CharacterConfig, ConfigError>, expected: &str) {
@@ -291,16 +293,75 @@ fn reasoning_omitted_means_none() {
     assert!(cfg.llm.get("prose").unwrap().reasoning.is_none());
 }
 
+// -- tool_calling is mandatory ----------------------------------------------
+
+#[test]
+fn tool_calling_defaults_true() {
+    let cfg = load_missing_target();
+    for slot in ["fast", "prose", "background"] {
+        assert!(
+            cfg.llm.get(slot).unwrap().tool_calling,
+            "slot {slot} defaulted tool calling off"
+        );
+    }
+}
+
+/// Silence is a tool call now, so a tool-less slot can never decline to reply.
+/// The refusal is explicit rather than a silent degradation.
+#[test]
+fn tool_calling_false_is_refused() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"m\"\ntool_calling = false\n"),
+        "[llm.prose].tool_calling = false is unsupported: silence and every \
+         other decision the familiar declines to speak for are tool calls, so \
+         a slot without tool calling can never stay quiet — remove the key (it \
+         defaults to true) or set [llm.prose].tool_calling = true",
+    );
+}
+
+#[test]
+fn tool_calling_true_is_accepted() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\ntool_calling = true\n");
+    assert!(cfg.llm.get("prose").unwrap().tool_calling);
+}
+
 #[test]
 fn sampling_params_parsed() {
-    let cfg = load_ok(
-        "[llm.fast]\nmodel = \"m\"\ntop_p = 0.8\ntop_k = 20\npresence_penalty = 1.5\nthink_prepend = true\n",
-    );
+    let cfg =
+        load_ok("[llm.fast]\nmodel = \"m\"\ntop_p = 0.8\ntop_k = 20\npresence_penalty = 1.5\n");
     let slot = cfg.llm.get("fast").unwrap();
     approx(slot.top_p.unwrap(), 0.8);
     assert_eq!(slot.top_k, Some(20));
     approx(slot.presence_penalty.unwrap(), 1.5);
-    assert!(slot.think_prepend);
+    assert!(!slot.think_prepend);
+}
+
+// -- think_prepend is incompatible with the mandatory tools array ------------
+
+/// `think_prepend` is deliberate prefix mode; every slot sends tools now, and
+/// no provider accepts both.
+#[test]
+fn think_prepend_true_is_refused() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"m\"\nthink_prepend = true\n"),
+        "[llm.prose].think_prepend = true is unsupported: it appends a trailing \
+         assistant message, which providers read as prefix completion, and \
+         prefix completion cannot be combined with the tools array every slot \
+         now sends — remove the key (it defaults to false) or set \
+         [llm.prose].think_prepend = false",
+    );
+}
+
+#[test]
+fn think_prepend_unset_loads() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\n");
+    assert!(!cfg.llm.get("prose").unwrap().think_prepend);
+}
+
+#[test]
+fn think_prepend_false_loads() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"m\"\nthink_prepend = false\n");
+    assert!(!cfg.llm.get("prose").unwrap().think_prepend);
 }
 
 #[test]
@@ -371,20 +432,11 @@ fn reasoning_must_be_string() {
 }
 
 #[test]
-fn tool_calling_parsed() {
-    let cfg = load_ok(
-        "[llm.background]\nmodel = \"m\"\ntool_calling = true\n[llm.fast]\nmodel = \"m\"\ntool_calling = false\n",
-    );
-    assert!(cfg.llm.get("background").unwrap().tool_calling);
-    assert!(!cfg.llm.get("fast").unwrap().tool_calling);
-}
-
-#[test]
-fn tool_calling_omitted_defaults_false() {
+fn tool_calling_omitted_defaults_true() {
     let defaults =
         "[llm.fast]\nmodel = \"x\"\n[llm.prose]\nmodel = \"x\"\n[llm.background]\nmodel = \"x\"\n";
     let cfg = load_custom(None, defaults).unwrap();
-    assert!(!cfg.llm.get("prose").unwrap().tool_calling);
+    assert!(cfg.llm.get("prose").unwrap().tool_calling);
 }
 
 #[test]
@@ -395,7 +447,7 @@ fn tool_calling_must_be_bool() {
     );
 }
 
-// --- vision wiring (DESIGN D22) --------------------------------------------
+// --- vision wiring ---------------------------------------------------------
 
 /// Three slots plus whatever vision keys the case needs, over empty defaults —
 /// isolates the check from the shipped profile's pins.
@@ -412,9 +464,17 @@ fn load_vision(prose_extra: &str, llm_extra: &str) -> Result<CharacterConfig, Co
 #[test]
 fn image_tools_without_any_delivery_path_is_rejected() {
     assert_err(
-        load_vision("image_tools = true\n", ""),
+        load_vision("image_tools = true\nmultimodal = false\n", ""),
         "[llm.prose].image_tools = true needs [llm].image_description_model",
     );
+}
+
+/// Omitted, `multimodal` is still awaiting catalog detection, so the loader has
+/// no grounds to refuse — the startup warnings report whatever resolved.
+#[test]
+fn image_tools_with_multimodal_unpinned_loads() {
+    let cfg = load_vision("image_tools = true\n", "").expect("detection may still turn it on");
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, None);
 }
 
 /// The same combination that is fatal on `prose` is inert on `fast` — only the
@@ -449,14 +509,14 @@ fn image_tools_with_describer_loads() {
 fn image_tools_with_multimodal_loads() {
     let cfg = load_vision("image_tools = true\nmultimodal = true\n", "")
         .expect("multimodal satisfies the check");
-    assert!(cfg.llm.get("prose").unwrap().multimodal);
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, Some(true));
     assert!(cfg.image_description_model.is_empty());
 }
 
 #[test]
 fn shipped_default_profile_passes_vision_checks() {
     // The `_default` profile leaves all three flags off, so it must load
-    // cleanly and report nothing — D22 is not allowed to break a fresh install.
+    // cleanly and report nothing — the checks must not break a fresh install.
     let cfg = load_missing_target();
     assert!(familiar_connect::config::vision_config_warnings(&cfg).is_empty());
 }
@@ -473,7 +533,7 @@ fn unknown_tts_provider_rejected() {
 #[test]
 fn post_history_instructions_default_from_profile() {
     let cfg = load_ok("");
-    assert!(cfg.post_history_instructions.contains("<silent>"));
+    assert!(cfg.post_history_instructions.contains("silent()"));
     assert!(!cfg.post_history_instructions.trim().is_empty());
 }
 
@@ -525,6 +585,142 @@ fn image_description_constraints_must_be_string() {
         load("[prompt]\nimage_description_constraints = 42\n"),
         "image_description_constraints",
     );
+}
+
+// --- relocated prompt text (#151) ------------------------------------------
+
+#[test]
+fn operating_modes_default_from_profile() {
+    let cfg = load_ok("");
+    assert_eq!(
+        cfg.operating_mode_voice,
+        "You are speaking aloud. Keep replies short (one or two sentences). \
+         Avoid markdown."
+    );
+    assert_eq!(
+        cfg.operating_mode_text,
+        "You are chatting in a text channel. Markdown and multi-line replies \
+         are fine."
+    );
+}
+
+#[test]
+fn operating_modes_override() {
+    let cfg = load_ok(
+        "[prompt]\noperating_mode_voice = \"whisper\"\noperating_mode_text = \"scribble\"\n",
+    );
+    assert_eq!(cfg.operating_mode_voice, "whisper");
+    assert_eq!(cfg.operating_mode_text, "scribble");
+}
+
+#[test]
+fn voice_tool_ack_default_from_profile() {
+    let cfg = load_ok("");
+    assert_eq!(
+        cfg.voice_tool_ack,
+        "When you call a tool and still mean to be heard, pass `silent: false` \
+         and speak at least a brief acknowledgement in the same reply. A tool \
+         call on its own is silent \u{2014} nothing is spoken."
+    );
+}
+
+#[test]
+fn voice_tool_ack_override() {
+    let cfg = load_ok("[prompt]\nvoice_tool_ack = \"say something first\"\n");
+    assert_eq!(cfg.voice_tool_ack, "say something first");
+}
+
+#[test]
+fn shift_focus_coaching_default_from_profile() {
+    let cfg = load_ok("");
+    assert_eq!(
+        cfg.shift_focus_coaching,
+        "use shift_focus if one pulls your attention: it moves you there \
+         quietly, or pass silent: false to arrive and speak."
+    );
+}
+
+#[test]
+fn shift_focus_coaching_override() {
+    let cfg = load_ok("[prompt]\nshift_focus_coaching = \"go look\"\n");
+    assert_eq!(cfg.shift_focus_coaching, "go look");
+}
+
+#[test]
+fn start_activity_description_default_from_profile() {
+    let cfg = load_ok("");
+    // Same budget + policy contract the tool schema used to pin in code.
+    assert!(cfg.start_activity_description.chars().count() <= 450);
+    let lower = cfg.start_activity_description.to_lowercase();
+    assert!(lower.contains("quiet"));
+    assert!(lower.contains("goodbye"));
+    assert!(lower.contains("miss"));
+    assert!(
+        cfg.start_activity_description
+            .contains("in-character goodbye")
+    );
+}
+
+#[test]
+fn start_activity_description_override() {
+    let cfg = load_ok("[prompt]\nstart_activity_description = \"go outside\"\n");
+    assert_eq!(cfg.start_activity_description, "go outside");
+}
+
+#[test]
+fn worker_prompts_default_from_profile() {
+    let cfg = load_ok("");
+    assert!(
+        cfg.rolling_summary_system
+            .contains("retrieval-friendly summaries")
+    );
+    assert!(cfg.reflection_system.contains("high-level reflections"));
+    assert!(cfg.dossier_self_system.contains("{self_name}"));
+    assert!(cfg.dossier_self_system.contains("self-record"));
+    assert!(cfg.dossier_other_system.contains("{display_name}"));
+    assert!(cfg.dossier_other_system.contains("Drop transient feelings"));
+}
+
+#[test]
+fn worker_prompts_override() {
+    let cfg = load_ok(
+        "[prompt]\nrolling_summary_system = \"sum it\"\nreflection_system = \"reflect\"\n\
+         dossier_self_system = \"me: {self_name}\"\ndossier_other_system = \"them: {display_name}\"\n",
+    );
+    assert_eq!(cfg.rolling_summary_system, "sum it");
+    assert_eq!(cfg.reflection_system, "reflect");
+    assert_eq!(cfg.dossier_self_system, "me: {self_name}");
+    assert_eq!(cfg.dossier_other_system, "them: {display_name}");
+}
+
+#[test]
+fn relocated_prompt_must_be_string() {
+    assert_err(
+        load("[prompt]\noperating_mode_voice = 42\n"),
+        "operating_mode_voice",
+    );
+    assert_err(
+        load("[prompt]\nrolling_summary_system = true\n"),
+        "rolling_summary_system",
+    );
+}
+
+#[test]
+fn relocated_prompts_absent_default_empty() {
+    // No `_default` entry, no in-code copy — an empty defaults profile leaves
+    // every relocated field blank rather than resurrecting a hardcoded string.
+    let defaults =
+        "[llm.fast]\nmodel = \"x\"\n[llm.prose]\nmodel = \"x\"\n[llm.background]\nmodel = \"x\"\n";
+    let cfg = load_custom(None, defaults).unwrap();
+    assert!(cfg.operating_mode_voice.is_empty());
+    assert!(cfg.operating_mode_text.is_empty());
+    assert!(cfg.voice_tool_ack.is_empty());
+    assert!(cfg.shift_focus_coaching.is_empty());
+    assert!(cfg.start_activity_description.is_empty());
+    assert!(cfg.rolling_summary_system.is_empty());
+    assert!(cfg.reflection_system.is_empty());
+    assert!(cfg.dossier_self_system.is_empty());
+    assert!(cfg.dossier_other_system.is_empty());
 }
 
 #[test]
@@ -615,6 +811,43 @@ fn text_window_must_be_positive_int() {
 }
 
 #[test]
+fn llm_mirror_calls_defaults_from_the_shipped_profile() {
+    // The `_default` profile is the sole source of the default; an empty target
+    // inherits it.
+    assert_eq!(load_ok("").llm_mirror_calls, DEFAULT_LLM_MIRROR_CALLS);
+}
+
+#[test]
+fn llm_mirror_calls_override_wins() {
+    let cfg = load_ok("[providers.history]\nllm_mirror_calls = 50\n");
+    assert_eq!(cfg.llm_mirror_calls, 50);
+}
+
+#[test]
+fn llm_mirror_calls_zero_disables_mirroring() {
+    assert_eq!(
+        load_ok("[providers.history]\nllm_mirror_calls = 0\n").llm_mirror_calls,
+        0
+    );
+}
+
+#[test]
+fn llm_mirror_calls_rejects_negative() {
+    assert_err_eq(
+        load("[providers.history]\nllm_mirror_calls = -1\n"),
+        "[providers.history].llm_mirror_calls must be >= 0, got -1",
+    );
+}
+
+#[test]
+fn llm_mirror_calls_rejects_non_integer() {
+    assert_err_eq(
+        load("[providers.history]\nllm_mirror_calls = \"lots\"\n"),
+        "[providers.history].llm_mirror_calls must be a non-negative integer, got str",
+    );
+}
+
+#[test]
 fn text_silence_gap_fold_defaults_to_zero() {
     approx(load_ok("").text_silence_gap_fold_seconds, 0.0);
 }
@@ -629,7 +862,7 @@ fn text_silence_gap_fold_parsed() {
 fn text_silence_gap_fold_rejects_negative() {
     // Ports test_text_silence_gap_fold_rejects_negative. The `-1` is a TOML
     // integer, so the message tail must read `got -1` (int), byte-for-byte with
-    // Python's `got {v}` — not the padded `got -1.0`.
+    // `got {v}` — not the padded `got -1.0`.
     assert_err_eq(
         load("[providers.history]\ntext_silence_gap_fold_seconds = -1\n"),
         "[providers.history].text_silence_gap_fold_seconds must be >= 0, got -1",
@@ -639,7 +872,7 @@ fn text_silence_gap_fold_rejects_negative() {
 #[test]
 fn text_silence_gap_fold_rejects_negative_float() {
     // A negative TOML float renders through `fmt_num`; `-1.5` is unchanged and
-    // matches Python's `got -1.5`.
+    // matches `got -1.5`.
     assert_err_eq(
         load("[providers.history]\ntext_silence_gap_fold_seconds = -1.5\n"),
         "[providers.history].text_silence_gap_fold_seconds must be >= 0, got -1.5",
@@ -648,7 +881,7 @@ fn text_silence_gap_fold_rejects_negative_float() {
 
 #[test]
 fn coalesce_max_gap_rejects_negative() {
-    // No Python ancestor test, but `parse_coalesce_gap` shares the sign-check
+    // `parse_coalesce_gap` shares the sign-check
     // fix: a negative TOML integer must print `got -1`, not `got -1.0`.
     assert_err_eq(
         load("[providers.history]\ncoalesce_max_gap_seconds = -1\n"),
@@ -787,7 +1020,7 @@ fn retrieval_unknown_key_rejected() {
 #[test]
 fn retrieval_negative_weight_rejected() {
     // Ports test_negative_weight_rejected. `-1` is a TOML integer, so the tail
-    // must read `got -1` (int), matching Python's `got {v}` before `float(v)`.
+    // must read `got -1` (int).
     assert_err_eq(
         load("[memory.retrieval]\nimportance_weight = -1\n"),
         "[memory.retrieval].importance_weight must be non-negative, got -1",
@@ -796,7 +1029,7 @@ fn retrieval_negative_weight_rejected() {
 
 #[test]
 fn retrieval_negative_weight_float_rejected() {
-    // Negative float renders through `fmt_num`, matching Python's `got -1.5`.
+    // Negative float renders through `fmt_num`.
     assert_err_eq(
         load("[memory.retrieval]\nimportance_weight = -1.5\n"),
         "[memory.retrieval].importance_weight must be non-negative, got -1.5",
@@ -887,6 +1120,55 @@ fn embedding_non_string_cache_dir_rejected() {
         load("[providers.embedding]\nfastembed_cache_dir = 42\n"),
         "must be a string",
     );
+}
+
+#[test]
+fn embedding_explicit_dim_contradicting_model_rejected() {
+    assert_err_eq(
+        load("[providers.embedding]\nbackend = \"fastembed\"\ndim = 256\n"),
+        "[providers.embedding].dim = 256 contradicts fastembed_model \
+         'BAAI/bge-small-en-v1.5' (native dim 384); remove `dim` or set it to 384.",
+    );
+}
+
+#[test]
+fn embedding_explicit_dim_matching_model_accepted() {
+    let cfg = load_ok("[providers.embedding]\nbackend = \"fastembed\"\ndim = 384\n");
+    assert_eq!(cfg.embedding.dim, 384);
+}
+
+#[test]
+fn embedding_contradicting_dim_ignored_for_other_backends() {
+    // The cross-check is fastembed-only — `hash` owns its own dim.
+    let cfg = load_ok("[providers.embedding]\nbackend = \"hash\"\ndim = 256\n");
+    assert_eq!(cfg.embedding.dim, 256);
+}
+
+#[test]
+fn embedding_unknown_model_skips_dim_check() {
+    // Unmapped model: true dim is only knowable after the runtime probe.
+    let cfg = load_ok(
+        "[providers.embedding]\nbackend = \"fastembed\"\nfastembed_model = \"custom/model\"\ndim = 256\n",
+    );
+    assert_eq!(cfg.embedding.dim, 256);
+}
+
+#[test]
+fn embedding_unset_dim_derives_native_dim() {
+    let cfg = load_ok("[providers.embedding]\nbackend = \"fastembed\"\n");
+    assert_eq!(cfg.embedding.dim, 384);
+    let cfg = load_ok(
+        "[providers.embedding]\nbackend = \"fastembed\"\nfastembed_model = \"BAAI/bge-base-en-v1.5\"\n",
+    );
+    assert_eq!(cfg.embedding.dim, 768);
+}
+
+#[test]
+fn embedding_unset_dim_keeps_default_for_unknown_model() {
+    let cfg = load_ok(
+        "[providers.embedding]\nbackend = \"fastembed\"\nfastembed_model = \"custom/model\"\n",
+    );
+    assert_eq!(cfg.embedding.dim, 256);
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,14 +1529,76 @@ fn llm_slot_parses_image_tools_and_multimodal() {
     let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\nimage_tools = true\nmultimodal = true\n");
     let slot = cfg.llm.get("prose").unwrap();
     assert!(slot.image_tools);
-    assert!(slot.multimodal);
+    assert_eq!(slot.multimodal, Some(true));
 }
 
 #[test]
 fn image_tools_defaults_false() {
     let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
     assert!(!cfg.llm.get("prose").unwrap().image_tools);
-    assert!(!cfg.llm.get("prose").unwrap().multimodal);
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, None);
+}
+
+// --- multimodal tri-state (#204) -------------------------------------------
+
+#[test]
+fn multimodal_unset_is_none_not_false() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
+    let slot = cfg.llm.get("prose").unwrap();
+    assert_eq!(slot.multimodal, None);
+    // Unset with no catalog behaves as the historical `false`.
+    assert!(!slot.resolve_multimodal(None));
+}
+
+#[test]
+fn multimodal_explicit_false_is_distinguishable_from_unset() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = false\n");
+    assert_eq!(cfg.llm.get("prose").unwrap().multimodal, Some(false));
+}
+
+#[test]
+fn explicit_multimodal_beats_detection_in_both_directions() {
+    let off = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = false\n");
+    let on = load_ok("[llm.prose]\nmodel = \"x/y\"\nmultimodal = true\n");
+    // Catalog says the model has vision; the explicit `false` still wins.
+    assert!(!off.llm.get("prose").unwrap().resolve_multimodal(Some(true)));
+    // …and the reverse.
+    assert!(on.llm.get("prose").unwrap().resolve_multimodal(Some(false)));
+}
+
+#[test]
+fn unset_multimodal_follows_the_catalog() {
+    let cfg = load_ok("[llm.prose]\nmodel = \"x/y\"\n");
+    let slot = cfg.llm.get("prose").unwrap();
+    assert!(slot.resolve_multimodal(Some(true)));
+    assert!(!slot.resolve_multimodal(Some(false)));
+}
+
+#[test]
+fn multimodal_non_bool_is_rejected() {
+    assert_err_eq(
+        load("[llm.prose]\nmodel = \"x/y\"\nmultimodal = \"yes\"\n"),
+        "[llm.prose].multimodal must be a bool, got str",
+    );
+}
+
+#[test]
+fn image_caption_model_parsed_at_llm_level() {
+    let cfg = load_ok("[llm]\nimage_caption_model = \"openai/gpt-4o-mini\"\n");
+    assert_eq!(cfg.image_caption_model, "openai/gpt-4o-mini");
+    // must not be treated as an unknown slot
+    assert_eq!(
+        cfg.llm.keys().cloned().collect::<BTreeSet<_>>(),
+        ["background", "fast", "prose"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    );
+}
+
+#[test]
+fn image_caption_model_defaults_empty() {
+    assert!(load_ok("").image_caption_model.is_empty());
 }
 
 #[test]
@@ -1364,6 +1708,70 @@ fn tools_unknown_key_rejected() {
     assert_err(load("[tools]\nbogus = 1\n"), "unknown");
 }
 
+#[test]
+fn image_url_policy_defaults_are_deny_by_default() {
+    let cfg = load_missing_target();
+    assert!(!cfg.tools.allow_untrusted_image_urls);
+    for host in [
+        "cdn.discordapp.com",
+        "media.discordapp.net",
+        "*.media.tumblr.com",
+    ] {
+        assert!(
+            cfg.tools.trusted_image_hosts.iter().any(|h| h == host),
+            "shipped profile should trust {host}"
+        );
+    }
+    // The shipped profile and the in-code default must not drift.
+    assert_eq!(
+        cfg.tools.trusted_image_hosts,
+        familiar_connect::tools::image_policy::DEFAULT_TRUSTED_IMAGE_HOSTS
+            .iter()
+            .map(|h| (*h).to_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn image_url_policy_loads_from_toml() {
+    let cfg = load_ok(
+        "[tools]\nallow_untrusted_image_urls = true\ntrusted_image_hosts = [\"Example.COM\", \"*.cdn.example\"]\n",
+    );
+    assert!(cfg.tools.allow_untrusted_image_urls);
+    assert_eq!(
+        cfg.tools.trusted_image_hosts,
+        vec!["example.com".to_owned(), "*.cdn.example".to_owned()]
+    );
+}
+
+#[test]
+fn allow_untrusted_image_urls_must_be_bool() {
+    assert_err_eq(
+        load("[tools]\nallow_untrusted_image_urls = \"yes\"\n"),
+        "[tools].allow_untrusted_image_urls must be a bool, got str",
+    );
+}
+
+#[test]
+fn trusted_image_hosts_must_be_a_list() {
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = \"cdn.discordapp.com\"\n"),
+        "[tools].trusted_image_hosts must be a list of strings, got str",
+    );
+}
+
+#[test]
+fn trusted_image_hosts_rejects_non_hostname_entries() {
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = [\"https://cdn.discordapp.com/x\"]\n"),
+        "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got 'https://cdn.discordapp.com/x'",
+    );
+    assert_err_eq(
+        load("[tools]\ntrusted_image_hosts = [8]\n"),
+        "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got 8",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Memory worker configs
 // ---------------------------------------------------------------------------
@@ -1402,6 +1810,49 @@ fn memory_worker_must_be_positive() {
     assert_err(
         load("[providers.memory.rich_note]\nbatch_size = 0\n"),
         "batch_size",
+    );
+}
+
+// Issue #153: the self-capability post-filter is operator-tunable.
+#[test]
+fn rich_note_self_capability_defaults_to_the_builtin_filter() {
+    let cfg = load_ok("");
+    assert!(cfg.memory_providers.rich_note.self_capability_filter);
+    assert_eq!(
+        cfg.memory_providers.rich_note.self_capability_pattern,
+        String::new()
+    );
+}
+
+#[test]
+fn rich_note_self_capability_knobs_load_from_toml() {
+    let cfg = load_ok(
+        "[providers.memory.rich_note]\nself_capability_filter = false\nself_capability_pattern = \"^nope\"\n",
+    );
+    assert!(!cfg.memory_providers.rich_note.self_capability_filter);
+    assert_eq!(
+        cfg.memory_providers.rich_note.self_capability_pattern,
+        "^nope"
+    );
+}
+
+#[test]
+fn rich_note_self_capability_pattern_must_compile() {
+    assert_err_eq(
+        load("[providers.memory.rich_note]\nself_capability_pattern = \"(unclosed\"\n"),
+        "[providers.memory.rich_note].self_capability_pattern must be a valid regex, got '(unclosed'",
+    );
+}
+
+#[test]
+fn rich_note_self_capability_knobs_reject_wrong_types() {
+    assert_err(
+        load("[providers.memory.rich_note]\nself_capability_filter = \"yes\"\n"),
+        "self_capability_filter must be a bool",
+    );
+    assert_err(
+        load("[providers.memory.rich_note]\nself_capability_pattern = 7\n"),
+        "self_capability_pattern must be a string",
     );
 }
 
@@ -1451,4 +1902,44 @@ fn history_window_fallbacks_match_dataclass_defaults() {
         cfg.text_window_size,
         CharacterConfig::default().text_window_size
     );
+}
+
+// ---------------------------------------------------------------------------
+// Voice roster
+// ---------------------------------------------------------------------------
+
+#[test]
+fn voice_roster_event_window_default_ships_in_the_profile() {
+    approx(load_ok("").voice.roster_event_window_seconds, 120.0);
+}
+
+#[test]
+fn voice_roster_event_window_loads_from_toml() {
+    approx(
+        load_ok("[voice]\nroster_event_window_seconds = 45\n")
+            .voice
+            .roster_event_window_seconds,
+        45.0,
+    );
+}
+
+#[test]
+fn voice_roster_event_window_must_be_positive() {
+    assert_err_eq(
+        load("[voice]\nroster_event_window_seconds = -5\n"),
+        "[voice].roster_event_window_seconds must be positive, got -5",
+    );
+}
+
+#[test]
+fn voice_roster_event_window_rejects_non_number() {
+    assert_err_eq(
+        load("[voice]\nroster_event_window_seconds = 'soon'\n"),
+        "[voice].roster_event_window_seconds must be a number, got str",
+    );
+}
+
+#[test]
+fn voice_unknown_key_rejected() {
+    assert_err(load("[voice]\nbogus = 1\n"), "unknown");
 }

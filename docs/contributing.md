@@ -6,8 +6,8 @@ Dev workflow and expectations.
 
 This is a Cargo workspace (edition 2024). Install a Rust toolchain via
 [rustup](https://rustup.rs/); the pinned stable version in
-`rust-toolchain.toml` is fetched automatically on first build. No Python —
-the prototype was retired after the Rust port reached parity (July 2026).
+`rust-toolchain.toml` is fetched automatically on first build. Rust is the
+only toolchain needed to build, test, and run the workspace.
 
 Integration surfaces are feature-gated (`discord`, `discord-voice`,
 `stt-deepgram`, `local-turn`, `local-embed`, `twitch`, `azure-tts`,
@@ -44,7 +44,7 @@ cargo fmt
 Touched feature-gated code? Also gate the combo you touched, e.g.
 `cargo clippy --features discord,discord-voice --all-targets -- -D warnings`.
 
-Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing. The pre-commit hook at `.githooks/pre-commit` runs the same gates (`git config core.hooksPath .githooks` to enable).
+Cheap on a clean tree. Local failures fail CI the same way — fix root cause before pushing. The pre-commit hook at `.githooks/pre-commit` runs only the `cargo fmt` gate, failing the commit if it reformatted anything (`git config core.hooksPath .githooks` to enable); run the rest yourself.
 
 ## Docs build & preview
 

@@ -1,9 +1,8 @@
 //! In-process span collector — ring buffer of recent `@span` calls.
 //!
-//! Port of `familiar_connect/diagnostics/collector.py`. Feeds the
-//! `/diagnostics` slash command with a breakdown of last-turn timings without
-//! re-parsing logs at runtime. Logs-first remains the durable record; the
-//! collector is a live convenience only.
+//! Feeds the `/diagnostics` slash command with a breakdown of last-turn timings
+//! without re-parsing logs at runtime. Logs-first remains the durable record;
+//! the collector is a live convenience only.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -23,8 +22,7 @@ pub struct SpanRecord {
     pub at: DateTime<Utc>,
 }
 
-/// Per-name aggregate stats, mirroring Python's
-/// `{count, p50, p95, last_ms}` dict (all numeric floats).
+/// Per-name aggregate stats.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpanStats {
     /// Number of records for the name.
@@ -56,7 +54,7 @@ impl SpanCollector {
 
     /// Append a record stamped `at = now(UTC)`, evicting the oldest past
     /// capacity. Never panics (a poisoned lock is recovered) — recording must
-    /// never raise into the caller (spec 01 §22).
+    /// never raise into the caller.
     // The guard's scope is the whole method (push + evict both need it).
     #[allow(clippy::significant_drop_tightening)]
     pub fn record(&self, name: &str, ms: i64, status: &str) {
@@ -132,7 +130,7 @@ impl SpanCollector {
 /// Linear-interpolated percentile over pre-sorted values.
 ///
 /// `rank = pct/100 * (n-1)`; empty → 0.0; single value → that value. Ported once
-/// and shared with `commands::diagnose` (spec 01 §24, §44).
+/// and shared with `commands::diagnose`.
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // values/indices are bounded (<= ring size)
 pub fn percentile(sorted_values: &[i64], pct: u32) -> f64 {
@@ -148,7 +146,7 @@ pub fn percentile(sorted_values: &[i64], pct: u32) -> f64 {
     let lo = rank as usize;
     let hi = (lo + 1).min(n - 1);
     let frac = rank - lo as f64;
-    // Separate multiply/add (not fused `mul_add`) for bit-parity with Python.
+    // Separate multiply/add (not fused `mul_add`) keeps the result bit-stable.
     #[allow(clippy::suboptimal_flops)]
     {
         sorted_values[lo] as f64 * (1.0 - frac) + sorted_values[hi] as f64 * frac
@@ -159,7 +157,7 @@ pub fn percentile(sorted_values: &[i64], pct: u32) -> f64 {
 // process-wide singleton
 // ---------------------------------------------------------------------------
 
-/// Default ring capacity (spec 01 § Config knobs).
+/// Default ring capacity.
 const DEFAULT_MAXLEN: usize = 2000;
 
 static COLLECTOR: Mutex<Option<Arc<SpanCollector>>> = Mutex::new(None);
@@ -167,7 +165,7 @@ static COLLECTOR: Mutex<Option<Arc<SpanCollector>>> = Mutex::new(None);
 /// Return the process-wide [`SpanCollector`], creating it on first use.
 ///
 /// Every producer path fetches the singleton at call time (not at import time)
-/// so `reset_span_collector` takes effect immediately (spec 01 §25).
+/// so `reset_span_collector` takes effect immediately.
 #[must_use]
 pub fn get_span_collector() -> Arc<SpanCollector> {
     let mut guard = COLLECTOR
@@ -264,7 +262,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&a, &c));
     }
 
-    // --- @span integration (ported from tests/test_span_collector.py) ---
+    // --- @span integration ---
 
     // Guard held across await to serialize singleton access; safe on the
     // current-thread test runtime.

@@ -3,14 +3,15 @@
 //! binary itself.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use familiar_connect::config::{CharacterConfig, load_character_config};
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
-use familiar_connect::llm::{LlmClient, LlmDelta, Message};
-use futures::stream::BoxStream;
+use familiar_connect::llm::{LlmClient, Message};
 use serde_json::Value;
 
 /// A fresh in-memory store wrapped in the async facade.
@@ -21,8 +22,7 @@ pub fn store() -> Arc<AsyncHistoryStore> {
 }
 
 /// Scripted LLM stub: pops one canned reply per `chat` call, records every
-/// prompt, and returns a benign default when the script is exhausted. Mirrors
-/// the Python `_ScriptedLLM` doubles across the worker test suites.
+/// prompt, and returns a benign default when the script is exhausted.
 pub struct ScriptedLlm {
     replies: Mutex<VecDeque<String>>,
     default: String,
@@ -44,7 +44,7 @@ impl ScriptedLlm {
         })
     }
 
-    /// Append a reply to the script (mirrors Python `llm._replies.append(...)`).
+    /// Append a reply to the script.
     pub fn push_reply(&self, reply: impl Into<String>) {
         self.replies.lock().unwrap().push_back(reply.into());
     }
@@ -79,8 +79,10 @@ impl LlmClient for ScriptedLlm {
         &self,
         _messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-        Ok(Box::pin(futures::stream::empty()))
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
+        Ok(familiar_connect::llm::LlmStream::new(
+            futures::stream::empty(),
+        ))
     }
 
     fn slot(&self) -> Option<&str> {
@@ -122,4 +124,33 @@ pub fn user_text(messages: &[Message]) -> String {
         .find(|m| m.role == "user")
         .map(Message::content_str)
         .unwrap_or_default()
+}
+
+// --- config fixtures (the `_default` prose thread-through tests) ------------
+
+/// The shipped `_default/character.toml`, loaded as a `CharacterConfig`.
+///
+/// Worker prompt text has no in-code default; these tests assert the shipped
+/// profile still produces today's wording.
+#[must_use]
+pub fn default_config() -> CharacterConfig {
+    let profile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml");
+    let projectors: BTreeSet<String> = [
+        "rolling_summary",
+        "rich_note",
+        "people_dossier",
+        "reflection",
+        "fact_supersede",
+        "fact_embedding",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    let embedders: BTreeSet<String> = ["off", "hash", "fastembed"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    load_character_config(&profile, &profile, &projectors, &embedders)
+        .expect("load the shipped default profile")
 }

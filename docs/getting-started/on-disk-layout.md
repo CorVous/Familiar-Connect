@@ -15,6 +15,29 @@ dirs are created lazily alongside the DB. Multiple character folders
 can sit side-by-side under the root; only the one `FAMILIAR_ID` points
 at is loaded per process.
 
+## Disk growth
+
+`history.db` grows without bound by design — turns are append-only and
+nothing expires. Two things dominate its size:
+
+| What | Rough cost |
+|---|---|
+| A conversation turn plus its side-index projections | a few hundred bytes to a few KB |
+| One mirrored LLM call (`llm_calls`) | ~30 KB |
+
+The `llm_calls` table is the one part with a cap. It stores the
+assembled system prompt (~15 KB) twice — once as the greppable
+`system_prompt` column and once inside the verbatim `messages_json`
+array — plus the reply, tool calls and results. At the default
+`[providers.history].llm_mirror_calls = 1000` that is roughly **30 MB**,
+or about twenty sessions of fifty calls; rows past the cap are pruned as
+new ones land. Set the knob to `0` to switch mirroring off and stop the
+table growing at all, or raise it for longer-run analytics. See
+[Configuration model](../architecture/configuration-model.md#2-character-config).
+
+The tantivy indexes under `fts/` are regenerable and roughly track the
+text they index.
+
 ## Where the familiars root lives
 
 Per-user familiars are stored under the platform per-user data directory
@@ -30,12 +53,11 @@ so a `git clean -fdx` in a repo checkout can no longer wipe live state
 Set `FAMILIARS_ROOT` to override the root entirely (it takes top
 precedence — useful for tests or a custom data location).
 
-On startup the bot performs a one-shot, best-effort migration: any legacy
-familiar folder under the CWD-relative `data/familiars/<id>` (other than
-`_default`) is moved into the resolved root. The move is idempotent and
-never clobbers a familiar already present at the destination; a familiar
-that cannot be moved (e.g. a cross-device rename) is left in place with a
-log hint.
+Earlier builds auto-migrated familiars out of the CWD-relative
+`data/familiars/<id>` into this root on startup. That shim has been
+removed. A familiar still sitting in a repo checkout is no longer moved
+for you — copy it into the resolved root by hand, or point
+`FAMILIARS_ROOT` at it.
 
 The shipped `_default` profile is a **tracked repo resource**, not
 per-user state, so it never migrates. It is resolved from the
@@ -45,6 +67,17 @@ its bundled copy).
 
 An optional `activities.toml` carries the activities catalog —
 see [Activities](../architecture/activities.md#configuration).
+
+## What does *not* live under the familiars root
+
+The OpenRouter model catalog is written to the platform per-user **cache**
+directory instead — `~/.cache/familiar-connect/openrouter-models.json` on Linux
+(honours `XDG_CACHE_HOME`), the OS-correct analog elsewhere, falling back to a
+CWD-relative `data/cache/` when no home directory resolves. It is regenerable
+from the network, so it is not state: deleting it costs one background fetch and
+nothing else. Read at boot to auto-detect slot capabilities, refreshed in the
+background. Details at
+[Configuration model](../architecture/configuration-model.md#the-catalog-cache).
 
 ## Example `character.toml`
 
@@ -73,8 +106,9 @@ reasoning    = "medium"
 tool_calling = true
 
 [tts]
-provider    = "azure"
-azure_voice = "en-US-AmberNeural"
+provider          = "cartesia"   # or "azure" (azure-tts build)
+cartesia_voice_id = "..."
+cartesia_model    = "sonic-3"
 ```
 
 See the [Configuration model](../architecture/configuration-model.md)

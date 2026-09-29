@@ -1,5 +1,3 @@
-//! Ported from Python `tests/test_reflection_layer.py`.
-
 #[path = "context_helpers/mod.rs"]
 mod helpers;
 

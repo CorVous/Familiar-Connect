@@ -1,8 +1,7 @@
 {
     "recommendations": [
-        "ms-python.python",
-        "astral-sh.ty",
-        "ms-python.debugypy",
-        "charliermarsh.ruff",
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb", // debugger behind every launch.json config
+        "tamasfe.even-better-toml",
     ]
 }

@@ -1,4 +1,4 @@
-//! Discord-voice `TtsPlayer` (subsystem 09; Python `tts_player/discord_player.py`).
+//! Discord-voice `TtsPlayer` (subsystem 09).
 //!
 //! Wraps a [`TtsClient`] and feeds Discord-format stereo s16le @ 48 kHz PCM
 //! through a live voice client. Two synthesis paths:
@@ -6,8 +6,8 @@
 //! * **Streaming** — when the client exposes [`TtsClient::as_streaming`], chunks
 //!   feed into a [`StreamingPcmSource`] as they arrive so playback starts within
 //!   ~one TTFB.
-//! * **Buffered** — fallback for buffered-only clients (Gemini): synthesize the
-//!   whole utterance, then play.
+//! * **Buffered** — fallback for buffered-only clients: synthesize the whole
+//!   utterance, then play.
 //!
 //! Both paths poll `is_playing()` every [`POLL`] so [`TurnScope::is_cancelled`]
 //! cuts playback within ~20 ms when a new turn arrives. A single [`tokio::sync::Mutex`]
@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bus::envelope::TurnScope;
 use crate::diagnostics::voice_budget::{PHASE_PLAYBACK_START, get_voice_budget_recorder};
 use crate::log_style as ls;
+use crate::support::text::is_speakable;
 use crate::tts::{StreamingTtsClient, TTSResult, TtsClient, TtsStream};
 use crate::tts_player::protocol::TtsPlayer;
 use crate::voice::audio::{StreamingPcmSource, mono_to_stereo};
@@ -38,9 +39,8 @@ const TARGET: &str = "familiar_connect.tts_player.discord";
 
 /// A source handed to a voice client's `play`.
 ///
-/// The buffered path wraps a whole stereo PCM buffer (Python `discord.PCMAudio`
-/// over a `BytesIO`); the streaming path hands a shared [`StreamingPcmSource`]
-/// fed incrementally by the drain task.
+/// The buffered path wraps a whole stereo PCM buffer; the streaming path hands
+/// a shared [`StreamingPcmSource`] fed incrementally by the drain task.
 pub enum AudioSource {
     /// Whole stereo s16le buffer.
     Buffered(Vec<u8>),
@@ -48,7 +48,7 @@ pub enum AudioSource {
     Streaming(Arc<StreamingPcmSource>),
 }
 
-/// Playback rejection (Python `discord.ClientException`).
+/// Playback rejection.
 #[derive(Debug, thiserror::Error)]
 pub enum PlayError {
     /// A second concurrent `play` while audio is already playing.
@@ -56,7 +56,7 @@ pub enum PlayError {
     AlreadyPlaying,
 }
 
-/// The four-method structural voice-client surface (DESIGN §4.8).
+/// The four-method structural voice-client surface.
 ///
 /// Kept narrow so tests inject mocks without the full Discord voice-client API.
 pub trait VoiceClientLike: Send + Sync {
@@ -158,7 +158,7 @@ impl DiscordVoicePlayer {
         }
         get_voice_budget_recorder().record(&scope.turn_id, PHASE_PLAYBACK_START, None);
 
-        // Poll loop; the cleanup after it always runs (Python `finally`).
+        // Poll loop; the cleanup after it always runs.
         loop {
             if !vc.is_playing() {
                 break;
@@ -239,9 +239,10 @@ impl TtsPlayer for DiscordVoicePlayer {
         if scope.is_cancelled() {
             return;
         }
-        // Defense-in-depth: Cartesia 400s on empty/whitespace transcript.
-        if text.trim().is_empty() {
-            warn_skip("empty_text", Some(&scope.turn_id));
+        // Defense-in-depth: Cartesia 400s on a transcript with nothing to voice
+        // (empty, whitespace, punctuation, or emoji only). Routine, so debug.
+        if !is_speakable(text) {
+            debug_skip("unspeakable", &scope.turn_id, text);
             return;
         }
         if self.tts.as_streaming().is_some() {
@@ -262,7 +263,7 @@ impl TtsPlayer for DiscordVoicePlayer {
     }
 }
 
-/// Warn `[Player] skip=<reason> [turn=<id>]` (Python `ls.tag('Player', Y)`).
+/// Warn `[Player] skip=<reason> [turn=<id>]`.
 fn warn_skip(reason: &str, turn: Option<&str>) {
     if let Some(turn) = turn {
         tracing::warn!(
@@ -282,6 +283,19 @@ fn warn_skip(reason: &str, turn: Option<&str>) {
     }
 }
 
+/// Debug `[Player] skip=<reason> turn=<id> text=<trunc>` — an expected skip, not
+/// a fault (a chunk with nothing to voice).
+fn debug_skip(reason: &str, turn: &str, text: &str) {
+    tracing::debug!(
+        target: TARGET,
+        "{} {} {} {}",
+        ls::tag("Player", ls::Y),
+        ls::kv_styled("skip", reason, ls::W, ls::LY),
+        ls::kv_styled("turn", turn, ls::W, ls::LC),
+        ls::kv_styled("text", &ls::trunc(text, 40), ls::W, ls::LW),
+    );
+}
+
 /// Warn `[Player] <key>=<repr>` in red (synthesize/play/stream/convert errors).
 fn warn_player_error(key: &str, exc: &dyn std::fmt::Debug) {
     tracing::warn!(
@@ -292,7 +306,7 @@ fn warn_player_error(key: &str, exc: &dyn std::fmt::Debug) {
     );
 }
 
-/// Info `[🔊 Say] turn=<id> <key>=<val>` (Python `ls.tag('🔊 Say', G)`).
+/// Info `[🔊 Say] turn=<id> <key>=<val>`.
 fn info_say(turn: &str, key: &str, val: &str, vc: &str) {
     tracing::info!(
         target: TARGET,
@@ -303,7 +317,7 @@ fn info_say(turn: &str, key: &str, val: &str, vc: &str) {
     );
 }
 
-/// Info `[🔊 Cut] turn=<id>` (barge-in, Python `ls.tag('🔊 Cut', Y)`).
+/// Info `[🔊 Cut] turn=<id>` (barge-in).
 fn info_cut(turn: &str) {
     tracing::info!(
         target: TARGET,
@@ -315,8 +329,8 @@ fn info_cut(turn: &str) {
 
 /// Build the streaming source, forwarding the client's duck-typed jitter hints
 /// (pre-roll + underrun padding) into the [`StreamingPcmSource`] knobs. Bursty
-/// providers (Azure) opt into a cushion; steady-cadence ones (Cartesia) keep the
-/// defaults (spec 09 §60; DESIGN §4.8). Extracted so the forwarding is guarded by
+/// providers opt into a cushion; steady-cadence ones (Cartesia) keep the
+/// defaults. Extracted so the forwarding is guarded by
 /// observing the built source's read behavior (its jitter fields are private).
 fn build_streaming_source(streaming: &dyn StreamingTtsClient) -> Arc<StreamingPcmSource> {
     let hints = streaming.jitter_hints();

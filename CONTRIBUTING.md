@@ -4,14 +4,13 @@ This file is the working contributor reference — hot commands, the
 post-change checklist, and code conventions. The pages under
 [`docs/`](docs/index.md) are the authoritative deep dive:
 [`docs/architecture/overview.md`](docs/architecture/overview.md) for the
-system, [`docs/rust-port/DESIGN.md`](docs/rust-port/DESIGN.md) for the
-implementation's module map, cross-cutting conventions, and decision log.
+system.
 
 ## Project specifics
 
 - This is a **Cargo workspace** (edition 2024, stable toolchain pinned by
-  `rust-toolchain.toml`). No Python — the prototype was retired after the
-  Rust port reached parity (July 2026).
+  `rust-toolchain.toml`). Rust is the only toolchain needed to build,
+  test, and run the workspace.
 - Integration surfaces are **feature-gated**: `discord`, `discord-voice`,
   `stt-deepgram`, `local-turn`, `local-embed`, `twitch`, `azure-tts`,
   `audio-resample`. Defaults (`store`, `net`, `images`) cover everything
@@ -28,7 +27,9 @@ cargo fmt
 
 Touched feature-gated code? Also gate the combo you touched, e.g.
 `cargo clippy --features discord,discord-voice --all-targets -- -D warnings`.
-The pre-commit hook (`git config core.hooksPath .githooks`) runs these gates.
+The pre-commit hook (`git config core.hooksPath .githooks`) runs only the
+`cargo fmt` gate, failing the commit if it reformatted anything; run the rest
+yourself before pushing — CI enforces them.
 
 Red / green TDD. One project nuance: **compile errors don't count as red** —
 a test failing because the symbol doesn't exist is not a valid red; the
@@ -39,12 +40,12 @@ the familiars root**, or **architecture** (providers, processors, pipeline,
 memory, history), update the matching page under `docs/` **in the same
 commit**.
 
-Behavioral contracts to respect (see `docs/rust-port/DESIGN.md` §4 for the
-full list): exact error-message strings are test contracts; timestamps go
-through `support::time::iso_utc` (lexicographic ordering is load-bearing);
-Python-`round()` call sites use `support::round::half_even`; log lines are
-wire formats parsed by `diagnose`; truncation counts Unicode scalars via
-`support::text`.
+Behavioral contracts to respect: exact error-message strings are test
+contracts; timestamps go through `support::time::iso_utc` (lexicographic
+ordering is load-bearing); half-even ("banker's") rounding call sites use
+`support::round::half_even` rather than Rust's `f64::round`, which is
+half-away-from-zero; log lines are wire formats parsed by `diagnose`;
+truncation counts Unicode scalars via `support::text`.
 
 ## Conventions — technical writing
 

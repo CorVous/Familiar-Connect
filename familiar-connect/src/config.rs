@@ -1,18 +1,20 @@
 //! `CharacterConfig` loader: TOML deep-merge + validation + `ConfigError`
-//! (subsystem 02; Python `config.py`).
+//! (subsystem 02).
 //!
 //! The process-wide "load once, immutable thereafter" layer: parses
-//! `character.toml` deep-merged over the checked-in default profile into a fully
-//! validated, frozen [`CharacterConfig`]. Validation is hand-rolled over
+//! `character.toml` deep-merged over the checked-in default profile into a
+//! fully validated, frozen [`CharacterConfig`]. Validation is hand-rolled over
 //! `toml::Value` — the per-section unknown-key policy is deliberately
 //! inconsistent (some sections reject unknown keys, `[tts]` /
 //! `[providers.stt.*]` / `[channels.<id>]` ignore them), so serde
 //! `deny_unknown_fields` cannot reproduce the contract. Error messages are
-//! byte-stable test contracts (DESIGN §4.1); reproduce the phrases exactly.
+//! byte-stable test contracts; reproduce the phrases exactly.
 //!
-//! The two Python deferred-import registry lookups (`known_projectors`,
-//! `known_embedders`) are injected as `&BTreeSet<String>` parameters (DESIGN
-//! D3), keeping this a near-leaf module.
+//! The two registry lookups (`known_projectors`,
+//! `known_embedders`) are injected as `&BTreeSet<String>` parameters, keeping
+//! this a near-leaf module. The fastembed model → native-dim table
+//! ([`FastembedNativeDim`]) is injected the same way through the parse layer;
+//! only [`load_character_config`] names the concrete table.
 
 use crate::budget::{ModelBudgetCurve, TierBudget};
 use chrono::NaiveTime;
@@ -24,6 +26,11 @@ use toml::{Table, Value};
 // ---------------------------------------------------------------------------
 // Error type + constants
 // ---------------------------------------------------------------------------
+
+/// Injected lookup: fastembed model name → native output dim, `None` when the
+/// name is unmapped (dim knowable only after the runtime probe). Keeps the
+/// model table out of this module.
+pub type FastembedNativeDim = fn(&str) -> Option<usize>;
 
 /// Malformed config file or unknown value reference. The single error type for
 /// every config problem; callers match on message substrings (byte-stable).
@@ -39,18 +46,24 @@ pub const LLM_SLOT_NAMES: [&str; 3] = ["fast", "prose", "background"];
 /// registry never carries the tool. Read it from both places so the gate and
 /// the config diagnostics cannot drift apart.
 pub const IMAGE_TOOL_SLOT: &str = "prose";
+
+/// `[llm]` keys that are shared settings, not slot tables.
+const LLM_SHARED_KEYS: [&str; 3] = [
+    "image_description_model",
+    "image_caption_model",
+    "max_concurrent_requests",
+];
 /// Canonical assembly-tier names.
 pub const BUDGET_TIER_NAMES: [&str; 3] = ["voice", "text", "background"];
 /// Allowed values for `[llm.<slot>].reasoning`.
 pub const REASONING_LEVELS: [&str; 6] = ["off", "none", "low", "medium", "high", "default"];
-/// Default Azure TTS voice.
+/// Default `[tts].azure_voice`.
 pub const DEFAULT_AZURE_TTS_VOICE: &str = "en-US-AmberNeural";
-/// Default Gemini TTS voice.
-pub const DEFAULT_GEMINI_TTS_VOICE: &str = "Kore";
-/// Default Gemini TTS model.
-pub const DEFAULT_GEMINI_TTS_MODEL: &str = "gemini-3.1-flash-tts-preview";
 
-const TTS_PROVIDERS: [&str; 3] = ["azure", "cartesia", "gemini"];
+const TTS_PROVIDERS: [&str; 2] = ["azure", "cartesia"];
+/// Providers that existed as unwired stubs and were removed; named so an
+/// upgraded profile gets a migration hint instead of a bare "unknown".
+const REMOVED_TTS_PROVIDERS: [&str; 1] = ["gemini"];
 const TURN_STRATEGIES: [&str; 2] = ["deepgram", "ten+smart_turn"];
 const STT_BACKENDS: [&str; 3] = ["deepgram", "parakeet", "faster_whisper"];
 const MESSAGE_RENDERINGS: [&str; 2] = ["prefixed", "name_only"];
@@ -61,9 +74,18 @@ const DEFAULT_PROJECTORS: [&str; 5] = [
     "reflection",
     "fact_supersede",
 ];
-const PROMPT_FIELDS: [&str; 6] = [
+const PROMPT_FIELDS: [&str; 15] = [
     "post_history_instructions",
     "image_description_constraints",
+    "operating_mode_voice",
+    "operating_mode_text",
+    "voice_tool_ack",
+    "shift_focus_coaching",
+    "start_activity_description",
+    "rolling_summary_system",
+    "reflection_system",
+    "dossier_self_system",
+    "dossier_other_system",
     "sleep_consolidation_system",
     "sleep_stance_system",
     "sleep_synthesis_system",
@@ -98,7 +120,7 @@ const BUDGET_FIELDS: [&str; 12] = [
 #[derive(Clone, Debug, PartialEq)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "mirrors the Python dataclass's independent boolean knobs 1:1"
+    reason = "these are independent boolean knobs, not a state enum"
 )]
 pub struct LLMSlotConfig {
     /// Model string (required, non-empty).
@@ -119,12 +141,34 @@ pub struct LLMSlotConfig {
     pub provider_allow_fallbacks: bool,
     /// OpenRouter reasoning effort; `None` = model default (`"default"` → None).
     pub reasoning: Option<String>,
-    /// Surface-only tool-calling flag.
+    /// Surface-only tool-calling flag. Defaults `true` and `false` is refused
+    /// at load: silence is a tool call, so a tool-less slot cannot decline to
+    /// reply.
     pub tool_calling: bool,
     /// Gate for `view_image` registration.
+    ///
+    /// Deliberately NOT tri-state (unlike [`multimodal`](Self::multimodal)):
+    /// it is an intent knob, not a capability fact. `view_image` works on a
+    /// text-only model too — the substitution description stands in for the
+    /// image — and an operator may not want image fetches at all on a
+    /// vision-capable one. Neither direction is inferable from the catalog, so
+    /// it stays an explicit opt-in.
     pub image_tools: bool,
-    /// Send image content blocks in tool-result messages.
-    pub multimodal: bool,
+    /// Send image content blocks in tool-result messages. Tri-state: `None` =
+    /// auto-detect from the OpenRouter catalog, `Some(_)` = operator override
+    /// detection must never contradict.
+    pub multimodal: Option<bool>,
+}
+
+impl LLMSlotConfig {
+    /// Resolve [`multimodal`](Self::multimodal) against catalog metadata.
+    ///
+    /// Explicit config always wins. Unset follows `detected`; with no catalog
+    /// (`None`) the answer is `false` — the pre-detection default.
+    #[must_use]
+    pub fn resolve_multimodal(&self, detected: Option<bool>) -> bool {
+        self.multimodal.or(detected).unwrap_or(false)
+    }
 }
 
 impl Default for LLMSlotConfig {
@@ -139,9 +183,9 @@ impl Default for LLMSlotConfig {
             provider_order: None,
             provider_allow_fallbacks: true,
             reasoning: None,
-            tool_calling: false,
+            tool_calling: true,
             image_tools: false,
-            multimodal: false,
+            multimodal: None,
         }
     }
 }
@@ -323,30 +367,14 @@ impl Default for STTConfig {
 /// Text-to-speech config from `[tts]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TTSConfig {
-    /// `"azure"` | `"cartesia"` | `"gemini"`.
+    /// `"cartesia"` (default) | `"azure"` (needs the `azure-tts` feature).
     pub provider: String,
     /// Cartesia voice id.
     pub cartesia_voice_id: Option<String>,
     /// Cartesia model.
     pub cartesia_model: Option<String>,
-    /// Azure voice.
+    /// Azure neural voice name.
     pub azure_voice: String,
-    /// Gemini voice.
-    pub gemini_voice: String,
-    /// Gemini model.
-    pub gemini_model: String,
-    /// Gemini scene (`""` → None).
-    pub gemini_scene: Option<String>,
-    /// Gemini context (`""` → None).
-    pub gemini_context: Option<String>,
-    /// Gemini audio profile (`""` → None).
-    pub gemini_audio_profile: Option<String>,
-    /// Gemini style (`""` → None).
-    pub gemini_style: Option<String>,
-    /// Gemini pace (`""` → None).
-    pub gemini_pace: Option<String>,
-    /// Gemini accent (`""` → None).
-    pub gemini_accent: Option<String>,
     /// Greeting lines (stringified).
     pub greetings: Vec<String>,
 }
@@ -354,18 +382,10 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
-            provider: "azure".to_owned(),
+            provider: "cartesia".to_owned(),
             cartesia_voice_id: None,
             cartesia_model: None,
             azure_voice: DEFAULT_AZURE_TTS_VOICE.to_owned(),
-            gemini_voice: DEFAULT_GEMINI_TTS_VOICE.to_owned(),
-            gemini_model: DEFAULT_GEMINI_TTS_MODEL.to_owned(),
-            gemini_scene: None,
-            gemini_context: None,
-            gemini_audio_profile: None,
-            gemini_style: None,
-            gemini_pace: None,
-            gemini_accent: None,
             greetings: Vec::new(),
         }
     }
@@ -443,6 +463,11 @@ pub struct RichNoteConfig {
     pub tick_interval_s: f64,
     /// Cap on participant manifest rows.
     pub participants_max: i64,
+    /// Self-capability post-filter on/off. `false` keeps every extracted fact.
+    pub self_capability_filter: bool,
+    /// Regex replacing the built-in self-capability matcher; empty keeps the
+    /// built-in. Validated at load — an uncompilable pattern fails startup.
+    pub self_capability_pattern: String,
 }
 
 impl Default for RichNoteConfig {
@@ -451,6 +476,8 @@ impl Default for RichNoteConfig {
             batch_size: 10,
             tick_interval_s: 15.0,
             participants_max: 30,
+            self_capability_filter: true,
+            self_capability_pattern: String::new(),
         }
     }
 }
@@ -569,17 +596,42 @@ impl Default for FocusConfig {
     }
 }
 
+/// `[voice]` knobs — live-call roster rendering.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceConfig {
+    /// Join/leave events older than this stop being narrated.
+    pub roster_event_window_seconds: f64,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            roster_event_window_seconds: crate::voice_roster::DEFAULT_EVENT_WINDOW_SECONDS,
+        }
+    }
+}
+
 /// `[tools]` knobs — agentic tool-loop behavior.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolsConfig {
     /// Hard cap on agentic-loop iterations per turn.
     pub loop_max_iterations: i64,
+    /// Let `view_image` fetch hosts outside `trusted_image_hosts`. Private and
+    /// reserved addresses stay refused either way.
+    pub allow_untrusted_image_urls: bool,
+    /// Hosts `view_image` may fetch: exact names, or `*.suffix` patterns.
+    pub trusted_image_hosts: Vec<String>,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             loop_max_iterations: 5,
+            allow_untrusted_image_urls: false,
+            trusted_image_hosts: crate::tools::image_policy::DEFAULT_TRUSTED_IMAGE_HOSTS
+                .iter()
+                .map(|h| (*h).to_owned())
+                .collect(),
         }
     }
 }
@@ -589,7 +641,9 @@ impl Default for ToolsConfig {
 pub struct EmbeddingConfig {
     /// Backend name (registered); `"off"` disables the seam.
     pub backend: String,
-    /// Dimensionality hint for backends that accept one.
+    /// Dimensionality for backends that accept one (`hash`). Under
+    /// `fastembed` the model owns it: parsing resolves an unset `dim` to the
+    /// model's native dim and rejects one that contradicts it.
     pub dim: i64,
     /// FastEmbed model name.
     pub fastembed_model: String,
@@ -645,6 +699,8 @@ pub struct CharacterConfig {
     pub recent_history_coalesce_max_gap_seconds: f64,
     /// Fold text turns before a silence gap this large into summary; 0 disables.
     pub text_silence_gap_fold_seconds: f64,
+    /// Rows the `llm_calls` mirror keeps per familiar; 0 disables mirroring.
+    pub llm_mirror_calls: i64,
     /// IANA timezone name (validated at load, stored as the string).
     pub display_tz: String,
     /// Sleep window `(start, end)` (may wrap midnight); `None` disarmed.
@@ -675,6 +731,25 @@ pub struct CharacterConfig {
     pub post_history_instructions: String,
     /// Appended to the neutral image-description base prompt.
     pub image_description_constraints: String,
+    /// Per-mode operating directive, voice tier. One source for the
+    /// `operating_mode` layer and the final reminder.
+    pub operating_mode_voice: String,
+    /// Per-mode operating directive, text tier.
+    pub operating_mode_text: String,
+    /// Voice-tier nudge to speak before calling a tool.
+    pub voice_tool_ack: String,
+    /// `shift_focus` clause spliced onto the unread digest.
+    pub shift_focus_coaching: String,
+    /// Roleplay guidance carried by `start_activity`'s tool description.
+    pub start_activity_description: String,
+    /// Static rolling-summary instruction text.
+    pub rolling_summary_system: String,
+    /// Static reflection persona (the reply contract stays in code).
+    pub reflection_system: String,
+    /// Static self-dossier instruction text (`{self_name}`).
+    pub dossier_self_system: String,
+    /// Static other-person dossier instruction text (`{display_name}`).
+    pub dossier_other_system: String,
     /// Static sleep-consolidation instruction text.
     pub sleep_consolidation_system: String,
     /// Static sleep-stance instruction text.
@@ -689,14 +764,21 @@ pub struct CharacterConfig {
     pub memory_providers: MemoryProvidersConfig,
     /// Embedder backend selection.
     pub embedding: EmbeddingConfig,
-    /// Model for vision-based image descriptions; `""` disables.
+    /// Substitution model: describes the image for a slot that cannot see it.
+    /// `""` disables.
     pub image_description_model: String,
+    /// Persistence model: the durable caption written to history (and thus to
+    /// facts / summaries / dossiers). `""` falls back to
+    /// [`image_description_model`](Self::image_description_model).
+    pub image_caption_model: String,
     /// Process-wide cap on concurrent LLM requests.
     pub llm_max_concurrent_requests: i64,
     /// Attentional unread-nudge controls.
     pub focus: FocusConfig,
     /// Agentic tool-loop knobs.
     pub tools: ToolsConfig,
+    /// Live-call roster knobs.
+    pub voice: VoiceConfig,
 }
 
 impl Default for CharacterConfig {
@@ -706,6 +788,7 @@ impl Default for CharacterConfig {
             text_window_size: 200,
             recent_history_coalesce_max_gap_seconds: 45.0,
             text_silence_gap_fold_seconds: 0.0,
+            llm_mirror_calls: DEFAULT_LLM_MIRROR_CALLS,
             display_tz: "UTC".to_owned(),
             sleep_window: None,
             sleep_grace_minutes: 30,
@@ -721,6 +804,15 @@ impl Default for CharacterConfig {
             dm_allowlist: Vec::new(),
             post_history_instructions: String::new(),
             image_description_constraints: String::new(),
+            operating_mode_voice: String::new(),
+            operating_mode_text: String::new(),
+            voice_tool_ack: String::new(),
+            shift_focus_coaching: String::new(),
+            start_activity_description: String::new(),
+            rolling_summary_system: String::new(),
+            reflection_system: String::new(),
+            dossier_self_system: String::new(),
+            dossier_other_system: String::new(),
             sleep_consolidation_system: String::new(),
             sleep_stance_system: String::new(),
             sleep_synthesis_system: String::new(),
@@ -729,14 +821,25 @@ impl Default for CharacterConfig {
             memory_providers: MemoryProvidersConfig::default(),
             embedding: EmbeddingConfig::default(),
             image_description_model: String::new(),
+            image_caption_model: String::new(),
             llm_max_concurrent_requests: 4,
             focus: FocusConfig::default(),
             tools: ToolsConfig::default(),
+            voice: VoiceConfig::default(),
         }
     }
 }
 
-/// Tier → LLM slot mapping (mirrors run.py responder wiring).
+/// Default `llm_calls` retention: rows kept per familiar.
+///
+/// An assembled prompt runs ~15 KB and the mirror stores it twice (the
+/// `system_prompt` projection plus the verbatim message array), so a row costs
+/// ~30 KB — roughly 30 MB at this cap, or ~20 sessions of 50 calls. Enough to
+/// answer "what did the prompt contain on turn X" days later without the table
+/// outgrowing the history it annotates.
+pub const DEFAULT_LLM_MIRROR_CALLS: i64 = 1000;
+
+/// Tier → LLM slot mapping (matches the responder wiring).
 fn tier_to_slot(tier: &str) -> Option<&'static str> {
     match tier {
         "voice" => Some("fast"),
@@ -776,7 +879,7 @@ impl CharacterConfig {
     ///
     /// # Panics
     /// Panics if `tier` is not one of the canonical tier names (callers only
-    /// pass canonical names; mirrors Python's `KeyError`).
+    /// pass canonical names).
     #[must_use]
     pub fn budget_for(&self, tier: &str) -> TierBudget {
         let base = *self
@@ -802,14 +905,18 @@ impl CharacterConfig {
 ///
 /// The default profile must exist (else a `ConfigError` containing "default
 /// character profile"); a missing target file is treated as `{}`. The registry
-/// validator sets (`known_projectors`, `known_embedders`) are injected (DESIGN
-/// D3) rather than looked up via a module cycle.
+/// validator sets (`known_projectors`, `known_embedders`) are injected rather
+/// than looked up via a module cycle.
 pub fn load_character_config(
     path: &Path,
     defaults_path: &Path,
     known_projectors: &BTreeSet<String>,
     known_embedders: &BTreeSet<String>,
 ) -> Result<CharacterConfig, ConfigError> {
+    // The one lookup this entry point resolves itself: the fastembed
+    // model → native-dim table is static metadata, and adding a fifth
+    // parameter would churn every caller. Parsing below stays injection-only.
+    let fastembed_native_dim: FastembedNativeDim = crate::embedding::fastembed_native_dim;
     let Some(defaults_data) = read_toml(defaults_path)? else {
         return Err(ConfigError(format!(
             "default character profile not found at {}. This file is a required repo asset — check your install.",
@@ -818,7 +925,12 @@ pub fn load_character_config(
     };
     let target_data = read_toml(path)?.unwrap_or_default();
     let merged = deep_merge(&defaults_data, &target_data);
-    parse_character_config(&merged, known_projectors, known_embedders)
+    parse_character_config(
+        &merged,
+        known_projectors,
+        known_embedders,
+        fastembed_native_dim,
+    )
 }
 
 fn read_toml(path: &Path) -> Result<Option<Table>, ConfigError> {
@@ -882,8 +994,7 @@ enum VisionSeverity {
 /// `multimodal` (to send it); with neither the tool can only ever hand back
 /// `"(no description model configured)"` after spending a fetch and a
 /// compression, which is what `docs/architecture/tuning.md` § `image_tools`
-/// already documents as a requirement. Python accepted all of this silently
-/// (DESIGN D22).
+/// already documents as a requirement.
 fn classify_vision_wiring(
     llm: &BTreeMap<String, LLMSlotConfig>,
     image_description_model: &str,
@@ -909,20 +1020,27 @@ fn classify_vision_wiring(
                          slot registers view_image (the voice registry never does)"
                     ),
                 ));
-            } else if slot.multimodal {
+            } else if slot.multimodal == Some(true) {
                 out.push((Warning, inert_multimodal(name)));
             }
             continue;
         }
         if !slot.image_tools {
-            if slot.multimodal {
+            if slot.multimodal == Some(true) {
                 out.push((Warning, inert_multimodal(name)));
             }
             continue;
         }
-        match (describer, slot.multimodal) {
+        match (describer, slot.multimodal.unwrap_or(false)) {
             (false, false) => out.push((
-                Fatal,
+                // A pinned `false` is the only door nothing can reopen. Omitted,
+                // the flag is still waiting on catalog detection, which parse
+                // time cannot see, so that case is reported rather than refused.
+                if slot.multimodal == Some(false) {
+                    Fatal
+                } else {
+                    Warning
+                },
                 format!(
                     "[llm.{name}].image_tools = true needs [llm].image_description_model (to \
                      describe the image) or [llm.{name}].multimodal = true (to send the image \
@@ -995,22 +1113,24 @@ pub fn vision_config_warnings(config: &CharacterConfig) -> Vec<String> {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "faithful 1:1 transliteration of the Python _parse_character_config sequence"
+    reason = "one flat field-by-field parse sequence; splitting it would scatter the error-message contract"
 )]
 fn parse_character_config(
     data: &Table,
     known_projectors: &BTreeSet<String>,
     known_embedders: &BTreeSet<String>,
+    fastembed_native_dim: FastembedNativeDim,
 ) -> Result<CharacterConfig, ConfigError> {
     let providers = expect_table(data.get("providers"), "[providers]")?;
     let history_section = expect_table(providers.get("history"), "[providers.history]")?;
     let (voice_window_size, text_window_size) = parse_history_windows(history_section)?;
     let recent_history_coalesce_max_gap_seconds = parse_coalesce_gap(history_section)?;
     let text_silence_gap_fold_seconds = parse_text_silence(history_section)?;
+    let llm_mirror_calls = parse_llm_mirror_calls(history_section)?;
 
     let display_tz = data
         .get("display_tz")
-        .map_or_else(|| "UTC".to_owned(), py_str);
+        .map_or_else(|| "UTC".to_owned(), value_str);
     if display_tz.parse::<chrono_tz::Tz>().is_err() {
         return Err(ConfigError(format!(
             "invalid display_tz '{display_tz}' — use an IANA name like 'America/Los_Angeles'"
@@ -1022,11 +1142,11 @@ fn parse_character_config(
 
     let aliases = match data.get("aliases") {
         None => Vec::new(),
-        Some(Value::Array(arr)) => arr.iter().map(py_str).collect(),
+        Some(Value::Array(arr)) => arr.iter().map(value_str).collect(),
         Some(other) => {
             return Err(ConfigError(format!(
                 "aliases must be a list of strings, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1041,6 +1161,15 @@ fn parse_character_config(
             ));
         }
     };
+    let image_caption_model = match llm_raw.get("image_caption_model") {
+        None => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => {
+            return Err(ConfigError(
+                "[llm].image_caption_model must be a string".into(),
+            ));
+        }
+    };
     let llm_max_concurrent_requests = match llm_raw.get("max_concurrent_requests") {
         None => 4,
         Some(Value::Integer(n)) if *n > 0 => *n,
@@ -1052,13 +1181,13 @@ fn parse_character_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[llm].max_concurrent_requests must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
     let mut llm_slots_raw = Table::new();
     for (k, v) in llm_raw {
-        if k != "image_description_model" && k != "max_concurrent_requests" {
+        if !LLM_SHARED_KEYS.contains(&k.as_str()) {
             llm_slots_raw.insert(k.clone(), v.clone());
         }
     }
@@ -1079,6 +1208,7 @@ fn parse_character_config(
     let embedding = parse_embedding_config(
         expect_table(providers.get("embedding"), "[providers.embedding]")?,
         known_embedders,
+        fastembed_native_dim,
     )?;
 
     let budget_raw = expect_table(data.get("budget"), "[budget]")?;
@@ -1105,7 +1235,7 @@ fn parse_character_config(
                     other => {
                         return Err(ConfigError(format!(
                             "[discord].dm_allowlist entries must be integer user IDs, got {}",
-                            py_type_name(other)
+                            value_type_name(other)
                         )));
                     }
                 }
@@ -1115,7 +1245,7 @@ fn parse_character_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[discord].dm_allowlist must be a list of integer user IDs, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1130,12 +1260,14 @@ fn parse_character_config(
 
     let focus = parse_focus_config(expect_table(data.get("focus"), "[focus]")?)?;
     let tools = parse_tools_config(expect_table(data.get("tools"), "[tools]")?)?;
+    let voice = parse_voice_config(expect_table(data.get("voice"), "[voice]")?)?;
 
     Ok(CharacterConfig {
         voice_window_size,
         text_window_size,
         recent_history_coalesce_max_gap_seconds,
         text_silence_gap_fold_seconds,
+        llm_mirror_calls,
         display_tz,
         sleep_window,
         sleep_grace_minutes,
@@ -1151,6 +1283,15 @@ fn parse_character_config(
         dm_allowlist,
         post_history_instructions: prompt.post_history_instructions,
         image_description_constraints: prompt.image_description_constraints,
+        operating_mode_voice: prompt.operating_mode_voice,
+        operating_mode_text: prompt.operating_mode_text,
+        voice_tool_ack: prompt.voice_tool_ack,
+        shift_focus_coaching: prompt.shift_focus_coaching,
+        start_activity_description: prompt.start_activity_description,
+        rolling_summary_system: prompt.rolling_summary_system,
+        reflection_system: prompt.reflection_system,
+        dossier_self_system: prompt.dossier_self_system,
+        dossier_other_system: prompt.dossier_other_system,
         sleep_consolidation_system: prompt.sleep_consolidation_system,
         sleep_stance_system: prompt.sleep_stance_system,
         sleep_synthesis_system: prompt.sleep_synthesis_system,
@@ -1159,9 +1300,11 @@ fn parse_character_config(
         memory_providers,
         embedding,
         image_description_model,
+        image_caption_model,
         llm_max_concurrent_requests,
         focus,
         tools,
+        voice,
     })
 }
 
@@ -1172,7 +1315,7 @@ pub fn parse_hhmm_range(value: &Value, key: &str) -> Result<(NaiveTime, NaiveTim
     let err = || {
         ConfigError(format!(
             "{key} must be 'HH:MM-HH:MM' (may wrap midnight, start != end), got {}",
-            py_repr(value)
+            value_repr(value)
         ))
     };
     let Some(s) = value.as_str() else {
@@ -1185,13 +1328,12 @@ pub fn parse_hhmm_range(value: &Value, key: &str) -> Result<(NaiveTime, NaiveTim
     let mut parsed: Vec<NaiveTime> = Vec::with_capacity(2);
     for part in &parts {
         let pieces: Vec<&str> = part.split(':').collect();
-        // Count Unicode scalars, not bytes (DESIGN §4.9). The ASCII-digit gate
-        // still dominates: any two-scalar piece that passes `is_ascii_digit`
-        // has byte length 2 as well, so this is behaviour-neutral for ASCII and
-        // only aligns with the convention. Non-ASCII Unicode digits (which
-        // Python's `str.isdigit()`/`int()` would accept) remain rejected — the
-        // blessed ASCII-digit deviation, consistent with the structured_output
-        // gate.
+        // Count Unicode scalars, not bytes. The ASCII-digit gate still
+        // dominates: any two-scalar piece that passes `is_ascii_digit` has byte
+        // length 2 as well, so this is behaviour-neutral for ASCII and only
+        // aligns with the convention. Non-ASCII Unicode digits (which a more
+        // lenient parser would accept) remain rejected — the blessed
+        // ASCII-digit deviation, consistent with the structured_output gate.
         if pieces.len() != 2
             || !pieces
                 .iter()
@@ -1223,7 +1365,7 @@ fn empty_table() -> &'static Table {
     LazyLock::force(&EMPTY_TABLE)
 }
 
-const fn py_type_name(v: &Value) -> &'static str {
+const fn value_type_name(v: &Value) -> &'static str {
     match v {
         Value::String(_) => "str",
         Value::Integer(_) => "int",
@@ -1237,7 +1379,7 @@ const fn py_type_name(v: &Value) -> &'static str {
 
 #[allow(
     clippy::float_cmp,
-    reason = "fract() == 0.0 exactly detects integer-valued floats for Python-style formatting"
+    reason = "fract() == 0.0 exactly detects integer-valued floats for %g-style formatting"
 )]
 fn fmt_num(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
@@ -1249,7 +1391,7 @@ fn fmt_num(x: f64) -> String {
 
 #[allow(
     clippy::float_cmp,
-    reason = "fract() == 0.0 exactly detects integer-valued bounds for Python %g formatting"
+    reason = "fract() == 0.0 exactly detects integer-valued bounds for %g formatting"
 )]
 fn fmt_g(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 {
@@ -1259,7 +1401,7 @@ fn fmt_g(x: f64) -> String {
     }
 }
 
-fn py_repr(v: &Value) -> String {
+fn value_repr(v: &Value) -> String {
     match v {
         Value::String(s) => format!("'{s}'"),
         Value::Integer(n) => n.to_string(),
@@ -1271,14 +1413,14 @@ fn py_repr(v: &Value) -> String {
     }
 }
 
-fn py_str(v: &Value) -> String {
+fn value_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Integer(n) => n.to_string(),
         Value::Float(f) => fmt_num(*f),
         Value::Boolean(b) => (if *b { "True" } else { "False" }).to_owned(),
         Value::Datetime(d) => d.to_string(),
-        other => py_repr(other),
+        other => value_repr(other),
     }
 }
 
@@ -1298,7 +1440,7 @@ fn expect_table<'a>(value: Option<&'a Value>, label: &str) -> Result<&'a Table, 
         Some(Value::Table(t)) => Ok(t),
         Some(other) => Err(ConfigError(format!(
             "{label} must be a table, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1356,7 +1498,7 @@ fn field_int(raw: &Table, prefix: &str, key: &str, default: i64) -> Result<i64, 
         Some(Value::Integer(n)) => Ok(*n),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be an integer, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1368,18 +1510,24 @@ fn field_number(raw: &Table, prefix: &str, key: &str, default: f64) -> Result<f6
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
 
 fn field_bool(raw: &Table, prefix: &str, key: &str, default: bool) -> Result<bool, ConfigError> {
+    Ok(field_bool_opt(raw, prefix, key)?.unwrap_or(default))
+}
+
+/// Tri-state bool: absent stays `None` so a caller can tell "unset" from an
+/// explicit `false`. Same error string as [`field_bool`].
+fn field_bool_opt(raw: &Table, prefix: &str, key: &str) -> Result<Option<bool>, ConfigError> {
     match raw.get(key) {
-        None => Ok(default),
-        Some(Value::Boolean(b)) => Ok(*b),
+        None => Ok(None),
+        Some(Value::Boolean(b)) => Ok(Some(*b)),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a bool, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1407,7 +1555,7 @@ fn positive_int(
             };
             Err(ConfigError(format!(
                 "{prefix}.{key} must be {kind}, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )))
         }
     }
@@ -1427,7 +1575,7 @@ fn positive_float(prefix: &str, raw: &Table, key: &str, default: f64) -> Result<
         ))),
         Some(other) => Err(ConfigError(format!(
             "{prefix}.{key} must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1448,7 +1596,7 @@ fn parse_sleep_config(raw: &Table) -> Result<(Option<(NaiveTime, NaiveTime)>, i6
         Some(other) => {
             return Err(ConfigError(format!(
                 "[sleep].grace_minutes must be a positive integer, got {}",
-                py_repr(other)
+                value_repr(other)
             )));
         }
     };
@@ -1469,11 +1617,29 @@ fn parse_history_windows(raw: &Table) -> Result<(i64, i64), ConfigError> {
     Ok((voice, text))
 }
 
+/// `[providers.history].llm_mirror_calls` — rows the `llm_calls` mirror keeps.
+///
+/// `0` switches mirroring off; anything negative is a mistake, not a synonym for
+/// unbounded (an unbounded mirror is not offered).
+fn parse_llm_mirror_calls(raw: &Table) -> Result<i64, ConfigError> {
+    match raw.get("llm_mirror_calls") {
+        None => Ok(DEFAULT_LLM_MIRROR_CALLS),
+        Some(Value::Integer(n)) if *n >= 0 => Ok(*n),
+        Some(Value::Integer(n)) => Err(ConfigError(format!(
+            "[providers.history].llm_mirror_calls must be >= 0, got {n}"
+        ))),
+        Some(other) => Err(ConfigError(format!(
+            "[providers.history].llm_mirror_calls must be a non-negative integer, got {}",
+            value_type_name(other)
+        ))),
+    }
+}
+
 fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
     match raw.get("coalesce_max_gap_seconds") {
         None => Ok(45.0),
-        // Python does the `v < 0` sign check on the raw TOML value before
-        // `float(v)`, so a negative integer prints as an int (`got -1`), not a
+        // The `v < 0` sign check runs on the raw TOML value before the
+        // float conversion, so a negative integer prints as an int (`got -1`), not a
         // padded float (`got -1.0`). Mirror that per-arm.
         Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
             "[providers.history].coalesce_max_gap_seconds must be >= 0, got {n}"
@@ -1486,7 +1652,7 @@ fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "[providers.history].coalesce_max_gap_seconds must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1494,8 +1660,8 @@ fn parse_coalesce_gap(raw: &Table) -> Result<f64, ConfigError> {
 fn parse_text_silence(raw: &Table) -> Result<f64, ConfigError> {
     match raw.get("text_silence_gap_fold_seconds") {
         None => Ok(0.0),
-        // Sign check on the raw value (see `parse_coalesce_gap`): integers print
-        // as ints, floats through `fmt_num`, matching Python's `got {v}`.
+        // Sign check on the raw value (see `parse_coalesce_gap`): integers
+        // print as ints, floats through `fmt_num`.
         Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
             "[providers.history].text_silence_gap_fold_seconds must be >= 0, got {n}"
         ))),
@@ -1507,7 +1673,7 @@ fn parse_text_silence(raw: &Table) -> Result<f64, ConfigError> {
         Some(Value::Float(f)) => Ok(*f),
         Some(other) => Err(ConfigError(format!(
             "[providers.history].text_silence_gap_fold_seconds must be a number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -1537,7 +1703,7 @@ fn parse_ranged_float(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[llm.{slot}].{key} must be a number, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1567,7 +1733,7 @@ fn parse_provider_order(
                     other => {
                         return Err(ConfigError(format!(
                             "[llm.{slot}].provider_order entries must be non-empty strings, got {}",
-                            py_repr(other)
+                            value_repr(other)
                         )));
                     }
                 }
@@ -1576,14 +1742,14 @@ fn parse_provider_order(
         }
         Some(other) => Err(ConfigError(format!(
             "[llm.{slot}].provider_order must be a list of strings, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "faithful 1:1 transliteration of the Python _parse_llm_slots field sequence"
+    reason = "one flat field-by-field parse sequence; splitting it would scatter the error-message contract"
 )]
 fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, ConfigError> {
     let mut slots = BTreeMap::new();
@@ -1597,7 +1763,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[llm.{name}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let model = match section.get("model") {
@@ -1615,7 +1781,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].temperature must be a number, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1627,7 +1793,7 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].top_k must be a positive integer, got {}",
-                    py_repr(other)
+                    value_repr(other)
                 )));
             }
         };
@@ -1654,13 +1820,33 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[llm.{name}].reasoning must be a string, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
-        let tool_calling = field_bool(section, &prefix, "tool_calling", false)?;
+        let tool_calling = field_bool(section, &prefix, "tool_calling", true)?;
+        if !tool_calling {
+            return Err(ConfigError(format!(
+                "[llm.{name}].tool_calling = false is unsupported: silence and \
+                 every other decision the familiar declines to speak for are \
+                 tool calls, so a slot without tool calling can never stay \
+                 quiet — remove the key (it defaults to true) or set \
+                 [llm.{name}].tool_calling = true"
+            )));
+        }
+        // Deliberate prefix mode, and tools are no longer optional — the pair
+        // 400s ("Function call should not be used with prefix").
+        if think_prepend {
+            return Err(ConfigError(format!(
+                "[llm.{name}].think_prepend = true is unsupported: it appends a \
+                 trailing assistant message, which providers read as prefix \
+                 completion, and prefix completion cannot be combined with the \
+                 tools array every slot now sends — remove the key (it defaults \
+                 to false) or set [llm.{name}].think_prepend = false"
+            )));
+        }
         let image_tools = field_bool(section, &prefix, "image_tools", false)?;
-        let multimodal = field_bool(section, &prefix, "multimodal", false)?;
+        let multimodal = field_bool_opt(section, &prefix, "multimodal")?;
         slots.insert(
             name.clone(),
             LLMSlotConfig {
@@ -1684,15 +1870,21 @@ fn parse_llm_slots(raw: &Table) -> Result<BTreeMap<String, LLMSlotConfig>, Confi
 
 fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
     let provider = match raw.get("provider") {
-        None => "azure".to_owned(),
+        None => "cartesia".to_owned(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => {
             return Err(ConfigError(format!(
                 "[tts].provider must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
+    if REMOVED_TTS_PROVIDERS.contains(&provider.as_str()) {
+        return Err(ConfigError(format!(
+            "[tts].provider '{provider}' is no longer supported — it was an \
+             unwired stub and has been removed; use \"cartesia\""
+        )));
+    }
     if !TTS_PROVIDERS.contains(&provider.as_str()) {
         return Err(ConfigError(format!(
             "[tts].provider '{provider}' unknown; valid options: {}",
@@ -1701,11 +1893,11 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
     }
     let greetings = match raw.get("greetings") {
         None => Vec::new(),
-        Some(Value::Array(arr)) => arr.iter().map(py_str).collect(),
+        Some(Value::Array(arr)) => arr.iter().map(value_str).collect(),
         Some(other) => {
             return Err(ConfigError(format!(
                 "[tts].greetings must be a list of strings, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1714,14 +1906,6 @@ fn parse_tts_config(raw: &Table) -> Result<TTSConfig, ConfigError> {
         cartesia_voice_id: tts_opt_string(raw, "cartesia_voice_id")?,
         cartesia_model: tts_opt_string(raw, "cartesia_model")?,
         azure_voice: tts_nonempty(raw, "azure_voice", DEFAULT_AZURE_TTS_VOICE)?,
-        gemini_voice: tts_nonempty(raw, "gemini_voice", DEFAULT_GEMINI_TTS_VOICE)?,
-        gemini_model: tts_nonempty(raw, "gemini_model", DEFAULT_GEMINI_TTS_MODEL)?,
-        gemini_scene: tts_opt_str_normalized(raw, "gemini_scene")?,
-        gemini_context: tts_opt_str_normalized(raw, "gemini_context")?,
-        gemini_audio_profile: tts_opt_str_normalized(raw, "gemini_audio_profile")?,
-        gemini_style: tts_opt_str_normalized(raw, "gemini_style")?,
-        gemini_pace: tts_opt_str_normalized(raw, "gemini_pace")?,
-        gemini_accent: tts_opt_str_normalized(raw, "gemini_accent")?,
         greetings,
     })
 }
@@ -1744,14 +1928,6 @@ fn tts_nonempty(raw: &Table, key: &str, default: &str) -> Result<String, ConfigE
     }
 }
 
-fn tts_opt_str_normalized(raw: &Table, key: &str) -> Result<Option<String>, ConfigError> {
-    match raw.get(key) {
-        None => Ok(None),
-        Some(Value::String(s)) => Ok(if s.is_empty() { None } else { Some(s.clone()) }),
-        Some(_) => Err(ConfigError(format!("[tts].{key} must be a string"))),
-    }
-}
-
 fn parse_channel_overrides(raw: &Table) -> Result<BTreeMap<i64, ChannelOverrides>, ConfigError> {
     let mut out = BTreeMap::new();
     for (key, section) in raw {
@@ -1763,7 +1939,7 @@ fn parse_channel_overrides(raw: &Table) -> Result<BTreeMap<i64, ChannelOverrides
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[channels.{key}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let history_window_size = match section.get("history_window_size") {
@@ -1777,7 +1953,7 @@ fn parse_channel_overrides(raw: &Table) -> Result<BTreeMap<i64, ChannelOverrides
             Some(other) => {
                 return Err(ConfigError(format!(
                     "[channels.{key}].history_window_size must be an integer, got {}",
-                    py_type_name(other)
+                    value_type_name(other)
                 )));
             }
         };
@@ -1831,7 +2007,7 @@ fn parse_turn_detection_config(raw: &Table) -> Result<TurnDetectionConfig, Confi
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.turn_detection].strategy must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1880,7 +2056,7 @@ fn parse_stt_config(raw: &Table) -> Result<STTConfig, ConfigError> {
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.stt].backend must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -1982,7 +2158,7 @@ fn mem_pos_int(section: &Table, name: &str, key: &str, default: i64) -> Result<i
         ))),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}].{key} must be a positive integer, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
@@ -2001,9 +2177,32 @@ fn mem_pos_float(section: &Table, name: &str, key: &str, default: f64) -> Result
         ))),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}].{key} must be a positive number, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
+}
+
+/// Read + compile-check `self_capability_pattern`. Empty means "keep the
+/// built-in matcher"; anything else must compile here so a typo fails startup
+/// rather than the extractor's first tick.
+fn self_capability_pattern(section: &Table, prefix: &str) -> Result<String, ConfigError> {
+    let key = "self_capability_pattern";
+    let pattern = match section.get(key) {
+        None => return Ok(String::new()),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(ConfigError(format!(
+                "{prefix}.{key} must be a string, got {}",
+                value_type_name(other)
+            )));
+        }
+    };
+    if !pattern.is_empty() && regex::Regex::new(&pattern).is_err() {
+        return Err(ConfigError(format!(
+            "{prefix}.{key} must be a valid regex, got '{pattern}'"
+        )));
+    }
+    Ok(pattern)
 }
 
 fn worker_section<'a>(raw: &'a Table, name: &str) -> Result<&'a Table, ConfigError> {
@@ -2012,14 +2211,14 @@ fn worker_section<'a>(raw: &'a Table, name: &str) -> Result<&'a Table, ConfigErr
         Some(Value::Table(t)) => Ok(t),
         Some(other) => Err(ConfigError(format!(
             "[providers.memory.{name}] must be a table, got {}",
-            py_type_name(other)
+            value_type_name(other)
         ))),
     }
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "explicit per-worker knob parsing (Python derives these by dataclass reflection; DESIGN says enumerate explicitly)"
+    reason = "per-worker knobs are enumerated explicitly rather than derived by reflection"
 )]
 fn parse_memory_providers(
     raw: &Table,
@@ -2063,10 +2262,17 @@ fn parse_memory_providers(
     let rn = worker_section(raw, "rich_note")?;
     check_unknown_keys(
         rn,
-        &["batch_size", "tick_interval_s", "participants_max"],
+        &[
+            "batch_size",
+            "tick_interval_s",
+            "participants_max",
+            "self_capability_filter",
+            "self_capability_pattern",
+        ],
         "[providers.memory.rich_note]",
     )?;
     let rich_defaults = RichNoteConfig::default();
+    let rich_prefix = "[providers.memory.rich_note]";
     let rich_note = RichNoteConfig {
         batch_size: mem_pos_int(rn, "rich_note", "batch_size", rich_defaults.batch_size)?,
         tick_interval_s: mem_pos_float(
@@ -2081,6 +2287,13 @@ fn parse_memory_providers(
             "participants_max",
             rich_defaults.participants_max,
         )?,
+        self_capability_filter: field_bool(
+            rn,
+            rich_prefix,
+            "self_capability_filter",
+            rich_defaults.self_capability_filter,
+        )?,
+        self_capability_pattern: self_capability_pattern(rn, rich_prefix)?,
     };
 
     let pd = worker_section(raw, "people_dossier")?;
@@ -2211,6 +2424,7 @@ fn parse_memory_providers(
 fn parse_embedding_config(
     raw: &Table,
     known_embedders: &BTreeSet<String>,
+    fastembed_native_dim: FastembedNativeDim,
 ) -> Result<EmbeddingConfig, ConfigError> {
     check_unknown_keys(
         raw,
@@ -2224,7 +2438,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].backend must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2234,9 +2448,39 @@ fn parse_embedding_config(
             valid_or_none(known_embedders)
         )));
     }
+    let fastembed_model = match raw.get("fastembed_model") {
+        None => d.fastembed_model.clone(),
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(other) => {
+            return Err(ConfigError(format!(
+                "[providers.embedding].fastembed_model must be a non-empty string, got {}",
+                value_type_name(other)
+            )));
+        }
+    };
+    // The selected model's native dim, when knowable without a runtime probe.
+    // Only `fastembed` is model-bound; `hash` owns its `dim` outright, and an
+    // unmapped model name stays unchecked (dim known only after the probe).
+    let native_dim: Option<i64> = if backend == "fastembed" {
+        fastembed_native_dim(&fastembed_model).and_then(|n| i64::try_from(n).ok())
+    } else {
+        None
+    };
     let dim = match raw.get("dim") {
-        None => d.dim,
-        Some(Value::Integer(n)) if *n > 0 => *n,
+        // Unset: adopt the model's native dim so the struct never advertises a
+        // width that is wrong for the selected model.
+        None => native_dim.unwrap_or(d.dim),
+        Some(Value::Integer(n)) if *n > 0 => {
+            if let Some(native) = native_dim
+                && *n != native
+            {
+                return Err(ConfigError(format!(
+                    "[providers.embedding].dim = {n} contradicts fastembed_model \
+                     '{fastembed_model}' (native dim {native}); remove `dim` or set it to {native}."
+                )));
+            }
+            *n
+        }
         Some(Value::Integer(n)) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be > 0, got {n}"
@@ -2245,17 +2489,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].dim must be a positive integer, got {}",
-                py_type_name(other)
-            )));
-        }
-    };
-    let fastembed_model = match raw.get("fastembed_model") {
-        None => d.fastembed_model.clone(),
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(other) => {
-            return Err(ConfigError(format!(
-                "[providers.embedding].fastembed_model must be a non-empty string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2271,7 +2505,7 @@ fn parse_embedding_config(
         Some(other) => {
             return Err(ConfigError(format!(
                 "[providers.embedding].fastembed_cache_dir must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             )));
         }
     };
@@ -2297,7 +2531,7 @@ fn parse_budgets(raw: &Table) -> Result<BTreeMap<String, TierBudget>, ConfigErro
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[budget.{tier}] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         let default = out.get(tier).copied().unwrap_or_default();
@@ -2321,7 +2555,7 @@ fn parse_tier_budget(
             ))),
             Some(other) => Err(ConfigError(format!(
                 "[budget.{tier}].{key} must be a positive integer, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };
@@ -2365,7 +2599,7 @@ fn parse_budget_curves(raw: &Table) -> Result<BTreeMap<String, ModelBudgetCurve>
         let Value::Table(section) = section else {
             return Err(ConfigError(format!(
                 "[budget.model_curves.'{model_name}'] must be a table, got {}",
-                py_type_name(section)
+                value_type_name(section)
             )));
         };
         check_unknown_keys(
@@ -2381,7 +2615,7 @@ fn parse_budget_curves(raw: &Table) -> Result<BTreeMap<String, ModelBudgetCurve>
                 other => {
                     return Err(ConfigError(format!(
                         "[budget.model_curves.'{model_name}'].{key} must be a positive number, got {}",
-                        py_type_name(other)
+                        value_type_name(other)
                     )));
                 }
             };
@@ -2446,6 +2680,15 @@ fn parse_discord_text_config(raw: &Table) -> Result<DiscordTextConfig, ConfigErr
 struct PromptFields {
     post_history_instructions: String,
     image_description_constraints: String,
+    operating_mode_voice: String,
+    operating_mode_text: String,
+    voice_tool_ack: String,
+    shift_focus_coaching: String,
+    start_activity_description: String,
+    rolling_summary_system: String,
+    reflection_system: String,
+    dossier_self_system: String,
+    dossier_other_system: String,
     sleep_consolidation_system: String,
     sleep_stance_system: String,
     sleep_synthesis_system: String,
@@ -2460,13 +2703,22 @@ fn parse_prompt_config(raw: &Table) -> Result<PromptFields, ConfigError> {
             Some(Value::String(s)) => Ok(s.trim().to_owned()),
             Some(other) => Err(ConfigError(format!(
                 "[prompt].{key} must be a string, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };
     Ok(PromptFields {
         post_history_instructions: get("post_history_instructions")?,
         image_description_constraints: get("image_description_constraints")?,
+        operating_mode_voice: get("operating_mode_voice")?,
+        operating_mode_text: get("operating_mode_text")?,
+        voice_tool_ack: get("voice_tool_ack")?,
+        shift_focus_coaching: get("shift_focus_coaching")?,
+        start_activity_description: get("start_activity_description")?,
+        rolling_summary_system: get("rolling_summary_system")?,
+        reflection_system: get("reflection_system")?,
+        dossier_self_system: get("dossier_self_system")?,
+        dossier_other_system: get("dossier_other_system")?,
         sleep_consolidation_system: get("sleep_consolidation_system")?,
         sleep_stance_system: get("sleep_stance_system")?,
         sleep_synthesis_system: get("sleep_synthesis_system")?,
@@ -2482,7 +2734,7 @@ fn parse_memory_retrieval(raw: &Table) -> Result<MemoryRetrievalConfig, ConfigEr
             None => Ok(fallback),
             // Sign check on the raw value before `float(v)` (see
             // `parse_coalesce_gap`): a negative integer prints as `got -1`, not
-            // `got -1.0`, matching Python's `got {v}`.
+            // `got -1.0`.
             Some(Value::Integer(n)) if *n < 0 => Err(ConfigError(format!(
                 "[memory.retrieval].{key} must be non-negative, got {n}"
             ))),
@@ -2494,7 +2746,7 @@ fn parse_memory_retrieval(raw: &Table) -> Result<MemoryRetrievalConfig, ConfigEr
             Some(Value::Float(f)) => Ok(*f),
             Some(other) => Err(ConfigError(format!(
                 "[memory.retrieval].{key} must be a non-negative number, got {}",
-                py_type_name(other)
+                value_type_name(other)
             ))),
         }
     };
@@ -2534,8 +2786,29 @@ fn parse_focus_config(raw: &Table) -> Result<FocusConfig, ConfigError> {
     })
 }
 
+fn parse_voice_config(raw: &Table) -> Result<VoiceConfig, ConfigError> {
+    check_unknown_keys(raw, &["roster_event_window_seconds"], "[voice]")?;
+    let d = VoiceConfig::default();
+    Ok(VoiceConfig {
+        roster_event_window_seconds: positive_float(
+            "[voice]",
+            raw,
+            "roster_event_window_seconds",
+            d.roster_event_window_seconds,
+        )?,
+    })
+}
+
 fn parse_tools_config(raw: &Table) -> Result<ToolsConfig, ConfigError> {
-    check_unknown_keys(raw, &["loop_max_iterations"], "[tools]")?;
+    check_unknown_keys(
+        raw,
+        &[
+            "loop_max_iterations",
+            "allow_untrusted_image_urls",
+            "trusted_image_hosts",
+        ],
+        "[tools]",
+    )?;
     let d = ToolsConfig::default();
     Ok(ToolsConfig {
         loop_max_iterations: positive_int(
@@ -2545,24 +2818,66 @@ fn parse_tools_config(raw: &Table) -> Result<ToolsConfig, ConfigError> {
             d.loop_max_iterations,
             true,
         )?,
+        allow_untrusted_image_urls: field_bool(
+            raw,
+            "[tools]",
+            "allow_untrusted_image_urls",
+            d.allow_untrusted_image_urls,
+        )?,
+        trusted_image_hosts: parse_trusted_image_hosts(raw, d.trusted_image_hosts)?,
     })
+}
+
+/// Bare hostnames (or `*.suffix` patterns), lowercased. Rejects anything
+/// carrying a scheme, path, or port at load rather than silently never
+/// matching.
+fn parse_trusted_image_hosts(
+    raw: &Table,
+    default: Vec<String>,
+) -> Result<Vec<String>, ConfigError> {
+    let Some(value) = raw.get("trusted_image_hosts") else {
+        return Ok(default);
+    };
+    let Value::Array(entries) = value else {
+        return Err(ConfigError(format!(
+            "[tools].trusted_image_hosts must be a list of strings, got {}",
+            value_type_name(value)
+        )));
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry {
+            Value::String(s) if crate::tools::image_policy::is_host_pattern(s) => {
+                out.push(s.to_ascii_lowercase());
+            }
+            other => {
+                return Err(ConfigError(format!(
+                    "[tools].trusted_image_hosts entries must be bare hostnames, optionally '*.'-prefixed, got {}",
+                    value_repr(other)
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DeepgramSTTConfig, DiscordTextConfig,
-        EmbeddingConfig, FactSupersedeConfig, FocusConfig, IMAGE_TOOL_SLOT, LLM_SLOT_NAMES,
-        LLMSlotConfig, MemoryProvidersConfig, MemoryRetrievalConfig, PeopleDossierConfig,
-        ReflectionConfig, RichNoteConfig, RollingSummaryConfig, STTConfig, ToolsConfig,
-        TurnDetectionConfig, default_projectors, validate_vision_wiring, vision_config_warnings,
+        BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DEFAULT_AZURE_TTS_VOICE,
+        DeepgramSTTConfig, DiscordTextConfig, EmbeddingConfig, FactSupersedeConfig, FocusConfig,
+        IMAGE_TOOL_SLOT, LLM_SLOT_NAMES, LLMSlotConfig, MemoryProvidersConfig,
+        MemoryRetrievalConfig, PeopleDossierConfig, ReflectionConfig, RichNoteConfig,
+        RollingSummaryConfig, STTConfig, TTSConfig, ToolsConfig, TurnDetectionConfig,
+        default_projectors, parse_tts_config, validate_vision_wiring, vision_config_warnings,
     };
     use crate::budget::TierBudget;
     use std::collections::{BTreeMap, BTreeSet};
+    use toml::{Table, Value};
 
     // --- vision wiring coherence -------------------------------------------
 
-    fn vision_slot(image_tools: bool, multimodal: bool) -> LLMSlotConfig {
+    fn vision_slot(image_tools: bool, multimodal: Option<bool>) -> LLMSlotConfig {
         LLMSlotConfig {
             model: "vendor/model".into(),
             image_tools,
@@ -2591,7 +2906,7 @@ mod tests {
 
     #[test]
     fn image_tools_without_describer_or_multimodal_is_rejected() {
-        let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, false))]);
+        let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, Some(false)))]);
         let err = validate_vision_wiring(&llm, "").unwrap_err();
         assert!(err.0.contains("[llm.prose].image_tools = true needs"));
         assert!(err.0.contains("(no description model configured)"));
@@ -2602,21 +2917,33 @@ mod tests {
         // Describer only — the blind-prose-model path.
         assert!(
             validate_vision_wiring(
-                &slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, false))]),
+                &slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, Some(false)))]),
                 "openai/gpt-4o",
             )
             .is_ok()
         );
         // Multimodal only — the model sees the image itself.
         assert!(
-            validate_vision_wiring(&slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, true))]), "")
-                .is_ok()
+            validate_vision_wiring(
+                &slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, Some(true)))]),
+                ""
+            )
+            .is_ok()
         );
+    }
+
+    /// Only a pinned `multimodal = false` closes the door for good. Omitted, the
+    /// flag is still waiting on catalog detection, which parse time cannot see —
+    /// rejecting it would refuse the auto-detect path outright.
+    #[test]
+    fn omitted_multimodal_defers_instead_of_rejecting() {
+        let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(true, None))]);
+        assert!(validate_vision_wiring(&llm, "").is_ok());
     }
 
     #[test]
     fn image_tools_off_never_rejected() {
-        let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(false, false))]);
+        let llm = slots(&[(IMAGE_TOOL_SLOT, vision_slot(false, Some(false)))]);
         assert!(validate_vision_wiring(&llm, "").is_ok());
     }
 
@@ -2627,8 +2954,8 @@ mod tests {
     fn image_tools_on_non_prose_slot_is_never_fatal() {
         for name in ["fast", "background"] {
             let llm = slots(&[
-                (name, vision_slot(true, false)),
-                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+                (name, vision_slot(true, Some(false))),
+                (IMAGE_TOOL_SLOT, vision_slot(false, Some(false))),
             ]);
             assert!(
                 validate_vision_wiring(&llm, "").is_ok(),
@@ -2636,8 +2963,8 @@ mod tests {
             );
             let cfg = vision_config(
                 &[
-                    (name, vision_slot(true, false)),
-                    (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+                    (name, vision_slot(true, Some(false))),
+                    (IMAGE_TOOL_SLOT, vision_slot(false, Some(false))),
                 ],
                 "",
             );
@@ -2653,7 +2980,7 @@ mod tests {
     #[test]
     fn fully_wired_vision_warns_about_nothing() {
         let cfg = vision_config(
-            &[(IMAGE_TOOL_SLOT, vision_slot(true, true))],
+            &[(IMAGE_TOOL_SLOT, vision_slot(true, Some(true)))],
             "openai/gpt-4o",
         );
         assert!(vision_config_warnings(&cfg).is_empty());
@@ -2662,7 +2989,7 @@ mod tests {
     #[test]
     fn text_only_mode_is_reported_not_guessed() {
         let cfg = vision_config(
-            &[(IMAGE_TOOL_SLOT, vision_slot(true, false))],
+            &[(IMAGE_TOOL_SLOT, vision_slot(true, Some(false)))],
             "openai/gpt-4o",
         );
         let warnings = vision_config_warnings(&cfg);
@@ -2673,7 +3000,7 @@ mod tests {
 
     #[test]
     fn seeing_without_describing_warns_about_lost_history() {
-        let cfg = vision_config(&[(IMAGE_TOOL_SLOT, vision_slot(true, true))], "");
+        let cfg = vision_config(&[(IMAGE_TOOL_SLOT, vision_slot(true, Some(true)))], "");
         let warnings = vision_config_warnings(&cfg);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("invisible to every later turn"));
@@ -2683,8 +3010,8 @@ mod tests {
     fn image_tools_on_ignored_slot_warns() {
         let cfg = vision_config(
             &[
-                ("fast", vision_slot(true, true)),
-                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+                ("fast", vision_slot(true, Some(true))),
+                (IMAGE_TOOL_SLOT, vision_slot(false, Some(false))),
             ],
             "openai/gpt-4o",
         );
@@ -2702,8 +3029,8 @@ mod tests {
     fn ignored_slot_does_not_mask_unused_description_model() {
         let cfg = vision_config(
             &[
-                ("fast", vision_slot(true, true)),
-                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
+                ("fast", vision_slot(true, Some(true))),
+                (IMAGE_TOOL_SLOT, vision_slot(false, Some(false))),
             ],
             "openai/gpt-4o",
         );
@@ -2720,8 +3047,8 @@ mod tests {
     fn ignored_slot_warning_does_not_also_advise_delivery_mode() {
         let cfg = vision_config(
             &[
-                ("fast", vision_slot(true, false)),
-                (IMAGE_TOOL_SLOT, vision_slot(true, true)),
+                ("fast", vision_slot(true, Some(false))),
+                (IMAGE_TOOL_SLOT, vision_slot(true, Some(true))),
             ],
             "openai/gpt-4o",
         );
@@ -2733,7 +3060,7 @@ mod tests {
 
     #[test]
     fn multimodal_without_image_tools_warns() {
-        let cfg = vision_config(&[(IMAGE_TOOL_SLOT, vision_slot(false, true))], "");
+        let cfg = vision_config(&[(IMAGE_TOOL_SLOT, vision_slot(false, Some(true)))], "");
         let warnings = vision_config_warnings(&cfg);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("has no effect without image_tools"));
@@ -2742,7 +3069,7 @@ mod tests {
     #[test]
     fn unused_description_model_warns() {
         let cfg = vision_config(
-            &[(IMAGE_TOOL_SLOT, vision_slot(false, false))],
+            &[(IMAGE_TOOL_SLOT, vision_slot(false, Some(false)))],
             "openai/gpt-4o",
         );
         let warnings = vision_config_warnings(&cfg);
@@ -2755,9 +3082,9 @@ mod tests {
     fn clean_default_config_warns_about_nothing() {
         let cfg = vision_config(
             &[
-                ("fast", vision_slot(false, false)),
-                (IMAGE_TOOL_SLOT, vision_slot(false, false)),
-                ("background", vision_slot(false, false)),
+                ("fast", vision_slot(false, Some(false))),
+                (IMAGE_TOOL_SLOT, vision_slot(false, Some(false))),
+                ("background", vision_slot(false, Some(false))),
             ],
             "",
         );
@@ -2781,6 +3108,71 @@ mod tests {
         assert!(cfg.llm.is_empty());
         assert!(cfg.sleep_window.is_none());
         assert_eq!(cfg.sleep_grace_minutes, 30);
+    }
+
+    #[test]
+    fn tts_defaults_to_the_only_wired_provider() {
+        // #N1: the default must be synthesizable, not a stub backend.
+        assert_eq!(TTSConfig::default().provider, "cartesia");
+        assert_eq!(
+            parse_tts_config(&Table::new())
+                .expect("empty [tts] parses")
+                .provider,
+            "cartesia"
+        );
+    }
+
+    #[test]
+    fn removed_tts_providers_name_the_removal() {
+        // #N1: the gemini stub was deleted — a stale profile gets a migration hint.
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "gemini".into());
+        let err = parse_tts_config(&raw).expect_err("removed provider rejected");
+        assert_eq!(
+            err.0,
+            "[tts].provider 'gemini' is no longer supported — it was an \
+             unwired stub and has been removed; use \"cartesia\""
+        );
+    }
+
+    #[test]
+    fn azure_is_a_valid_tts_provider_with_default_voice() {
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "azure".into());
+        let tts = parse_tts_config(&raw).expect("azure accepted");
+        assert_eq!(tts.provider, "azure");
+        assert_eq!(tts.azure_voice, "en-US-AmberNeural");
+        assert_eq!(TTSConfig::default().azure_voice, DEFAULT_AZURE_TTS_VOICE);
+    }
+
+    #[test]
+    fn azure_voice_overrides_default() {
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "azure".into());
+        raw.insert("azure_voice".to_owned(), "en-GB-SoniaNeural".into());
+        let tts = parse_tts_config(&raw).expect("azure_voice parses");
+        assert_eq!(tts.azure_voice, "en-GB-SoniaNeural");
+    }
+
+    #[test]
+    fn azure_voice_must_be_nonempty_string() {
+        for bad in [Value::from(""), Value::from(3)] {
+            let mut raw = Table::new();
+            raw.insert("azure_voice".to_owned(), bad);
+            let err = parse_tts_config(&raw).expect_err("bad azure_voice rejected");
+            assert_eq!(err.0, "[tts].azure_voice must be a non-empty string");
+        }
+    }
+
+    #[test]
+    fn unknown_tts_provider_lists_the_options() {
+        let mut raw = Table::new();
+        raw.insert("provider".to_owned(), "foo".into());
+        let err = parse_tts_config(&raw).expect_err("unknown provider rejected");
+        assert_eq!(
+            err.0,
+            "[tts].provider 'foo' unknown; valid options: azure, cartesia"
+        );
     }
 
     #[test]
@@ -2826,7 +3218,9 @@ mod tests {
             RichNoteConfig {
                 batch_size: 10,
                 tick_interval_s: 15.0,
-                participants_max: 30
+                participants_max: 30,
+                self_capability_filter: true,
+                self_capability_pattern: String::new(),
             }
         );
         assert_eq!(

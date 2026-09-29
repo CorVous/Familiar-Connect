@@ -56,6 +56,149 @@ Discord Opus  →  RecordingSink  →  per-user PCM
 Bracketed stages are pluggable. Unbracketed (recording sink, bus,
 responder, assembler) are project glue.
 
+### Songbird join order and SSRC attribution
+
+Discord identifies a speaker by RTP SSRC, not by user id. The SSRC → user
+binding arrives only in the gateway's op-5 `Speaking` payload, surfaced by
+songbird as a `SpeakingStateUpdate` core event. That event is effectively
+**one-shot per user per session**: it fires when a user first speaks or
+changes capabilities, and songbird's event task never replays it for
+handlers registered later. `SsrcMap` (`bot::voice_intake`) is the only
+consumer, and `RecordingSink::on_tick` is its only reader.
+
+Registration order is therefore load-bearing. `join_voice` uses songbird's
+**two-stage** join instead of the convenience `Songbird::join`:
+
+1. `manager.get_or_insert(guild_id)` — creates the `Call` (and starts its
+   driver tasks) without contacting the gateway.
+2. `register_receivers(&mut call, …)` — adds the `VoiceTick` and
+   `SpeakingStateUpdate` global handlers while the call is still offline.
+3. `call.join(channel_id).await` — stage 1, sends the gateway request.
+4. Await the returned stage-2 future **after** dropping the `Call` lock;
+   holding it across stage 2 deadlocks songbird.
+
+`Songbird::join` collapses steps 1, 3 and 4 and only hands back the `Call`
+once the WS + UDP + DAVE handshake has completed. Registering handlers after
+that returns loses every `Speaking` event that fired during the handshake —
+which in practice was all of them, leaving `unmapped_frames` equal to
+`speaking_frames` for the whole session (issues #199, #205).
+
+The provisional-id fallback in `RecordingSink::on_tick` stays: songbird
+still fires op-5 inconsistently upstream (songbird PR #291) and DAVE
+decryption is MLS-sender-identified, so decoded audio can legitimately
+arrive before any binding. Unattributed frames get a provisional user id
+equal to the raw SSRC (always < 2^32, so it can never collide with a
+Discord snowflake) rather than being dropped; the turn transcribes
+anonymously.
+
+### Voice member roster
+
+Speaker names come from `BotHandle.voice_members`, one shared `VoiceRoster`
+(`familiar-connect/src/voice_roster.rs`) the `resolve_member` seam reads on
+the audio path. It has three lifecycle points:
+
+- **Snapshot at join.** `/subscribe-voice` reads the channel's occupants out
+  of the gateway cache (`Guild::voice_states`, filtered to the joined channel)
+  and replaces the roster with them. Without this the bot only ever learned
+  about people who *changed* voice state after it arrived — everyone already
+  seated stayed anonymous for the whole session. Resolution tries the cache
+  first (`VoiceState::member`, then `Guild::members`, then the user cache) and
+  gives whoever is left **one REST member lookup**
+  (`GuildId::member` → `GET /guilds/{guild}/members/{user}`).
+  That REST leg exists because voice state is presence, not speech: a
+  participant who joins and stays quiet *is* in `voice_states` but misses all
+  three cache lookups — `VoiceState::member` is not always populated,
+  `Guild::members` is sparse with no `GUILD_MEMBERS` intent, and the user cache
+  is fed by people who do things. Cache-only resolution dropped exactly those
+  people, and now that the roster feeds the prompt, dropping them means the
+  model cannot see them at all.
+- **Maintained on voice-state updates.** A join or move *into* the subscribed
+  channel inserts; a leave or a move *out* removes. Bots and the familiar's
+  own user id are excluded at both the snapshot and the update. Removal is
+  keyed by member id alone, so an update from elsewhere in the guild needs no
+  before-channel.
+- **Cleared at leave.** `/unsubscribe-voice` empties the roster, so the next
+  call does not inherit the last one's members.
+
+The REST leg is bounded and does **not** violate the audio path's no-REST rule
+(`resolve_member`, B-VM29): it runs once per join, before intake starts, over at
+most the channel's headcount — at most `ROSTER_FETCH_CONCURRENCY` (4) requests
+in flight, all sharing one `ROSTER_FETCH_BUDGET` (2 s) wall-clock deadline, so a
+slow Discord cannot hold up the join. Nothing is dropped meanwhile: `join_voice`
+has already registered the songbird receivers and their tick channel is
+unbounded, so audio buffers while the roster resolves. The per-frame resolver on the audio path
+stays cache-only. A failed, errored, or over-budget lookup degrades to an
+id-only `Author` (platform + numeric id, no names) — never a drop, because
+losing a known user id to a failed *name* lookup is the original N16 bug. The
+policy half (`resolve_voice_roster`, the `MemberFetcher` seam) is ungated and
+unit-tested with a scripted fetcher; only the serenity HTTP implementation is
+behind `discord-voice`.
+
+Each insert and remove also appends a timestamped join/leave event, decaying
+after `[voice].roster_event_window_seconds` (default `120.0`) and hard-capped
+at 16 entries. A snapshot narrates nothing — nobody "just joined" when the
+familiar walked into a call already in progress.
+
+The roster has three readers. Beyond speaker resolution
+(`voice_member_cached`) it feeds STT keyterm biasing (`voice_member_keyterms`,
+#198) and the prompt: `VoiceRosterLayer` renders `In the call: …` plus the
+narration into the voice system prompt. The type is never feature-gated, so
+the ungated layer reads the very `Arc` this gated glue writes — no second copy
+to drift. See
+[Context pipeline — Voice call roster](context-pipeline.md#voice-call-roster)
+for the layer, its position, and the decay rule.
+
+A resolver miss no longer erases the speaker: the persisted turn keeps the
+numeric user id (`Author` with platform + id, no names), so unnamed speakers
+stay distinct from each other rather than fusing into one anonymous voice.
+
+### Keyterms are vocabulary, not membership
+
+"Who is in the call" and "what proper nouns will be spoken" are different
+questions, and the roster only answers the first. The roster filter drops bots
+and the familiar itself — correct for the rendered line, wrong for STT, because
+those are the most-uttered names in the room. Measured over a live
+263-transcript session, proper-noun accuracy was around 85% (29 correct, 5
+misses); two of the five were the familiar's own name coming back as `Tim`
+instead of `Tam`, a name that was never in the keyterm list at all.
+
+So `VoiceRoster::keyterms()` draws from three sources, in this order:
+
+1. **The familiar's own names** — `display_name()` plus the top-level
+   `aliases` config key, held on the roster as immutable vocabulary outside the
+   membership state. Never seated, never rendered, always biased.
+2. **Roster members** — each human's display name, username, aliases, and
+   per-guild nickname.
+3. **Bots present in the channel** — a sibling familiar sharing the guild gets
+   said constantly. Bots live in a *separate* collection on the roster, not
+   behind a flag on the member slot, so `view()` has no bot to reach and the
+   `In the call: …` line cannot leak one by a forgotten filter. Bot arrivals and
+   departures narrate nothing and do not bump `revision`, so they never
+   invalidate the prompt cache.
+
+`DeepgramTranscriber::set_keyterms` then merges that list *behind* the config
+`keyterms`, so project jargon survives the `MAX_KEYTERMS` (100) cap ahead of
+runtime names; the merged set is trimmed, stripped of letter-free tokens,
+case-insensitively deduped (first spelling wins), and capped.
+
+Keyterm biasing is probabilistic, not a lookup table: a name in the list can
+still come back wrong. The same session missed `Kulvar` as `Colvar` twice out of
+four utterances *while Kulvar was a biased roster member*. That is the
+technique's ceiling, not a wiring bug.
+
+### Caveat: keyterms are frozen per stream
+
+Keyterms are baked into the Deepgram connect URL at `start()`, and each
+speaker's transcriber clone is then cached for the session in the intake state.
+A name that becomes known *after* a speaker's stream opened — someone joining
+mid-call, a bot arriving late — does not bias that stream. Likewise, a member
+who leaves mid-call stays in the keyterms of streams that are already open. The
+idle watchdog closes a stream after `idle_close_s` (default `30.0`) of silence
+from that speaker; the next clone for them picks up the current list. The
+familiar's own names are exempt from this: they come from config and are known
+before any stream opens.
+
+
 ## Turn detection
 
 **Today:** Deepgram's hosted endpointer. One WebSocket per speaker,
@@ -240,19 +383,38 @@ single-letter initials (`J. K. Rowling`) don't trip a boundary. A
 trailing partial without a terminator (model omits the final period)
 is drained on stream end via `flush()` and spoken last.
 
-**Silent sentinel + leak guard.** `StreamGate` (Rust `silence.rs`) runs
-ahead of the splitter on every delta. Sentences finalised before the
-gate decides are buffered; on `silent` they're dropped and TTS is never
-invoked; on `speak` they flush and the streamer feeds TTS as new
-sentences arrive. Beyond `<silent>`, the gate also recognises a
-tool-call block the model occasionally leaks as plain text (`<invoke …`,
-`silent(…)`, `read_channel(…)`, `<tool_call …`), staying pending while
-the token is still split across delta boundaries and latching `suppress`
-(or `silent`, for a leaked `silent` call) so the raw XML never reaches
-TTS or the persisted turn (issue #109). The confirmed-leak
-classification is shared with the agentic loop's return-time strip guard
-(`classify_leading_leak`), the single source of truth. The text path,
-which streams no content mid-turn, keeps the simpler `SilentDetector`.
+**Leak guard.** `StreamGate` (Rust `silence.rs`) runs ahead of the
+splitter on every delta. Sentences finalised before the gate decides are
+buffered; on `silent` they're dropped and TTS is never invoked; on
+`speak` they flush and the streamer feeds TTS as new sentences arrive.
+The gate recognises a tool-call block the model occasionally leaks as
+plain text (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`),
+staying pending while the token is still split across delta boundaries
+and latching `suppress` (or `silent`, for a leaked `silent` call) so the
+raw XML never reaches TTS or the persisted turn (issue #109). The
+confirmed-leak classification is shared with the agentic loop's
+return-time strip guard (`classify_leading_leak`), the single source of
+truth. The same gate runs on the text path.
+
+Deliberate silence is separate and arrives through tool calls, not text:
+a turn that called any tool with no `silent: false` speaks nothing, and
+once that is known no later iteration's prose reaches TTS either. The
+filler phrase is skipped on such a turn — it would be the only thing
+heard.
+
+**Speakable-chunk gate.** A chunk only reaches TTS when it holds at
+least one letter or digit (`support::text::is_speakable`). Whitespace,
+punctuation, markdown, and emoji carry no phonemes, and Cartesia
+answers such a transcript with HTTP 400 rather than audio. The common
+case is a reply ending in a trailing emoji: the splitter closes the
+last sentence at its terminator and `flush()` hands over the lone
+emoji. `VoiceResponder::speak` is the single gate — every flush tail is
+queued unconditionally and dropped there — with the same check repeated
+in `DiscordVoicePlayer::speak` as defence in depth for other callers. A
+skipped chunk logs at debug (`[Voice] skip=unspeakable turn=… text=…`),
+never warn: it is routine, not a fault. Chunks are spoken serially, so
+dropping one leaves the rest in order and the turn records the whole
+reply, emoji included.
 
 **Cancellation.** Each `TTSPlayer::speak(sentence, scope)` call is
 awaited serially. Barge-in cancels the current `TurnScope`;
@@ -262,12 +424,25 @@ assistant turn records only if the full reply played uncancelled.
 
 ## TTS
 
-Three clients behind `synthesize(text) → TTSResult`: `AzureTTSClient`,
-`CartesiaTTSClient`, `GeminiTTSClient`. `DiscordVoicePlayer`
+Two clients behind `synthesize(text) → TTSResult`: `CartesiaTTSClient`
+(default) and `AzureTTSClient` (`azure-tts` feature). `DiscordVoicePlayer`
 synthesises, mono→stereo, pushes through songbird. Without a configured
 client, `LoggingTTSPlayer` logs the intended speech.
 
 Already a trait seam. Adding a backend is one new type.
+
+### Azure
+
+`AzureTTSClient` drives the `azure-speech` SDK: one WebSocket per
+utterance, SSML naming `[tts].azure_voice`, output format
+`raw-48khz-16bit-mono-pcm` — the same mono 48 kHz PCM Cartesia delivers,
+so the player path is identical. It implements `synthesize_stream` too.
+The SDK hands chunks off through a bounded broadcast channel that silently
+drops frames a slow reader misses, so a drain task copies them into an
+unbounded queue as they arrive. Chunks are re-aligned to whole 16-bit
+samples before reaching `mono_to_stereo`. A stream that ends without the
+service's `turn.end` is surfaced as an error, not played as truncated
+audio. Word boundaries fill `TTSResult.timestamps` on the buffered path.
 
 ### Byte-level streaming (Cartesia)
 
@@ -291,9 +466,8 @@ down to ~one TTFB. Cancellation: `scope.is_cancelled()` flips
 `vc.stop()` within a poll tick; the producer drops out of its loop on
 the next `feed` and `close_input` releases any blocked reader.
 
-Azure and Gemini stay on the buffered `synthesize` path (their SDKs
-return one big result), so `DiscordVoicePlayer.speak` falls through
-to the prior synthesize-then-play behaviour.
+A backend that only offers buffered `synthesize` (no `as_streaming`)
+falls through to the synthesize-then-play path instead.
 
 **Mimi-codec lineage.** Mimi (Kyutai, 12.5 Hz frames) is becoming the
 open audio-token standard — Sesame CSM, Hibiki, Moshi all use it.
@@ -370,13 +544,18 @@ in **stability descending** order:
 | 2 | `OperatingModeLayer` | `viewer_mode` flip (constant per mode) |
 | 3 | `ConversationSummaryLayer` | `SummaryWorker` writes (every N turns) |
 | 4 | `PeopleDossierLayer` | `PeopleDossierWorker` watermark advances |
-| 5 | `RagContextLayer` | per-turn cue (always changes) |
+| 5 | `VoiceRosterLayer` | someone joins / leaves the call, or an event decays out |
+| 6 | `RagContextLayer` | per-turn cue (always changes) |
 | — | `RecentHistoryLayer` | per-turn (contributes user/assistant messages, not system text) |
 
 `RagContextLayer` therefore sits at the tail of the system message,
 so its inevitable per-turn churn invalidates *only* itself — the
 prefix from `CharacterCardLayer` through `PeopleDossierLayer` stays
-cached when its constituent layers haven't moved.
+cached when its constituent layers haven't moved. `VoiceRosterLayer`
+sits just ahead of it for the same reason: a join invalidates two small
+tail blocks instead of the whole prompt, and its cache key is a state
+counter rather than a clock, so a quiet call re-uses the cached render
+turn after turn.
 
 The `default_assembler` layer-order test in
 `familiar-connect/src/commands/run.rs` pins this ordering so a refactor
@@ -397,13 +576,39 @@ OpenRouter routing-tax at a glance.
 | `llm.total.<slot>` | request initiation → stream end |
 
 The log line carries `slot`, `model`, `chars` (input payload size),
-`ttfb_ms` / `ttft_ms` / `total_ms`, and — when upstream returns them
+`ttfb_ms` / `ttft_ms` / `total_ms`, `est_in_tokens` (the `chars / 4`
+heuristic's guess), and — when upstream returns them
 via OpenRouter's `usage: { include: true }` flag — `provider`,
 `in_tokens`, `out_tokens`, and `cached` (prompt-cache hit count,
-surfaced when the underlying provider supports it). `voice.stt_to_ttft`
+surfaced when the underlying provider supports it).
+
+`cal_ratio` follows: the model's running `Σ in_tokens / Σ
+est_in_tokens` across this process, including the call being logged.
+It appears once the model has had at least one usage-bearing call, so
+`est_in_tokens` vs `in_tokens` vs `cal_ratio` read together show how
+far the heuristic is off and in which direction. The store behind it is
+described in [tuning § token-count
+calibration](tuning.md#token-count-calibration); note that it only ever
+raises an estimate, never lowers one. `voice.stt_to_ttft`
 covers the full STT-to-LLM-first-token gap; `llm.ttft.<slot>` is the
 LLM-only slice plus headers. Comparing the two isolates assembler /
 network from raw model latency.
+
+It also carries `status`, the call's outcome:
+
+| `status=` | Meaning |
+|---|---|
+| `ok` | Stream ran to its terminal event. |
+| `error` | Transport or HTTP fault (the request never opened, or the body broke mid-stream). |
+| `cancelled` | Consumer dropped the stream early — a barge-in. |
+| `silent` | Consumer dropped the stream early because the turn resolved to silence (a leaked `silent(` call on the streaming path). |
+| `suppressed` | Consumer dropped the stream early because the reply leaked a tool call as plain content. |
+
+The transport can only ever infer `cancelled` for an early drop, so the
+responders call `LlmStream::note_abandon_status` before returning on a
+deliberate abandon; anything that does not becomes `cancelled`. Before
+that split (issue #220) a silent turn was indistinguishable from a real
+barge-in in the logs.
 
 ## Barge-in
 
@@ -420,7 +625,7 @@ See [Voice reply loop](overview.md#voice-reply-loop).
 
 Every voice turn emits exactly one decision line for observability:
 
-- `[💤 Voice] decision=silent` — `<silent>` sentinel latched.
+- `[💤 Voice] decision=silent` — the turn resolved to silence.
 - `[Voice] decision=respond` — gate opened on real content.
 - `[Voice] decision=preempted` — barge-in cancelled the turn before
   the gate latched. Without this line a continuously-speaking user
@@ -455,7 +660,7 @@ A per-channel `tokio::sync::Mutex` (`VoiceResponder::gate_for`) serializes
 reply *generation*: `set_rag_cue` → assemble → stream → assistant-turn
 commit run under the lock. The waiting pipeline therefore assembles
 only after the prior reply lands in history, sees it in context, and
-can resolve `<silent>` instead of duplicating. Two further points:
+can stay silent instead of duplicating. Two further points:
 
 - **No perceived latency.** Playback is already serial on the shared
   voice client, so the second reply can't be *heard* until the first

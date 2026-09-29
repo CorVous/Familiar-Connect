@@ -1,5 +1,4 @@
-//! Single-writer history persistence processor (subsystem 06; Python
-//! `processors/history_writer.py`).
+//! Single-writer history persistence processor (subsystem 06).
 //!
 //! Consumes `discord.text` events and writes user turns to the store. This is
 //! the legacy standalone writer — **not** wired alongside `TextResponder` in

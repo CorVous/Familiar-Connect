@@ -1,20 +1,17 @@
-//! Per-SSRC recording sink → mono PCM fan-in (subsystem 09; Python
-//! `voice/recording_sink.py`).
+//! Per-SSRC recording sink → mono PCM fan-in (subsystem 09).
 //!
-//! Bridges decoded Discord voice audio to the transcription pump. In Python this
-//! is a py-cord `Sink` whose `write(data, user)` is called from a background
-//! recording thread; it converts 48 kHz stereo s16le → mono `((L+R)//2)` and
-//! hands `(user_id, mono)` to an asyncio queue via `call_soon_threadsafe`.
+//! Bridges decoded Discord voice audio to the transcription pump: 48 kHz
+//! stereo s16le → mono `((L+R)//2)`, tagged with the speaking user id.
 //!
 //! Under songbird the recording thread is gone — the driver delivers per-SSRC
 //! **decoded** PCM in 20 ms ticks. This port keeps the package serenity-free by
 //! modelling that against a [`VoiceTick`]-shaped seam plus an [`SsrcResolver`]
-//! (songbird's SSRC→user map): [`RecordingSink::on_tick`] demuxes each speaking
-//! SSRC, resolves its user id, converts stereo→mono, and fans the tagged
-//! `(user_id, mono)` tuple into an unbounded channel. The tokio `mpsc` sender is
-//! `Send + Sync`, so the Python `call_soon_threadsafe` thread-hop collapses to a
-//! plain `send` (the queue stays unbounded — backpressure is deliberately
-//! absent here, spec 09 §15).
+//! (songbird's SSRC→user map): [`RecordingSink::on_tick`] demuxes each
+//! speaking SSRC, resolves its user id, converts stereo→mono, and fans the
+//! tagged `(user_id, mono)` tuple into an unbounded channel. The tokio `mpsc`
+//! sender is `Send + Sync`, so the hand-off is a plain `send` (the queue
+//! stays unbounded — backpressure is
+//! deliberately absent here).
 //!
 //! The per-user *transcriber clone* and idle watchdog live in the Layer-4 voice
 //! source that drains this channel — keeping this Layer-2 package free of the
@@ -28,7 +25,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::log_style as ls;
 use crate::voice::audio::{AudioError, stereo_to_mono};
 
-/// Log target mirroring the Python logger name.
+/// Log target (grep-stable for ops).
 const LOG_TARGET: &str = "familiar_connect.voice.recording_sink";
 
 /// A `(user_id, mono s16le 48 kHz PCM)` tuple pushed to the transcription pump.
@@ -75,14 +72,14 @@ impl RecordingSink {
 
     /// Convert one 48 kHz stereo s16le buffer to mono and push `(user, mono)`.
     ///
-    /// Mirrors the Python `write(data, user)`: must not block. A closed receiver
-    /// (pump gone) drops the chunk — the sink never errors on send.
+    /// A closed receiver (pump gone) drops the chunk — the sink never errors
+    /// on send.
     ///
     /// # Errors
     /// [`AudioError::NotDivisibleByFour`] when `data` is not whole stereo frames.
     pub fn write(&self, data: &[u8], user: u64) -> Result<(), AudioError> {
         let mono = stereo_to_mono(data)?;
-        // Plain debug string, byte-for-byte with Python (recording_sink.py:49-54):
+        // Plain debug string:
         // this call site deliberately does NOT use the `log_style` tag/kv helpers.
         tracing::debug!(
             target: LOG_TARGET,

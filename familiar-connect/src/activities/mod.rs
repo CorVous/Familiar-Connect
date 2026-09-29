@@ -1,7 +1,7 @@
 //! Activities: `activities.toml` loader + the global-absence `ActivityEngine`
-//! state machine (subsystem 11; Python `activities/`).
+//! state machine (subsystem 11).
 //!
-//! Re-exports mirror the Python `activities/__init__.py` public surface so
+//! Re-exports give the module a flat public surface so
 //! consumers (subsystems 06/07/08/10) import from `crate::activities::` rather
 //! than reaching into the submodules. `GateAction` / `GateDecision` are the
 //! responder-shared types (`crate::processors`) the engine's gate returns.

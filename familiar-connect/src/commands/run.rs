@@ -1,11 +1,10 @@
-//! run subcommand: composition root + teardown (subsystem 10; Python
-//! commands/run.py).
+//! run subcommand: composition root + teardown (subsystem 10).
 //!
-//! `run` is the failure ladder (token → familiar → config → clients → familiar
-//! bundle); the async composition root `async_main` brings up the bus,
-//! responders, workers, sources, alarm scheduler, and activity engine, wires the
-//! serenity gateway, and tears everything down in the spec's order on a
-//! cooperative SIGINT/SIGTERM (spec 10 §55–58).
+//! `run` is the failure ladder (token → familiar → config → clients →
+//! familiar bundle); the async composition root `async_main` brings up the bus,
+//! responders, workers, sources, alarm scheduler, and activity engine, wires
+//! the serenity gateway, and tears everything down in the spec's order on a
+//! cooperative SIGINT/SIGTERM.
 //!
 //! Because the real gateway needs `serenity`, `async_main` and the client-facing
 //! half of `run` are `cfg(feature = "discord")`; the default-feature build keeps
@@ -29,18 +28,20 @@ use crate::activities::engine::{
 };
 use crate::bot::{BotHandle, build_activity_presence_cb};
 use crate::budget::TierBudget;
-use crate::config::EmbeddingConfig;
+use crate::config::{EmbeddingConfig, TTSConfig};
 use crate::context::layers::ChannelResolver;
 use crate::context::{
     Assembler, CharacterCardLayer, ConversationSummaryLayer, LorebookLayer, OperatingModeLayer,
-    PeopleDossierLayer, RagContextLayer, RecentHistoryLayer, ReflectionLayer,
+    PeopleDossierLayer, RagContextLayer, RecentHistoryLayer, ReflectionLayer, VoiceRosterLayer,
 };
 use crate::embedding::{Embedder, EmbeddingError};
 use crate::familiar::Familiar;
 use crate::focus::FocusManager;
 use crate::sleep::maintenance::SleepPromptText;
+use crate::tts::{TtsClient, TtsError};
+use crate::voice_roster::VoiceRoster;
 
-/// `run` arguments (Python `add_parser`'s `--familiar`).
+/// `run` arguments.
 #[derive(Args, Debug)]
 pub struct RunArgs {
     /// Folder name of the character to run (under `data/familiars/`). Overrides
@@ -56,9 +57,8 @@ pub struct RunArgs {
 /// the OS-correct analog elsewhere). Home-based storage means a `git clean -fdx`
 /// in a repo checkout can no longer wipe live familiars — the reported foot-gun
 /// (issue #201). The legacy CWD-relative `data/familiars` survives only as the
-/// last-resort fallback when no home directory resolves, and as the source of the
-/// one-shot migration in [`run`].
-fn default_familiars_root() -> PathBuf {
+/// last-resort fallback when no home directory resolves.
+pub(crate) fn default_familiars_root() -> PathBuf {
     resolve_familiars_root(std::env::var("FAMILIARS_ROOT").ok(), home_familiars_root())
 }
 
@@ -109,66 +109,10 @@ fn resolve_defaults_root(env_override: Option<String>) -> PathBuf {
     }
 }
 
-/// One-shot, best-effort migration of legacy CWD-relative familiars into the
-/// resolved root (issue #201).
-///
-/// For every `legacy_root/<id>` folder other than the tracked `_default`, move it
-/// to `new_root/<id>` when no familiar already lives there. Idempotent (a second
-/// run finds nothing left to move) and never-clobbering (an existing home-dir
-/// familiar is left untouched, its legacy copy kept in place). Best-effort: a
-/// failed move logs a hint and leaves the legacy copy behind rather than aborting
-/// startup (e.g. a cross-device rename the operator must complete by hand).
-fn migrate_legacy_familiars(legacy_root: &Path, new_root: &Path) {
-    if legacy_root == new_root || !legacy_root.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(legacy_root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let src = entry.path();
-        if !src.is_dir() {
-            continue;
-        }
-        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        // `_default` is a tracked repo resource, resolved via `default_defaults_root`.
-        if name == "_default" {
-            continue;
-        }
-        let dest = new_root.join(name);
-        if dest.exists() {
-            // A familiar already lives at the new root — never clobber it.
-            continue;
-        }
-        if let Err(err) = std::fs::create_dir_all(new_root) {
-            tracing::warn!(
-                "could not create familiars root {}: {err}",
-                new_root.display()
-            );
-            return;
-        }
-        match std::fs::rename(&src, &dest) {
-            Ok(()) => tracing::info!(
-                "migrated familiar '{name}' to {} (issue #201 home-dir storage)",
-                dest.display()
-            ),
-            Err(err) => tracing::warn!(
-                "could not migrate familiar '{name}' from {} to {} ({err}); \
-                 move it by hand or set FAMILIARS_ROOT",
-                src.display(),
-                dest.display()
-            ),
-        }
-    }
-}
-
 /// Resolve the active familiar's root directory.
 ///
-/// Resolution order: `--familiar` flag → `FAMILIAR_ID` env (Python
-/// `_resolve_familiar_root`). The `root` base is injected so tests need not touch
-/// the process environment (the Python `_DEFAULT_FAMILIARS_ROOT` monkeypatch).
+/// Resolution order: `--familiar` flag → `FAMILIAR_ID` env. The `root` base
+/// is injected so tests need not touch the process environment.
 ///
 /// # Errors
 /// Byte-stable messages: no id selected, or the resolved directory is missing.
@@ -205,7 +149,7 @@ pub fn resolve_familiar_root(
 ///
 /// The composition root calls this BEFORE opening the history store / FTS: a
 /// misconfigured embedding backend (e.g. `fastembed` without the `local-embed`
-/// extra) must refuse to start rather than wipe the FTS and then die deep in
+/// feature) must refuse to start rather than wipe the FTS and then die deep in
 /// `create_projectors` under a misleading Discord-token hint. The backend error
 /// (which already names the real fix) is propagated, never swallowed into
 /// `None`.
@@ -225,33 +169,69 @@ fn resolve_embedder(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embedder>
     crate::embedding::create_embedder(config)
 }
 
-/// The two hardcoded operating-mode strings (byte-exact; Python
-/// `_default_assembler`).
-fn operating_modes() -> HashMap<String, String> {
-    let mut modes = HashMap::new();
-    modes.insert(
-        "voice".to_owned(),
-        "You are speaking aloud. Keep replies short (one or two sentences). \
-         Avoid markdown."
-            .to_owned(),
-    );
-    modes.insert(
-        "text".to_owned(),
-        "You are chatting in a text channel. Markdown and multi-line replies \
-         are fine."
-            .to_owned(),
-    );
-    modes
+/// Resolve the startup TTS client, degrading or refusing per provider.
+///
+/// Cartesia (shipped default) degrades: a fresh install without its key still
+/// runs text-only, with a warning. Azure is explicit opt-in, so a missing
+/// `azure-tts` feature or credential refuses startup — never a mid-conversation
+/// synthesis failure (#233).
+///
+/// # Errors
+/// The factory's [`TtsError`] for a provider in
+/// [`STRICT_TTS_PROVIDERS`](crate::tts::STRICT_TTS_PROVIDERS).
+#[cfg_attr(
+    not(feature = "discord"),
+    allow(
+        dead_code,
+        reason = "the only non-test caller is the `discord`-gated `run_inner`; \
+                  the fail-fast contract is unit-tested under default features"
+    )
+)]
+fn resolve_tts_client(
+    config: &TTSConfig,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<Arc<dyn TtsClient>>, TtsError> {
+    match crate::tts::build_tts_client(config, env) {
+        Ok(kind) => Ok(Some(kind.into_dyn())),
+        Err(err) if crate::tts::STRICT_TTS_PROVIDERS.contains(&config.provider.as_str()) => {
+            Err(err)
+        }
+        Err(err) => {
+            tracing::warn!("TTS client unavailable: {err}");
+            Ok(None)
+        }
+    }
+}
+
+/// The per-mode operating directives, keyed by viewer mode.
+///
+/// The single source for both consumers — `OperatingModeLayer` (system prompt)
+/// and `FinalReminder` (trailing reminder). Text lives in
+/// `[prompt].operating_mode_voice` / `.operating_mode_text`; a blank one drops
+/// the mode from the map, so nothing renders (#151).
+fn operating_modes(config: &crate::config::CharacterConfig) -> HashMap<String, String> {
+    [
+        ("voice", config.operating_mode_voice.as_str()),
+        ("text", config.operating_mode_text.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, text)| !text.trim().is_empty())
+    .map(|(mode, text)| (mode.to_owned(), text.to_owned()))
+    .collect()
 }
 
 /// Build the full layer stack with token-aware per-section caps.
 ///
-/// Order is **stability descending** for OpenAI prompt-cache friendliness
-/// (Python `_default_assembler`). Per DESIGN D15 recent-history is a distinct
-/// slot (not a system-prompt layer), so the layer-order pin applies to the
-/// system-prompt `Vec`: `[character_card, operating_mode, lorebook,
-/// conversation_summary, reflection, people_dossier, rag_context]` with
-/// `rag_context` last, recent-history in its own slot.
+/// Order is **stability descending** for OpenAI prompt-cache friendliness. The
+/// recent-history is a distinct slot (not a system-prompt layer), so the
+/// layer-order pin applies to the system-prompt `Vec`: `[character_card,
+/// operating_mode, lorebook, conversation_summary, reflection, people_dossier,
+/// voice_roster, rag_context]` with `rag_context` last, recent-history in its
+/// own slot.
+///
+/// `roster` (voice tier only) adds the live-call roster line next-to-last: it
+/// churns on every join/leave, so it sits behind every stable layer and ahead of
+/// only `rag_context`, which churns per turn regardless.
 #[must_use]
 pub fn default_assembler(
     familiar: &Familiar,
@@ -260,6 +240,7 @@ pub fn default_assembler(
     silence_gap_fold_seconds: f64,
     embedder: Option<Arc<dyn Embedder>>,
     focus_manager: Option<Arc<FocusManager>>,
+    roster: Option<Arc<VoiceRoster>>,
 ) -> Assembler {
     let store = familiar.history_store.clone();
     let display_tz = familiar.config.display_tz.clone();
@@ -301,11 +282,13 @@ pub fn default_assembler(
     }
     let rag = Arc::new(rag.build());
 
-    Assembler::builder()
+    let mut builder = Assembler::builder()
         .layer(Arc::new(CharacterCardLayer::new(
             familiar.root.join("character.md"),
         )))
-        .layer(Arc::new(OperatingModeLayer::new(operating_modes())))
+        .layer(Arc::new(OperatingModeLayer::new(operating_modes(
+            &familiar.config,
+        ))))
         .layer(Arc::new(
             LorebookLayer::builder(store.clone(), familiar.root.join("lorebook.toml"))
                 .recent_window(window_size)
@@ -328,20 +311,21 @@ pub fn default_assembler(
                 .max_tokens(Some(budget.dossier_tokens))
                 .familiar_display_name(familiar.display_name())
                 .build(),
-        ))
-        // RAG is the last system-prompt layer; recent-history is a slot.
-        .rag(rag)
-        .recent_history(recent)
-        .build()
+        ));
+    if let Some(roster) = roster {
+        builder = builder.layer(Arc::new(VoiceRosterLayer::new(roster)));
+    }
+    // RAG is the last system-prompt layer; recent-history is a slot.
+    builder.rag(rag).recent_history(recent).build()
 }
 
 /// Build an [`ActivityEngine`] from the familiar's `activities.toml`.
 ///
-/// Sidecar merged over the `_default` skeleton (Python `_build_activity_engine`);
-/// a missing file or empty catalog yields `None` (no engine, zero behavior
-/// change). `voice_active_fn` reads `handle.voice_channels` (the default-feature
-/// proxy for the voice runtime map), and `bot_user_id` is late-bound over the
-/// shared cell the gateway fills on ready.
+/// Sidecar merged over the `_default` skeleton; a missing file or empty catalog
+/// yields `None` (no engine, zero behavior change). `voice_active_fn` reads
+/// `handle.voice_channels` (the default-feature proxy for the voice runtime
+/// map), and `bot_user_id` is late-bound over the shared cell the gateway fills
+/// on ready.
 #[must_use]
 pub fn build_activity_engine(
     familiar: &Familiar,
@@ -404,7 +388,7 @@ pub fn build_activity_engine(
 }
 
 // ---------------------------------------------------------------------------
-// Cooperative shutdown (Python `_install_shutdown_handlers` / `_wait_for_shutdown`)
+// Cooperative shutdown
 // ---------------------------------------------------------------------------
 
 /// What a delivered signal should do: drain (first) or force-exit (second).
@@ -419,10 +403,10 @@ pub enum ShutdownStage {
 /// Two-stage cooperative shutdown coordinator.
 ///
 /// The first delivered signal flips the [`CancellationToken`] (the run loop's
-/// supervisor unwinds and teardown runs in normal task state — the Python
-/// `_GracefulShutdown` path). A second signal returns [`ShutdownStage::Force`],
+/// supervisor unwinds and teardown runs in normal task state).
+/// A second signal returns [`ShutdownStage::Force`],
 /// the caller's cue to restore the OS default and force-exit so a wedged
-/// shutdown stays killable (Python's second-signal handler removal).
+/// shutdown stays killable.
 #[derive(Debug, Default)]
 pub struct ShutdownController {
     cancel: CancellationToken,
@@ -452,7 +436,7 @@ impl ShutdownController {
         }
     }
 
-    /// Park until the first signal cancels the token (Python `_wait_for_shutdown`).
+    /// Park until the first signal cancels the token.
     pub async fn wait(&self) {
         self.cancel.cancelled().await;
     }
@@ -462,7 +446,7 @@ impl ShutdownController {
 // run (failure ladder)
 // ---------------------------------------------------------------------------
 
-/// Start the Discord bot (Python `run`).
+/// Start the Discord bot.
 ///
 /// Reads `DISCORD_BOT`, selects the familiar, and — with the `discord` feature —
 /// loads the config + clients + familiar bundle and launches the gateway under
@@ -476,9 +460,6 @@ pub fn run(args: &RunArgs) -> i32 {
         return 1;
     }
     let root = default_familiars_root();
-    // One-shot: relocate any legacy CWD-relative familiars into the resolved
-    // root before we look one up (idempotent, never clobbers — issue #201).
-    migrate_legacy_familiars(&legacy_familiars_root(), &root);
     let familiar_root = match resolve_familiar_root(
         args.familiar.as_deref(),
         std::env::var("FAMILIAR_ID").ok(),
@@ -524,7 +505,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     let known_emb = known_embedders();
 
     // Load merged config first so the client factories see per-slot models.
-    let config = match load_character_config(
+    let mut config = match load_character_config(
         &familiar_root.join("character.toml"),
         &defaults_path,
         &known_proj,
@@ -537,9 +518,20 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         }
     };
 
-    // Emitted here, not from the client factory: the factory is `net`-gated and
-    // the fatal half runs at parse, so the composition root is the one place
-    // both halves are reached exactly once (DESIGN D22).
+    // Resolve tri-state capability flags from the LAST-KNOWN-GOOD catalog on
+    // disk: a local file read, no network, so boot stays offline. Missing or
+    // corrupt cache → every slot keeps its configured value. The background
+    // refresh spawned later in `async_main` only affects the next boot.
+    let catalog_cache_path = crate::model_diagnostics::cache::default_cache_path();
+    crate::model_diagnostics::cache::resolve_capabilities_from_cache(
+        &mut config.llm,
+        &catalog_cache_path,
+    );
+
+    // After resolution, so the warnings describe the mode the run will actually
+    // use. The factory that registers `view_image` is `net`-gated and the fatal
+    // half runs at parse, leaving the composition root as the one place both
+    // halves are reached exactly once.
     for warning in crate::config::vision_config_warnings(&config) {
         tracing::warn!("{} {warning}", ls::tag("Config", ls::Y));
     }
@@ -562,12 +554,14 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             }
         };
 
-    // Degrade-not-fail: TTS / STT / local turn detector unavailability warns.
-    let tts_client = match crate::tts::create_tts_client(&config.tts) {
-        Ok(kind) => Some(kind.into_dyn()),
+    // Degrade-not-fail: TTS / STT / local turn detector unavailability warns —
+    // except an opt-in TTS provider (Azure), which refuses startup rather than
+    // failing mid-conversation (#233).
+    let tts_client = match resolve_tts_client(&config.tts, |key| std::env::var(key).ok()) {
+        Ok(client) => client,
         Err(err) => {
-            tracing::warn!("TTS client unavailable: {err}");
-            None
+            tracing::error!("TTS provider unavailable: {err}");
+            return 1;
         }
     };
     let transcriber = match crate::stt::create_transcriber(&config.stt) {
@@ -587,7 +581,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
     // rebuilds the history store / FTS). A misconfigured backend must refuse to
     // start here, while nothing has been mutated — not fail deep in
     // `create_projectors` after the store is already open. Its error names the
-    // real fix (e.g. the `local-embed` extra), so surface it verbatim.
+    // real fix (e.g. the `local-embed` feature), so surface it verbatim.
     let embedder = match resolve_embedder(&config.embedding) {
         Ok(embedder) => embedder,
         Err(err) => {
@@ -596,7 +590,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
         }
     };
 
-    let familiar = match Familiar::load_from_disk(
+    let mut familiar = match Familiar::load_from_disk(
         familiar_root,
         llm_clients,
         tts_client,
@@ -612,6 +606,27 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
             return 1;
         }
     };
+    // Point the process-wide LLM call mirror at this familiar's store. The
+    // composition root, not `load_from_disk`: a DI-bundle constructor should not
+    // reach out and mutate a process global (and the unit tests that build a
+    // bundle would fight each other over it). `llm_mirror_calls = 0` leaves no
+    // sink installed, and the transport then skips capturing prompts entirely.
+    if familiar.config.llm_mirror_calls > 0 {
+        crate::diagnostics::llm_mirror::set_llm_call_sink(Arc::new(
+            crate::history::llm_mirror::HistoryLlmMirror::new(
+                Arc::clone(&familiar.history_store),
+                familiar.id.clone(),
+                familiar.config.llm_mirror_calls,
+            ),
+        ));
+    }
+
+    // `load_from_disk` re-parses the same TOML, so its copy needs the same
+    // resolution (silently — the lines were already logged above).
+    crate::model_diagnostics::cache::resolve_from_cache_quietly(
+        &mut familiar.config.llm,
+        &catalog_cache_path,
+    );
 
     // `load_opus` is a no-op in the Rust port: songbird statically links libopus,
     // so there is no ctypes-style runtime discovery to perform.
@@ -648,7 +663,7 @@ fn run_inner(token: &str, familiar_root: &Path) -> i32 {
 ///
 /// The familiar stores clients as `Arc<dyn LlmClient>`, erasing the concrete
 /// `image_tools_enabled` accessor the text responder needs; this thin adapter
-/// re-attaches it (the Python `getattr(llm, "image_tools_enabled")` seam).
+/// re-attaches it.
 #[cfg(feature = "discord")]
 struct ResponderLlmAdapter {
     inner: Arc<dyn crate::llm::LlmClient>,
@@ -668,12 +683,16 @@ impl crate::llm::LlmClient for ResponderLlmAdapter {
         &self,
         messages: Vec<crate::llm::Message>,
         tools: Option<Vec<serde_json::Value>>,
-    ) -> anyhow::Result<futures::stream::BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-    {
+    ) -> anyhow::Result<crate::llm::LlmStream> {
         self.inner.stream_completion(messages, tools).await
     }
     fn slot(&self) -> Option<&str> {
         self.inner.slot()
+    }
+    // Forwarded, not defaulted: the trait's `""` would silently disable #183
+    // calibration for every responder.
+    fn model(&self) -> &str {
+        self.inner.model()
     }
     fn multimodal(&self) -> bool {
         self.inner.multimodal()
@@ -698,7 +717,7 @@ fn responder_llm(
     Arc::new(ResponderLlmAdapter { inner, image_tools })
 }
 
-/// Debug-logger observed topics (Python `_DEBUG_TOPICS`).
+/// Debug-logger observed topics.
 #[cfg(feature = "discord")]
 const DEBUG_TOPICS: [&str; 4] = [
     crate::bus::topics::TOPIC_DISCORD_TEXT,
@@ -707,8 +726,50 @@ const DEBUG_TOPICS: [&str; 4] = [
     crate::bus::topics::TOPIC_VOICE_TRANSCRIPT_FINAL,
 ];
 
-/// Spawn the two-stage SIGINT/SIGTERM listener (Python
-/// `_install_shutdown_handlers`).
+/// Spawn the detached OpenRouter catalog refresh + capability audit (#218,
+/// #204).
+///
+/// Fire-and-forget like the signal listener: config loading stays offline, and
+/// a slow or unreachable catalog can never gate readiness. The refresh writes
+/// the on-disk cache the *next* boot reads for capability auto-detection — this
+/// process is already wired by then and never waits. Silent without an API key
+/// — `run_inner` has already refused that case.
+#[cfg(feature = "discord")]
+fn spawn_model_capability_audit(config: &crate::config::CharacterConfig) {
+    let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return;
+    }
+    tokio::spawn(crate::model_diagnostics::run_capability_audit(
+        api_key,
+        crate::llm::OPENROUTER_BASE_URL.to_owned(),
+        config.llm.clone(),
+        crate::model_diagnostics::cache::default_cache_path(),
+    ));
+}
+
+/// Boot check for #221: both responder surfaces get a focus manager
+/// unconditionally, so a slot with `tool_calling = false` can never reach
+/// `shift_focus`. Needs no network — immediate and unconditional.
+#[cfg(feature = "discord")]
+fn check_focus_tool_calling(config: &crate::config::CharacterConfig) {
+    // Text can still follow a direct ping without a tool; voice cannot.
+    for (surface, slot_name, ping_fallback) in [("text", "prose", true), ("voice", "fast", false)] {
+        let Some(slot) = config.llm.get(slot_name) else {
+            continue;
+        };
+        if let Some(msg) = crate::model_diagnostics::focus_unreachable_message(
+            surface,
+            slot_name,
+            slot,
+            ping_fallback,
+        ) {
+            tracing::error!(target: "familiar_connect.llm", "{msg}");
+        }
+    }
+}
+
+/// Spawn the two-stage SIGINT/SIGTERM listener.
 #[cfg(all(feature = "discord", unix))]
 fn spawn_signal_listener(controller: Arc<ShutdownController>) {
     use crate::log_style as ls;
@@ -746,7 +807,7 @@ fn spawn_signal_listener(controller: Arc<ShutdownController>) {
 ///
 /// Guild rows (`dm_user_id` is `None`) are untouched. Removal rewrites the
 /// sidecar, so a de-allowlisted peer's row cannot resurface on restart or win
-/// the seeded text focus (Python `_prune_deallowlisted_dm_subscriptions`).
+/// the seeded text focus.
 #[cfg(feature = "discord")]
 fn prune_deallowlisted_dm_subscriptions(
     subscriptions: &mut crate::subscriptions::SubscriptionRegistry,
@@ -775,12 +836,13 @@ const DM_PEER_AUTHOR_LIMIT: i64 = 5;
 
 /// Restore DM naming for persisted DM subscriptions after a restart.
 ///
-/// Mirrors what `register_dm_channel` records live: the sentinel guild name
-/// (DM detection keys off it) and the peer's display name, recovered from
-/// history via the author row matching the subscription's `dm_user_id`. When
-/// history has no such author, `channel_names` stays unset and the digest falls
-/// back to `DM (id <cid>)`. Guild rows (`dm_user_id` is `None`) are untouched
-/// (Python `_rehydrate_dm_naming`).
+/// Mirrors what `register_dm_channel` records live: the sentinel guild name (DM
+/// detection keys off it) and the peer's display name, recovered from history
+/// via the author row matching the subscription's `dm_user_id`. When history
+/// has no such author (freshly-allowlisted peer), the name falls back to
+/// `user <dm_user_id>` — an unset entry would leave presence rendering the raw
+/// channel snowflake (#222). The first DM overwrites it with the real name.
+/// Guild rows (`dm_user_id` is `None`) are untouched.
 #[cfg(feature = "discord")]
 async fn rehydrate_dm_naming(
     focus_manager: &FocusManager,
@@ -799,25 +861,22 @@ async fn rehydrate_dm_naming(
         let authors = store
             .recent_distinct_authors(familiar_id.to_owned(), channel_id, DM_PEER_AUTHOR_LIMIT)
             .await?;
-        let Some(peer) = authors
+        let name = authors
             .into_iter()
             .find(|a| a.user_id == dm_user_id.to_string())
-        else {
-            continue;
-        };
-        let name = peer
-            .display_name
-            .filter(|s| !s.is_empty())
-            .or_else(|| peer.username.filter(|s| !s.is_empty()));
-        if let Some(name) = name {
-            focus_manager.set_channel_name(channel_id, name);
-        }
+            .and_then(|peer| {
+                peer.display_name
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| peer.username.filter(|s| !s.is_empty()))
+            })
+            .unwrap_or_else(|| format!("user {dm_user_id}"));
+        focus_manager.set_channel_name(channel_id, name);
     }
     Ok(())
 }
 
 /// Boot-time DM validation, naming, and default-focus seeding — the ordering
-/// contract, in one testable unit (the tail of Python `_async_main`).
+/// contract, in one testable unit.
 ///
 /// Order is load-bearing: (1) prune de-allowlisted DM rows so a stale DM can
 /// neither survive nor win the focus seed, and so `initialize`'s
@@ -861,8 +920,8 @@ async fn boot_dm_focus(
     Ok(())
 }
 
-/// Asyncio entry point: bring up the bus, responders, workers, and gateway, then
-/// tear down in order (Python `_async_main`).
+/// Async entry point: bring up the bus, responders, workers, and gateway,
+/// then tear down in order.
 ///
 /// # Errors
 /// Propagates a serenity client build/start failure (surfaced by `run` with a
@@ -897,12 +956,12 @@ async fn async_main(
 
     familiar.bus.start().await;
 
-    // Subscriptions: ONE shared-mutable registry (`Arc<Mutex<…>>`) consumed by
-    // both the bot (which mutates it on `/subscribe*`) and the focus manager
-    // (which reads it through the `SubscriptionView` seam). Mirrors Python, where
-    // `bot` and `focus` share a single registry object, so a runtime
-    // `/subscribe` mutation is visible to `is_focused` / `should_wake` /
-    // startup-default-focus / `staged_channels` logic without a restart.
+    // Model-configuration diagnostics (#218) — detached, never gates readiness.
+    spawn_model_capability_audit(&familiar.config);
+
+    // Subscriptions: ONE shared-mutable registry (`Arc<Mutex<…>>`) consumed
+    // by both the bot (which mutates it on `/subscribe*`) and the focus manager
+    // (which reads it through the `SubscriptionView` seam).
     let subs_path = familiar.root.join("subscriptions.toml");
     let subscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new(&subs_path)?));
 
@@ -917,6 +976,10 @@ async fn async_main(
         .with_catch_up_limit(usize::try_from(familiar.config.focus.catch_up_limit).unwrap_or(20)),
     );
 
+    // Both responders below take this focus manager, so #221's trap is live
+    // from here on.
+    check_focus_tool_calling(&familiar.config);
+
     // Boot DM validation + naming + default-focus seeding, in one ordered unit:
     // prune de-allowlisted DM rows, initialize focus, rehydrate DM naming, then
     // seed the default focus (see `boot_dm_focus` for the ordering contract).
@@ -930,6 +993,21 @@ async fn async_main(
     .await?;
 
     let bot_user_id = Arc::new(Mutex::new(None::<i64>));
+    // One roster, two readers: the gateway writes membership through the handle,
+    // the voice assembler's roster layer renders it.
+    //
+    // Own names are keyterm vocabulary, not membership: the familiar's own name
+    // is the most-uttered proper noun in any call, and the roster filter
+    // deliberately never holds it (#198). `display_name()` leads (it *is*
+    // `aliases[0]` when set, so the duplicate folds in `set_keyterms`).
+    let voice_roster = Arc::new(
+        VoiceRoster::new()
+            .with_event_window_seconds(familiar.config.voice.roster_event_window_seconds)
+            .with_own_names(
+                std::iter::once(familiar.display_name())
+                    .chain(familiar.config.aliases.iter().cloned()),
+            ),
+    );
     let (handle, client) = create_bot(CreateBotDeps {
         token: token.clone(),
         familiar_id: familiar.id.clone(),
@@ -948,8 +1026,8 @@ async fn async_main(
         local_turn_detector: familiar.local_turn_detector.take().map(Arc::new),
         store: {
             // Route reaction / edit writes through the async store's
-            // blocking-thread facade (off the reactor, DESIGN §4.4) rather than
-            // running rusqlite inline on the gateway task; see `AsyncBotStore`.
+            // blocking-thread facade (off the reactor) rather than running
+            // rusqlite inline on the gateway task; see `AsyncBotStore`.
             let store: Arc<dyn BotStore> =
                 Arc::new(AsyncBotStore::new(familiar.history_store.clone()));
             store
@@ -957,6 +1035,7 @@ async fn async_main(
         history_store: familiar.history_store.clone(),
         bus: familiar.bus.clone(),
         focus_manager: Some(focus_manager.clone()),
+        voice_roster: voice_roster.clone(),
     })
     .await?;
 
@@ -969,7 +1048,10 @@ async fn async_main(
         0.0,
         embedder.clone(),
         Some(focus_manager.clone()),
+        Some(voice_roster.clone()),
     ));
+    // Text prompts get no roster layer: call membership is irrelevant there and
+    // its churn would cost tokens + cache prefix on every text turn.
     let text_assembler = Arc::new(default_assembler(
         &familiar,
         familiar.config.text_window_size,
@@ -977,6 +1059,7 @@ async fn async_main(
         familiar.config.text_silence_gap_fold_seconds,
         embedder.clone(),
         Some(focus_manager.clone()),
+        None,
     ));
 
     let tts_player: Arc<dyn TtsPlayer> = if let Some(tts) = familiar.tts_client.clone() {
@@ -984,7 +1067,7 @@ async fn async_main(
         // stored in `handle.voice_runtime`. That map is a `BTreeMap`, so
         // `.values().next()` deterministically yields the lowest-keyed entry and
         // is stable across utterances (v1 supports one voice channel at a time, so
-        // the single entry is unambiguous — Python `_first_voice_client`).
+        // the single entry is unambiguous).
         // Under a `discord`-only build (no `discord-voice`), the runtime map does
         // not exist, so playback degrades to no-op.
         let vc_handle = handle.clone();
@@ -1040,27 +1123,42 @@ async fn async_main(
             let engine: Arc<dyn StartActivityEngine> = engine;
             engine
         });
+    let image_url_policy =
+        crate::tools::image_policy::ImageUrlPolicy::from_tools_config(&familiar.config.tools);
     let text_tool_registry = Arc::new(build_text_registry(
         &alarm_scheduler,
         prose_image_tools,
         &familiar.config.image_description_constraints,
+        &image_url_policy,
         true,
         text_activity_engine,
+        &familiar.config.start_activity_description,
     ));
 
     let description_llm = familiar.llm_clients.get("__image_description__").cloned();
+    let caption_llm = familiar.llm_clients.get("__image_caption__").cloned();
+    // The resolved value, straight off the built client — `familiar.config`
+    // records the operator's tri-state, the client records the decision.
+    let prose_multimodal = familiar
+        .llm_clients
+        .get("prose")
+        .is_some_and(|c| c.multimodal());
 
-    // Per-turn ToolContext factory (Python `_make_tool_context`).
+    // Per-turn ToolContext factory.
     let make_factory = |channel_kind: &'static str, with_description: bool| {
         let familiar_id = familiar.id.clone();
         let history = familiar.history_store.clone();
         let bus = familiar.bus.clone();
         let scheduler = alarm_scheduler.clone();
         let fm = focus_manager.clone();
-        let description = if with_description {
-            description_llm.clone()
+        let (description, caption, multimodal) = if with_description {
+            (
+                description_llm.clone(),
+                caption_llm.clone(),
+                prose_multimodal,
+            )
         } else {
-            None
+            (None, None, false)
         };
         let factory: crate::processors::ToolContextFactory = Arc::new(
             move |channel_id: i64, turn_id: &str, images: HashMap<String, String>| {
@@ -1073,9 +1171,13 @@ async fn async_main(
                         .with_scheduler(scheduler.clone())
                         .with_images(images)
                         .with_focus_manager(focus_control)
-                        .with_store(read_store);
+                        .with_store(read_store)
+                        .with_multimodal(multimodal);
                 if let Some(description) = &description {
                     ctx = ctx.with_description_llm(description.clone());
+                }
+                if let Some(caption) = &caption {
+                    ctx = ctx.with_caption_llm(caption.clone());
                 }
                 ctx
             },
@@ -1124,6 +1226,8 @@ async fn async_main(
     // Filler phrases disabled 2026-06-25 (too chatty in voice).
     .with_tool_filler_phrases(Vec::new())
     .with_post_history_instructions(familiar.config.post_history_instructions.clone())
+    .with_mode_instructions(operating_modes(&familiar.config))
+    .with_voice_tool_ack(familiar.config.voice_tool_ack.clone())
     .with_display_tz(familiar.config.display_tz.clone())
     .with_focus_manager(focus_manager.clone() as Arc<dyn FocusManagerApi>)
     .with_loop_max_iterations(loop_max);
@@ -1141,6 +1245,8 @@ async fn async_main(
     )
     .with_tools(text_tool_registry, text_factory)
     .with_post_history_instructions(familiar.config.post_history_instructions.clone())
+    .with_shift_focus_coaching(familiar.config.shift_focus_coaching.clone())
+    .with_mode_instructions(operating_modes(&familiar.config))
     .with_display_tz(familiar.config.display_tz.clone())
     .with_focus_manager(focus_manager.clone() as Arc<dyn FocusManagerApi>)
     .with_loop_max_iterations(loop_max);
@@ -1166,6 +1272,11 @@ async fn async_main(
     projector_context.memory = familiar.config.memory_providers.clone();
     projector_context.familiar_display_name = Some(familiar.display_name());
     projector_context.dream_extraction_clause = familiar.config.dream_extraction_clause.clone();
+    projector_context.rolling_summary_system = familiar.config.rolling_summary_system.clone();
+    projector_context.reflection_system = familiar.config.reflection_system.clone();
+    projector_context.dossier_self_system = familiar.config.dossier_self_system.clone();
+    projector_context.dossier_other_system = familiar.config.dossier_other_system.clone();
+    projector_context.display_tz = familiar.config.display_tz.clone();
     let projectors = create_projectors(
         &familiar.config.memory_providers.projectors,
         &projector_context,
@@ -1190,10 +1301,10 @@ async fn async_main(
     let mut set = tokio::task::JoinSet::new();
 
     // All four production subscriptions below use the default BLOCK/64 policy
-    // (`maxsize == 0`), matching Python's `bus.subscribe(proc.topics)` (no policy
-    // arg → `BackpressurePolicy.BLOCK`, maxsize 64). Spec 01 pins this: the ADR's
-    // "unbounded for text/twitch" note describes intent for topics not yet on the
-    // bus, so the head-of-line backpressure coupling (spec 01 §6) stays in force.
+    // (`maxsize == 0` → `BackpressurePolicy::BLOCK`, maxsize 64). This is
+    // pinned: the ADR's "unbounded for text/twitch" note describes intent for
+    // topics not yet on the bus, so the head-of-line backpressure coupling
+    // stays in force.
 
     // debug-logger
     {
@@ -1306,7 +1417,7 @@ async fn async_main(
         );
     }
 
-    // -- teardown (order pinned, spec 10 §57) ----------------------------
+    // teardown (order pinned) ----------------------------
     // 1. (signal handlers auto-drop with the runtime)
     // 2. close the gateway first so serenity's session does not leak.
     shard_manager.shutdown_all().await;
@@ -1342,7 +1453,10 @@ async fn async_main(
     familiar.router.shutdown();
     // 7. bus.
     familiar.bus.shutdown().await;
-    // 8. (the LLM client `close()` step has no Rust analog — reqwest connection
+    // 8. persist token calibration — the writer debounces, so a clean exit
+    //    would otherwise drop the tail of the session's learning (#183).
+    crate::budget::get_token_calibration().flush();
+    // 9. (the LLM client `close()` step has no Rust analog — reqwest connection
     //     pools close on drop.)
 
     match bot_ended {
@@ -1356,8 +1470,8 @@ async fn async_main(
 mod tests {
     use super::{
         ShutdownController, ShutdownStage, build_activity_engine, default_assembler,
-        home_familiars_root, migrate_legacy_familiars, resolve_defaults_root, resolve_embedder,
-        resolve_familiar_root, resolve_familiars_root,
+        home_familiars_root, operating_modes, resolve_defaults_root, resolve_embedder,
+        resolve_familiar_root, resolve_familiars_root, resolve_tts_client,
     };
     use crate::activities::engine::ActivityEngine;
     use crate::bot::{BotHandle, Presence, PresenceSink};
@@ -1367,28 +1481,92 @@ mod tests {
     use crate::focus::FocusManager;
     use crate::processors::SendText;
     use crate::subscriptions::SubscriptionRegistry;
+    use crate::voice_roster::VoiceRoster;
     use async_trait::async_trait;
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
+    // --- operating modes: one source for both consumers (#151) ---
+
+    /// The layer copy and the final-reminder copy must both come from
+    /// `[prompt].operating_mode_*` — no in-code string to drift against.
+    #[test]
+    fn operating_mode_override_reaches_layer_and_reminder() {
+        let config = crate::config::CharacterConfig {
+            operating_mode_voice: "SPEAK_MARKER".to_owned(),
+            operating_mode_text: "TYPE_MARKER".to_owned(),
+            ..crate::config::CharacterConfig::default()
+        };
+        let modes = operating_modes(&config);
+        // Consumer 1: the system-prompt layer.
+        assert_eq!(modes.get("voice").map(String::as_str), Some("SPEAK_MARKER"));
+        assert_eq!(modes.get("text").map(String::as_str), Some("TYPE_MARKER"));
+        // Consumer 2: the trailing reminder, fed the same map.
+        let reminder = crate::context::final_reminder::FinalReminder::new("voice")
+            .include_mode_instruction(true)
+            .mode_instructions(modes)
+            .render();
+        assert!(reminder.contains("SPEAK_MARKER"), "{reminder}");
+    }
+
+    /// Blank config drops the mode entirely — nothing renders anywhere.
+    #[test]
+    fn blank_operating_mode_yields_no_entry() {
+        let modes = operating_modes(&crate::config::CharacterConfig::default());
+        assert!(modes.is_empty());
+    }
+
+    /// The shipped `_default` profile supplies both directives.
+    #[test]
+    fn default_profile_supplies_both_operating_modes() {
+        let profile =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml");
+        let known: BTreeSet<String> = crate::processors::projectors::DEFAULT_PROJECTORS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .chain(std::iter::once("fact_embedding".to_owned()))
+            .collect();
+        let embedders: BTreeSet<String> = ["off", "hash", "fastembed"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let config =
+            crate::config::load_character_config(&profile, &profile, &known, &embedders).unwrap();
+        let modes = operating_modes(&config);
+        assert_eq!(
+            modes.get("voice").map(String::as_str),
+            Some(
+                "You are speaking aloud. Keep replies short (one or two sentences). \
+                 Avoid markdown."
+            )
+        );
+        assert_eq!(
+            modes.get("text").map(String::as_str),
+            Some(
+                "You are chatting in a text channel. Markdown and multi-line replies \
+                 are fine."
+            )
+        );
+    }
+
     // --- resolve_embedder (composition-root fail-fast) ---
 
     /// The composition root must surface the embedder feature-gap as an error
     /// (which names the `local-embed` fix), not swallow it into `None` and let
     /// startup proceed to mutate the store. The default test build lacks the
-    /// `local-embed` extra, so `fastembed` genuinely has no backend here.
+    /// `local-embed` feature, so `fastembed` genuinely has no backend here.
     #[cfg(not(feature = "local-embed"))]
     #[test]
-    fn resolve_embedder_fastembed_without_extra_errors() {
+    fn resolve_embedder_fastembed_without_feature_errors() {
         let config = EmbeddingConfig {
             backend: "fastembed".to_owned(),
             ..EmbeddingConfig::default()
         };
         let err = resolve_embedder(&config)
             .err()
-            .expect("fastembed without the local-embed extra must fail fast");
+            .expect("fastembed without the local-embed feature must fail fast");
         assert!(
             err.to_string().contains("local-embed"),
             "error must name the real fix, got: {err}"
@@ -1406,7 +1584,65 @@ mod tests {
         assert!(resolve_embedder(&config).unwrap().is_none());
     }
 
-    // --- resolve_familiar_root (ported from test_run_cmd.py) ---
+    // --- resolve_tts_client (composition-root fail-fast, #233) ---
+
+    fn azure_tts() -> crate::config::TTSConfig {
+        crate::config::TTSConfig {
+            provider: "azure".to_owned(),
+            ..crate::config::TTSConfig::default()
+        }
+    }
+
+    #[cfg(not(feature = "azure-tts"))]
+    #[test]
+    fn resolve_tts_azure_without_feature_refuses_startup() {
+        let err = resolve_tts_client(&azure_tts(), |k| Some(format!("{k}-set")))
+            .err()
+            .expect("azure without the azure-tts feature must refuse startup");
+        assert_eq!(
+            err.to_string(),
+            crate::tts::azure::AZURE_TTS_FEATURE_MISSING
+        );
+    }
+
+    #[cfg(feature = "azure-tts")]
+    #[test]
+    fn resolve_tts_azure_missing_key_refuses_startup() {
+        let err = resolve_tts_client(&azure_tts(), |k| {
+            (k == "AZURE_SPEECH_REGION").then(|| "eastus".to_owned())
+        })
+        .err()
+        .expect("azure without AZURE_SPEECH_KEY must refuse startup");
+        assert_eq!(
+            err.to_string(),
+            "AZURE_SPEECH_KEY environment variable is required for Azure TTS"
+        );
+    }
+
+    #[cfg(feature = "azure-tts")]
+    #[test]
+    fn resolve_tts_azure_with_credentials_builds() {
+        let client = resolve_tts_client(&azure_tts(), |k| match k {
+            "AZURE_SPEECH_KEY" => Some("k".to_owned()),
+            "AZURE_SPEECH_REGION" => Some("eastus".to_owned()),
+            _ => None,
+        })
+        .expect("configured azure builds");
+        assert!(client.is_some_and(|c| c.as_streaming().is_some()));
+    }
+
+    /// Shipped default keeps degrade-not-fail: no key → text-only, no refusal.
+    #[test]
+    fn resolve_tts_cartesia_without_key_degrades() {
+        let config = crate::config::TTSConfig {
+            cartesia_voice_id: Some("v".to_owned()),
+            cartesia_model: Some("m".to_owned()),
+            ..crate::config::TTSConfig::default()
+        };
+        assert!(resolve_tts_client(&config, |_| None).unwrap().is_none());
+    }
+
+    // --- resolve_familiar_root ---
 
     #[test]
     fn flag_overrides_env() {
@@ -1509,51 +1745,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn migration_moves_legacy_familiars_and_spares_default() {
-        let tmp = TempDir::new().unwrap();
-        let legacy = tmp.path().join("legacy");
-        let home = tmp.path().join("home");
-        std::fs::create_dir_all(legacy.join("aria")).unwrap();
-        std::fs::write(legacy.join("aria").join("character.toml"), "id = 1").unwrap();
-        std::fs::create_dir_all(legacy.join("_default")).unwrap();
-        std::fs::write(legacy.join("_default").join("character.toml"), "d = 1").unwrap();
-
-        migrate_legacy_familiars(&legacy, &home);
-
-        // The user familiar moved to the new root, contents intact.
-        assert!(home.join("aria").join("character.toml").exists());
-        assert!(!legacy.join("aria").exists());
-        // The tracked `_default` skeleton stays put and is never copied over.
-        assert!(legacy.join("_default").join("character.toml").exists());
-        assert!(!home.join("_default").exists());
-
-        // Idempotent: a second run has nothing left to move and does not error.
-        migrate_legacy_familiars(&legacy, &home);
-        assert!(home.join("aria").join("character.toml").exists());
-    }
-
-    #[test]
-    fn migration_never_clobbers_existing_home_familiar() {
-        let tmp = TempDir::new().unwrap();
-        let legacy = tmp.path().join("legacy");
-        let home = tmp.path().join("home");
-        std::fs::create_dir_all(legacy.join("aria")).unwrap();
-        std::fs::write(legacy.join("aria").join("character.toml"), "legacy").unwrap();
-        std::fs::create_dir_all(home.join("aria")).unwrap();
-        std::fs::write(home.join("aria").join("character.toml"), "home").unwrap();
-
-        migrate_legacy_familiars(&legacy, &home);
-
-        // The home copy is authoritative and untouched; the legacy copy is left
-        // in place rather than overwriting it.
-        assert_eq!(
-            std::fs::read_to_string(home.join("aria").join("character.toml")).unwrap(),
-            "home"
-        );
-        assert!(legacy.join("aria").exists());
-    }
-
     // --- test familiar bundle ---
 
     fn default_profile() -> PathBuf {
@@ -1566,7 +1757,7 @@ mod tests {
 
     fn fake_clients() -> std::collections::HashMap<String, Arc<dyn crate::llm::LlmClient>> {
         use async_trait::async_trait;
-        use futures::stream::{self, BoxStream};
+        use futures::stream;
         use serde_json::Value;
 
         struct FakeLlm(String);
@@ -1582,9 +1773,8 @@ mod tests {
                 &self,
                 _messages: Vec<crate::llm::Message>,
                 _tools: Option<Vec<Value>>,
-            ) -> anyhow::Result<BoxStream<'static, anyhow::Result<crate::llm::LlmDelta>>>
-            {
-                Ok(Box::pin(stream::empty()))
+            ) -> anyhow::Result<crate::llm::LlmStream> {
+                Ok(crate::llm::LlmStream::new(stream::empty()))
             }
             fn slot(&self) -> Option<&str> {
                 Some(&self.0)
@@ -1680,12 +1870,19 @@ mod tests {
         Arc::new(BotHandle::new(Arc::new(NoopSend), Arc::new(NoopPresence)))
     }
 
-    // --- default_assembler layer order (ported from
-    //     test_run_cmd.py::TestDefaultAssemblerLayerOrder, adapted to D15) ---
+    // --- default_assembler layer order ---
 
     fn layer_order() -> Vec<String> {
         let (familiar, _dir) = load_test_familiar(false);
-        let asm = default_assembler(&familiar, 20, TierBudget::default(), 0.0, None, None);
+        let asm = default_assembler(
+            &familiar,
+            20,
+            TierBudget::default(),
+            0.0,
+            None,
+            None,
+            Some(Arc::new(VoiceRoster::new())),
+        );
         asm.layer_names().into_iter().map(str::to_owned).collect()
     }
 
@@ -1710,16 +1907,34 @@ mod tests {
 
     #[test]
     fn rag_is_last_system_prompt_layer() {
-        // Per DESIGN D15 recent-history is a slot, so rag_context is the tail of
-        // the system-prompt layer vec (recent-history is not among the names).
+        // The recent-history is a slot, so rag_context is the tail of the
+        // system-prompt layer vec (recent-history is not among the names).
         let order = layer_order();
         let rag = order.iter().position(|n| n == "rag_context").unwrap();
         assert_eq!(rag, order.len() - 1);
         assert!(!order.iter().any(|n| n == "recent_history"));
     }
 
-    // --- build_activity_engine (ported from
-    //     test_run_cmd.py::TestBuildActivityEngine) ---
+    #[test]
+    fn voice_roster_sits_between_people_dossier_and_rag() {
+        // Volatile-end placement: a join must not invalidate the stable prefix,
+        // and rag_context churns per turn regardless, so the roster rides ahead
+        // of it.
+        let order = layer_order();
+        let dossier = order.iter().position(|n| n == "people_dossier").unwrap();
+        let roster = order.iter().position(|n| n == "voice_roster").unwrap();
+        let rag = order.iter().position(|n| n == "rag_context").unwrap();
+        assert!(dossier < roster && roster < rag);
+    }
+
+    #[test]
+    fn voice_roster_layer_absent_without_a_roster() {
+        let (familiar, _dir) = load_test_familiar(false);
+        let asm = default_assembler(&familiar, 20, TierBudget::default(), 0.0, None, None, None);
+        assert!(!asm.layer_names().contains(&"voice_roster"));
+    }
+
+    // --- build_activity_engine ---
 
     #[test]
     fn missing_sidecar_disables_engine() {
@@ -1924,8 +2139,11 @@ mod tests {
             );
         }
 
+        // A freshly-allowlisted peer has no history to mine, so the peer id is
+        // the only name available — better than leaving the entry unset and
+        // letting presence render the raw channel snowflake (#222).
         #[tokio::test]
-        async fn rehydrate_dm_row_without_history_sets_guild_only() {
+        async fn rehydrate_dm_row_without_history_falls_back_to_peer_id() {
             let (_dir, _path, mut reg) = registry();
             reg.add(555, SubscriptionKind::Text, None, Some(123))
                 .unwrap();
@@ -1938,7 +2156,28 @@ mod tests {
                 fm.guild_name_for(Some(555)).as_deref(),
                 Some(PRIVATE_MESSAGE_GUILD_NAME)
             );
-            assert!(!fm.channel_names().contains_key(&555));
+            assert_eq!(
+                fm.channel_names().get(&555).map(String::as_str),
+                Some("user 123")
+            );
+        }
+
+        #[tokio::test]
+        async fn historyless_dm_digest_names_the_peer_id() {
+            let (_dir, _path, mut reg) = registry();
+            reg.add(555, SubscriptionKind::Text, None, Some(123))
+                .unwrap();
+            let store = store();
+            let (view, fm) = focus_manager(reg, &store);
+            rehydrate_dm_naming(fm.as_ref(), view.as_ref(), store.as_ref(), "fam")
+                .await
+                .unwrap();
+            let out = FinalReminder::new("text")
+                .unread_digest(vec![(555, (1, 0))])
+                .channel_names(fm.channel_names())
+                .guild_names(fm.guild_names())
+                .render();
+            assert!(out.contains("DM from user 123 (id 555)"), "{out}");
         }
 
         #[tokio::test]

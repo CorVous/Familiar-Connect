@@ -1,5 +1,5 @@
-//! Prompt assembler: layer compose + per-layer memoization + recent-history slot
-//! (subsystem 05; Python `context/assembler.py`).
+//! Prompt assembler: layer compose + per-layer memoization + recent-history
+//! slot (subsystem 05).
 //!
 //! Composes [`Layer`] contributions into one system-prompt string plus the
 //! recent-history message list. Each system-prompt layer is independently cached
@@ -7,10 +7,10 @@
 //! context and unchanged keys reuse the rendered text without re-running
 //! [`Layer::build`].
 //!
-//! Per DESIGN D15 the assembler uses **explicit slots**, not `isinstance`
-//! downcasting: recent-history is a distinct slot (not a `Layer`), and the RAG
-//! cue is routed through an explicit handle. The layer-order pin (behavior 6)
-//! therefore applies to the system-prompt layer `Vec` only.
+//! The assembler uses **explicit slots**, not `isinstance` downcasting:
+//! recent-history is a distinct slot (not a `Layer`), and the RAG cue is routed
+//! through an explicit handle. The layer-order pin therefore
+//! applies to the system-prompt layer `Vec` only.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -30,10 +30,13 @@ pub struct AssemblyContext {
     pub viewer_mode: String,
     /// Discord guild scoping per-guild nicknames; `None` for DMs / non-Discord.
     pub guild_id: Option<i64>,
+    /// Target model id, keying the #183 token calibration during layer
+    /// trimming; `""` when the client has none (raw estimate then).
+    pub model: String,
 }
 
 impl AssemblyContext {
-    /// New context with `viewer_mode = "text"` and no guild.
+    /// New context with `viewer_mode = "text"`, no guild, no model.
     #[must_use]
     pub fn new(familiar_id: impl Into<String>, channel_id: Option<i64>) -> Self {
         Self {
@@ -41,6 +44,7 @@ impl AssemblyContext {
             channel_id,
             viewer_mode: "text".to_owned(),
             guild_id: None,
+            model: String::new(),
         }
     }
 
@@ -48,6 +52,13 @@ impl AssemblyContext {
     #[must_use]
     pub fn with_viewer_mode(mut self, viewer_mode: impl Into<String>) -> Self {
         self.viewer_mode = viewer_mode.into();
+        self
+    }
+
+    /// Builder: set the target model (calibration key).
+    #[must_use]
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
         self
     }
 
@@ -71,9 +82,9 @@ pub struct AssembledPrompt {
 /// Layer composer with per-layer memoization.
 ///
 /// Layer order is preserved from construction. The cache keeps a single slot per
-/// layer name (`name -> (key, text)`): this is behavior-equivalent to Python's
-/// unbounded `(name, key) -> text` dict for every observable test — nothing reads
-/// stale entries — while staying leak-free (DESIGN §5, port notes).
+/// layer name (`name -> (key, text)`): a single slot is observably equivalent
+/// to an unbounded `(name, key) -> text` map — nothing reads stale entries —
+/// while staying leak-free.
 pub struct Assembler {
     layers: Vec<Arc<dyn Layer>>,
     recent_history: Option<RecentHistoryLayer>,
@@ -96,7 +107,7 @@ impl Assembler {
 
     /// Forward *cue* to the RAG layer, if one is wired.
     ///
-    /// Uses the explicit handle registered at build time (DESIGN D15) rather than
+    /// Uses the explicit handle registered at build time rather than
     /// downcasting a `dyn Layer`.
     pub fn set_rag_cue(&self, cue: &str) {
         if let Some(rag) = &self.rag {
@@ -106,7 +117,7 @@ impl Assembler {
 
     /// Compose the system prompt + recent history for `ctx`.
     ///
-    /// See behaviors 1–5: layers iterate in construction order, each cached on
+    /// Layers iterate in construction order, each cached on
     /// `(name, invalidation_key)`; non-empty texts join with `"\n\n"`; the
     /// recent-history slot (if present) yields `recent_history`.
     pub async fn assemble(&self, ctx: &AssemblyContext) -> AssembledPrompt {
@@ -146,8 +157,8 @@ impl Assembler {
     }
 }
 
-/// Fluent builder for [`Assembler`] (mirrors Python's `Assembler(layers=[...])`
-/// while keeping recent-history and RAG as explicit slots, DESIGN D15).
+/// Fluent builder for [`Assembler`], keeping recent-history and RAG as
+/// explicit slots.
 #[derive(Default)]
 pub struct AssemblerBuilder {
     layers: Vec<Arc<dyn Layer>>,
@@ -156,7 +167,7 @@ pub struct AssemblerBuilder {
 }
 
 impl AssemblerBuilder {
-    /// Append one system-prompt layer (order matters — behavior 6).
+    /// Append one system-prompt layer (order matters).
     #[must_use]
     pub fn layer(mut self, layer: Arc<dyn Layer>) -> Self {
         self.layers.push(layer);
@@ -188,5 +199,27 @@ impl AssemblerBuilder {
             rag: self.rag,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssemblyContext;
+
+    // An absent model must key nothing in the calibration store (#183).
+    #[test]
+    fn model_defaults_to_empty() {
+        assert_eq!(AssemblyContext::new("fam", Some(1)).model, "");
+    }
+
+    #[test]
+    fn with_model_sets_the_calibration_key() {
+        let ctx = AssemblyContext::new("fam", Some(1)).with_model("vendor/model-x");
+        assert_eq!(ctx.model, "vendor/model-x");
+        // Other builders compose unaffected.
+        let ctx = ctx.with_viewer_mode("voice").with_guild_id(7);
+        assert_eq!(ctx.model, "vendor/model-x");
+        assert_eq!(ctx.viewer_mode, "voice");
+        assert_eq!(ctx.guild_id, Some(7));
     }
 }

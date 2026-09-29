@@ -1,5 +1,4 @@
-//! Public-surface integration tests for the pure Twitch layer (subsystem 11;
-//! Python `tests/test_twitch.py`).
+//! Public-surface integration tests for the pure Twitch layer (subsystem 11).
 //!
 //! The exhaustive formatter/builder matrix lives in `twitch.rs`'s in-module
 //! tests; this file pins the crate-external public API — the exact-string

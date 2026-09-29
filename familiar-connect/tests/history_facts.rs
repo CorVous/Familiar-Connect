@@ -1,7 +1,7 @@
 //! Integration tests for facts, supersession, dedup, bi-temporal validity,
 //! importance, fact embeddings, people dossiers, and reflections. Ports the
-//! FTS-independent parts of `test_facts_store.py`, `test_fact_embeddings_store.py`,
-//! `test_people_dossiers_store.py`, `test_reflections_store.py`.
+//! FTS-independent parts of the facts, fact-embeddings, people-dossier and
+//! reflections store suites.
 //!
 //! Test-local numeric casts (loop index → id/vector) and single-item set
 //! builders are harmless here; silence the corresponding lints for test code.

@@ -1,9 +1,9 @@
-//! Shared ISO-8601 UTC helpers (DESIGN §4.2).
+//! Shared ISO-8601 UTC helpers.
 //!
 //! [`iso_utc`] emits `%Y-%m-%dT%H:%M:%S%.6f+00:00` — **fixed-width 6-digit
-//! microseconds** and a literal `+00:00` offset (never `Z`). Python omits the
-//! `.ffffff` when microseconds are exactly zero; the port always writes six
-//! digits, which is *more* lexicographically stable, not less. Lexicographic ==
+//! microseconds** and a literal `+00:00` offset (never `Z`). Writing all six
+//! digits even when microseconds are zero is lexicographically stable.
+//! Lexicographic ==
 //! chronological ordering of these strings is a correctness dependency in five
 //! `history` query paths, so every timestamp written to SQLite or JSON goes
 //! through [`iso_utc`].

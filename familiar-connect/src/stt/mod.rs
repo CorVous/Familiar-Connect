@@ -1,5 +1,5 @@
 //! Speech-to-text: [`Transcriber`] seam + factory + Deepgram backend
-//! (subsystem 09; Python `stt/`).
+//! (subsystem 09).
 //!
 //! Lifts the implicit shape of the Deepgram transcriber behind a
 //! [`protocol::Transcriber`] trait so local-model backends (Parakeet /
@@ -8,8 +8,8 @@
 //!
 //! Backends: `deepgram` (streaming WebSocket, implemented here); `parakeet` /
 //! `faster_whisper` are buffer-and-finalize local backends whose Rust engine is
-//! not yet chosen (DESIGN §6) — see [`parakeet`] / [`faster_whisper`] for the
-//! contract they will implement.
+//! not yet chosen — see [`parakeet`] / [`faster_whisper`] for the contract
+//! they will implement.
 
 pub mod deepgram;
 pub mod factory;

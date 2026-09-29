@@ -1,7 +1,6 @@
 //! Integration tests for accounts/identity, reply linkage + mentions, alarms,
 //! and reactions (including the single-SQL-query performance pin). Ports
-//! `test_history_identity.py`, `test_history_replies.py`, `test_history_alarms.py`,
-//! and the store parts of `test_message_reactions.py`.
+//! Identity, replies, alarms, and the store parts of message reactions.
 
 use std::sync::{Arc, Mutex};
 

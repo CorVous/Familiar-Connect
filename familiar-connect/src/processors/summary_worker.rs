@@ -1,4 +1,4 @@
-//! SummaryWorker rolling focus-stream summary (subsystem 07; Python `processors/summary_worker.py`).
+//! SummaryWorker rolling focus-stream summary (subsystem 07).
 //!
 //! Regenerates the focus-stream rolling summary from the raw `turns` table —
 //! the consumed cross-channel stream the familiar actually attended to, stored
@@ -31,6 +31,7 @@ pub struct SummaryWorker {
     turns_threshold: i64,
     backfill_cap: i64,
     tick_interval: Duration,
+    system_prompt: String,
 }
 
 impl SummaryWorker {
@@ -49,6 +50,7 @@ impl SummaryWorker {
             turns_threshold: 10,
             backfill_cap: 200,
             tick_interval: Duration::from_secs_f64(5.0),
+            system_prompt: String::new(),
         }
     }
 
@@ -71,6 +73,14 @@ impl SummaryWorker {
     #[must_use]
     pub fn tick_interval_s(mut self, secs: f64) -> Self {
         self.tick_interval = Duration::from_secs_f64(secs);
+        self
+    }
+
+    /// Instruction text for the summariser (`[prompt].rolling_summary_system`).
+    /// No in-code default — the shipped `_default` profile is the source.
+    #[must_use]
+    pub fn system_prompt(mut self, text: impl Into<String>) -> Self {
+        self.system_prompt = text.into();
         self
     }
 
@@ -138,8 +148,11 @@ impl SummaryWorker {
             return Ok(());
         }
 
-        let prompt =
-            build_rolling_prompt(prior.as_ref().map(|p| p.summary_text.as_str()), &new_turns);
+        let prompt = build_rolling_prompt(
+            &self.system_prompt,
+            prior.as_ref().map(|p| p.summary_text.as_str()),
+            &new_turns,
+        );
         let reply = self.llm.chat(prompt).await?;
         let text = reply.content_str().trim().to_string();
         if text.is_empty() {
@@ -169,10 +182,13 @@ impl SummaryWorker {
 }
 
 /// Compounding prompt: prior summary (when present) plus the new turns.
-fn build_rolling_prompt(prior_summary: Option<&str>, new_turns: &[HistoryTurn]) -> Vec<Message> {
-    let header = "You produce concise, retrieval-friendly summaries of a familiar's \
-        attended conversation across channels. 3-5 sentences. Preserve \
-        proper nouns, commitments, and open questions. Omit small talk.";
+///
+/// `header` is config-sourced phrasing; the body assembly stays in code.
+fn build_rolling_prompt(
+    header: &str,
+    prior_summary: Option<&str>,
+    new_turns: &[HistoryTurn],
+) -> Vec<Message> {
     let mut body_lines: Vec<String> = Vec::new();
     match prior_summary {
         Some(prior) if !prior.is_empty() => {
@@ -182,8 +198,8 @@ fn build_rolling_prompt(prior_summary: Option<&str>, new_turns: &[HistoryTurn]) 
         _ => body_lines.push("Turns:".to_string()),
     }
     for t in new_turns {
-        // Python: `who = t.author.display_name if t.author is not None else
-        // t.role`, then f-string-rendered. An author present with a `None`
+        // `who` is the author's display name when an author is present, else the
+        // role. An author present with a `None`
         // display name renders the literal `"None"` (not empty, not `role`).
         let who = t.author.as_ref().map_or_else(
             || t.role.clone(),
@@ -242,9 +258,9 @@ mod tests {
                 "author with display name",
             ),
         ];
-        let body = build_rolling_prompt(None, &turns)[1].content_str();
-        // author=None → role; author present + display_name None → the literal
-        // "None" (Python f-string parity); display_name present → the name.
+        let body = build_rolling_prompt("", None, &turns)[1].content_str();
+        // author=None → role; author present + display_name None → the
+        // literal "None"; display_name present → the name.
         assert!(body.contains("[#7 assistant] no author"), "{body}");
         assert!(body.contains("[#7 None] author no display name"), "{body}");
         assert!(

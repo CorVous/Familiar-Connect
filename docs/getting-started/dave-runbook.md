@@ -1,4 +1,4 @@
-# DAVE integration-testing runbook (Rust port)
+# DAVE integration-testing runbook
 
 Validate the live-Discord voice path and the local-ML features on your own
 machine. Work top-to-bottom; each smoke stage has do / expect / if-it-fails.
@@ -6,10 +6,10 @@ Per-user familiars resolve from the platform data dir (`FAMILIARS_ROOT`
 overrides); the tracked `_default` skeleton resolves from
 `data/familiars/_default` (`FAMILIAR_DEFAULTS_ROOT` overrides). Repo-relative
 paths in this doc therefore refer to `_default` and build artifacts only —
-see [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
+see [On-disk layout](on-disk-layout.md#where-the-familiars-root-lives).
 
 > **READ THIS FIRST — the voice glue is now wired; validate it live.**
-> The composition-root wiring gaps are closed (parity-audit §3c + runbook flags).
+> The composition-root wiring gaps are closed.
 > Concretely, in this tree:
 > - `/subscribe-voice` and `/unsubscribe-voice` are **registered and dispatched**
 >   under `discord-voice` (`src/bot.rs`: `Handler::ready` command list +
@@ -21,8 +21,8 @@ see [On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-ro
 > - `DiscordVoicePlayer`'s voice-client getter now reads `handle.voice_runtime`
 >   (`src/commands/run.rs`), returning the channel's live songbird-backed
 >   `VoiceClientLike`, so TTS playback reaches the call.
-> - **Still open:** TEN-VAD has **no native backend**: `TenVad::new` always
->   returns `MissingBackend` (`src/voice/turn_detection/ten_vad.rs`), so the
+> - **Still open (issue #196):** TEN-VAD has **no native backend**: `TenVad::new`
+>   always returns `MissingBackend` (`src/voice/turn_detection/ten_vad.rs`), so the
 >   `ten+smart_turn` endpointer cannot be built at runtime and silently degrades
 >   to Deepgram idle-finalize.
 >
@@ -78,15 +78,14 @@ Copy `.env.example` to `.env` and fill:
 | `DISCORD_BOT` | always | Bot token. **Not** `DISCORD_BOT_TOKEN`. Missing → exit 1. |
 | `OPENROUTER_API_KEY` | always | LLM. Missing → exit 1. |
 | `DEEPGRAM_API_KEY` | voice STT | Required when `[providers.stt].backend="deepgram"` (default). |
-| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | TTS (default provider) | Or switch provider below. |
-| `CARTESIA_API_KEY` | TTS if `[tts].provider="cartesia"` | Enables the byte-streaming playback path. |
-| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | TTS if `[tts].provider="gemini"` | `GOOGLE_` wins if both set. |
+| `CARTESIA_API_KEY` | TTS (default provider) | Byte-streaming playback. Missing → warning, text-only. |
+| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | TTS when `[tts].provider="azure"` | Needs an `azure-tts` build. Missing → exit 1. |
 | `FAMILIAR_ID` | selects familiar | Or pass `--familiar <id>` (flag wins). |
 | `FAMILIARS_ROOT` | per-user familiars root | Overrides the platform data-dir default (#201). |
 | `FAMILIAR_DEFAULTS_ROOT` | `_default` skeleton root | Overrides the CWD-relative `data/familiars`. |
 
 TTS/STT/turn-detector construction **degrades, never fails**: an unavailable key
-logs a warning and the text path keeps working (`run.rs` L410-429).
+logs a warning and the text path keeps working.
 
 ### Discord Developer Portal
 
@@ -94,8 +93,10 @@ logs a warning and the text path keeps working (`run.rs` L410-429).
   `MESSAGE_CONTENT | GUILD_VOICE_STATES | GUILD_MESSAGE_TYPING` plus
   non-privileged (`bot.rs` L1917-1920). Without Message Content the bot logs in
   but sees no message text.
-- **`GUILD_MEMBERS` is deliberately NOT requested.** Member resolution is
-  cache-only (see Known Sharp Edges).
+- **`GUILD_MEMBERS` is deliberately NOT requested.** The intent gates *gateway*
+  member delivery, not REST. Audio-path member resolution stays cache-only;
+  `/subscribe-voice` fills join-time cache misses with one REST member lookup
+  each (see Known Sharp Edges).
 - Invite scopes: `bot` + `applications.commands`; permissions: Send Messages,
   Read Message History, Add Reactions, Connect, Speak.
 
@@ -106,9 +107,9 @@ Per-user familiars resolve from the **platform data dir**
 equivalents), independent of CWD. `FAMILIARS_ROOT` overrides the root (top
 precedence). The tracked `_default` skeleton is a repo resource resolved
 separately from `data/familiars/_default` (`FAMILIAR_DEFAULTS_ROOT` overrides).
-On startup a one-shot, idempotent, never-clobber migration moves any legacy
-`./data/familiars/<id>` (other than `_default`) into the resolved root. See
-[On-disk layout](../getting-started/on-disk-layout.md#where-the-familiars-root-lives).
+Legacy familiars left under `./data/familiars/<id>` are no longer migrated
+automatically — move them by hand or set `FAMILIARS_ROOT`. See
+[On-disk layout](on-disk-layout.md#where-the-familiars-root-lives).
 
 To keep everything inside the repo checkout while smoke-testing, point the root
 at `data/familiars`:
@@ -144,7 +145,7 @@ target (`--familiar _default`) since it carries `character.toml` + `character.md
 cargo run --release --features discord-voice,stt-deepgram -- run --familiar aria -v
 ```
 
-CLI is `familiar-connect <run|diagnose|version>` (no `sleep` verb). `-v` = INFO
+CLI is `familiar-connect <run|diagnose|prompts|version>` (no `sleep` verb). `-v` = INFO
 (needed to see the voice/decision log lines below), `-vv` = DEBUG for **all**
 targets incl. `songbird` and `serenity`.
 
@@ -198,8 +199,8 @@ songbird logs and file upstream.
 `voice.transcript.final` (visible via debug-logger at `-vv`); `[Voice]
 decision=respond turn=voice-...`; audible reply.
 **If it fails:** transcript only after your *next* utterance → idle-finalize not
-firing (see Sharp Edges); `decision=silent` (`[💤 Voice]`) → `<silent>` sentinel
-latched, expected for filler; no audio out → the `|| None` voice-client seam.
+firing (see Sharp Edges); `decision=silent` (`[💤 Voice]`) → the turn resolved
+to silence (a tool call with no `silent: false`), expected for filler; no audio out → the `|| None` voice-client seam.
 
 ### Stage 4 (d) — MULTI-SPEAKER per-SSRC receive  ← #1 residual risk
 
@@ -270,22 +271,37 @@ and open an upstream issue; there were no open DAVE issues at 0.6.0 release.
 - **Ratchet-window packet drops.** The first instants of audio right after a join
   or an epoch transition are silently dropped until key ratchets establish. Lose a
   first syllable — inherent to DAVE key-ratcheting. Not a bug.
-- **Benign songbird receive-path log noise (#199).** At `-vv`, songbird emits
-  lines like `RTCP decryption failed`, `opus_decode InvalidPacket`, and
+- **Benign songbird receive-path log noise (#199).** songbird emits lines like
+  `RTCP decryption failed`, `opus_decode InvalidPacket`, and
   `Decode error for SSRC <n>` during normal operation — expected under DAVE's
-  per-SSRC decrypt/ratchet behavior, not data loss. Do **not** file these
-  against this repo; the fix (if any) is upstream in songbird. #199 was the
-  phantom-bug chase that concluded exactly this.
+  per-SSRC decrypt/ratchet behavior, not data loss. songbird's own comment in
+  `driver/tasks/udp_rx/mod.rs` says UDP errors there are non-fatal by design
+  and must not prompt a reconnect; the packet is forwarded with a fallback
+  offset. Do **not** file these against this repo; the fix (if any) is upstream.
+  `setup_logging` pins `songbird::driver::tasks::udp_rx=error` so the spam does
+  not leak through the default root `warn` level — pass `-vv` to get it back.
 - **`SpeakingStateUpdate` fired inconsistently** (songbird PR #291 caveat). The
   SSRC→user map (`SsrcMap`, fed by those events) can lag. The design does **not**
   key per-user state solely off speaking events — first-audio-chunk lazy creation
   + the idle-finalize fallback cover it. A momentarily-`None` user id passes audio
-  through undecrypted rather than crashing.
-- **Cache-only member resolution (`resolve_member` = `|| voice_member_cached`).**
-  No `GUILD_MEMBERS` intent + no REST fetch on the audio path, so a voice-only
-  joiner who hasn't typed or triggered a voice-state update resolves to `None` →
-  **anonymous voice turns** until they type or their state updates. Expected; not
-  data loss.
+  through undecrypted rather than crashing. Note the *self-inflicted* variant of
+  this — registering the handlers after the join resolved, which lost every
+  op-5 event fired during the handshake — was a real bug, fixed by the two-stage
+  join in `join_voice`; see
+  [Voice pipeline](../architecture/voice-pipeline.md#songbird-join-order-and-ssrc-attribution).
+- **Cache-only member resolution on the audio path (`resolve_member` =
+  `|| voice_member_cached`).** No `GUILD_MEMBERS` intent + no REST fetch per
+  frame. The join-time snapshot is the one exception: `/subscribe-voice` reads
+  the channel's occupants from the gateway cache and then spends **one REST
+  `GET /guilds/{guild}/members/{user}` per occupant the cache cannot name**
+  (at most 4 in flight, 2 s total), because a participant who stays quiet is
+  otherwise nameless. That is a join-time path bounded by channel headcount —
+  it is not the per-frame rule being relaxed, so do not "fix" it back to
+  cache-only. Voice-state updates maintain the roster from there. The remaining
+  gap is an occupant whose REST lookup also fails or runs out of budget: they
+  transcribe under their bare numeric id (still a distinct speaker, still in
+  the roster) until they type or their state updates. Expected; not data loss.
+  See [Voice pipeline](../architecture/voice-pipeline.md#voice-member-roster).
 - **Local turn detection silently degrades.** With `strategy="ten+smart_turn"`,
   `create_local_turn_detector` downloads Smart Turn weights and builds the
   detector, but the per-user `make_endpointer` call fails (`TenVad::new` →
@@ -305,6 +321,12 @@ and open an upstream issue; there were no open DAVE issues at 0.6.0 release.
 Native onnxruntime is required (both features pull `ort`/fastembed). If your box
 lacks it, install onnxruntime or let `ort` fetch a binary; a link error here is
 environment, not code.
+
+**OpenSSL headers are a build-time prereq here** (`libssl-dev` on Debian/Ubuntu,
+`openssl-devel` on Fedora). `ort-sys`'s build script uses `ureq → native-tls` to
+download the ONNX Runtime binary, so it links system OpenSSL even though the
+crate ships rustls-only at runtime. Without it the build stops at
+`Could not find openssl via pkg-config` — environment, not a TLS regression.
 
 ```bash
 # Fast: scripted-model unit tests (no downloads). Smart Turn + TEN-VAD wrappers.
@@ -351,10 +373,17 @@ responder); `local_turn_detection=enabled|disabled` (turn factory); `close_code=
 status=<ok|error>`; aggregate them:
 ```bash
 cargo run --release -- diagnose voice.log      # p50/p95/last_ms per span; '-' reads stdin
+cargo run --release -- prompts --slot fast     # the last voice prompt, verbatim, from history.db
 ```
 `/diagnostics` in Discord shows the same table live (plus focus + unread lines).
 Voice budget spans to watch: `voice.total` (stt_final→playback_start),
 `voice.vad_to_stt`, `voice.stt_to_ttft`, `voice.tts_to_playback`.
+
+A log that also carries `[LLM call]` lines gets three extra tables: per-slot
+prompt-cache hit rates, `ttfb_ms`/`ttft_ms` split by cache hit versus miss, and
+token-estimator accuracy per model. How to read them — and what they say about
+issue #206 — is in
+[Tuning § Measuring prompt-cache behaviour](../architecture/tuning.md#measuring-prompt-cache-behaviour-diagnose).
 
 **Fallback seams if a dependency misbehaves:**
 - **SQLite:** `rusqlite` (bundled) is already the default `store` engine — no

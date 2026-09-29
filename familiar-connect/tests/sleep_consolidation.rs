@@ -1,7 +1,7 @@
-//! Ported from Python `tests/test_consolidation.py` — window gather, the
-//! config→prompt thread-through, and the `plan_consolidation` end-to-end path
-//! (garbage-reply note, clean-empty no-note, system-reaches-LLM, rail-beats-
-//! prompt). The pure rail/validate + build_prompt tests live in-module.
+//! Window gather, the config→prompt thread-through, and the
+//! `plan_consolidation` end-to-end path (garbage-reply note, clean-empty
+//! no-note, system-reaches-LLM, rail-beats- prompt). The pure rail/validate +
+//! build_prompt tests live in-module.
 
 #[path = "sleep_helpers/mod.rs"]
 mod helpers;

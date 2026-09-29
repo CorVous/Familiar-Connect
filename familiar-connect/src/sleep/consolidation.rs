@@ -1,5 +1,5 @@
 //! Memory-consolidation pass — propose + validate fact consolidations
-//! (subsystem 04; Python `sleep/consolidation.py`).
+//! (subsystem 04).
 //!
 //! Runs on sleep-activity departure. The LLM sees the whole window at once —
 //! unlike small-batch extraction it spots day-level patterns (a claim asserted
@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use super::{
-    len_i64, normalize_fact_text, py_str_field, py_str_list_repr, py_tuple_repr, subject_key_set,
+    len_i64, normalize_fact_text, render_str_field, str_list_repr, subject_key_set, tuple_repr,
 };
 use crate::history::async_store::AsyncHistoryStore;
 use crate::history::store::{Fact, HistoryTurn, SleepWatermark};
@@ -126,8 +126,7 @@ pub struct ConsolidationPlan {
 }
 
 impl ConsolidationPlan {
-    /// A plan with the counts zeroed and no notes (the Python default-arg
-    /// constructor; [`validate`] fills the counts directly).
+    /// A plan with the counts zeroed and no notes.
     #[must_use]
     pub fn new(
         familiar_id: impl Into<String>,
@@ -263,7 +262,7 @@ pub fn build_prompt(window: &ConsolidationWindow, self_key: &str, system: &str) 
 #[must_use]
 pub fn parse_actions(reply: &str) -> (Vec<Value>, Vec<Value>) {
     let result = coerce_json(reply, Expect::Object);
-    // Python `coerce_json(...).value or {}` then `isinstance(dict)`: only a
+    // `coerce_json(...).value` then a dict check: only a
     // (possibly empty) object proceeds — everything else degrades to ([], []).
     let Some(obj) = result.value.as_ref().and_then(Value::as_object) else {
         return (Vec::new(), Vec::new());
@@ -301,7 +300,7 @@ pub fn reply_parse_failed(reply: &str) -> bool {
 /// proposals in input order — an earlier action reserves ids and cap budget from
 /// later ones.
 #[must_use]
-#[allow(clippy::too_many_lines)] // the two rail loops read best kept together (parity with Python)
+#[allow(clippy::too_many_lines)] // the two rail loops read best kept together
 pub fn validate(
     window: &ConsolidationWindow,
     retire_raw: &[Value],
@@ -317,7 +316,7 @@ pub fn validate(
     let mut claimed: HashSet<i64> = HashSet::new();
     let mut mutated: i64 = 0;
 
-    // Rails (a)/(b) from behavior 13: unknown id / self-subject / duplicate.
+    // Rails (a)/(b): unknown id / self-subject / duplicate.
     let check_ids = |ids: &[i64], claimed: &HashSet<i64>| -> Option<&'static str> {
         for &fid in ids {
             let Some(f) = by_id.get(&fid) else {
@@ -350,7 +349,7 @@ pub fn validate(
                 kind: "retire".to_owned(),
                 payload: payload.clone(),
                 rail: rail.to_owned(),
-                detail: py_tuple_repr(&ids),
+                detail: tuple_repr(&ids),
             });
             continue;
         }
@@ -363,7 +362,7 @@ pub fn validate(
             });
             continue;
         }
-        let reason = py_str_field(payload, "reason").trim().to_owned();
+        let reason = render_str_field(payload, "reason").trim().to_owned();
         for &id in &ids {
             claimed.insert(id);
         }
@@ -390,11 +389,11 @@ pub fn validate(
                 kind: "rewrite".to_owned(),
                 payload: payload.clone(),
                 rail: rail.to_owned(),
-                detail: py_tuple_repr(&ids),
+                detail: tuple_repr(&ids),
             });
             continue;
         }
-        let new_text = py_str_field(payload, "new_text").trim().to_owned();
+        let new_text = render_str_field(payload, "new_text").trim().to_owned();
         if new_text.is_empty() {
             rejected.push(RejectedAction {
                 kind: "rewrite".to_owned(),
@@ -422,7 +421,7 @@ pub fn validate(
                 kind: "rewrite".to_owned(),
                 payload: payload.clone(),
                 rail: "subject_lost".to_owned(),
-                detail: py_str_list_repr(&sorted),
+                detail: str_list_repr(&sorted),
             });
             continue;
         }
@@ -436,7 +435,7 @@ pub fn validate(
                 kind: "rewrite".to_owned(),
                 payload: payload.clone(),
                 rail: "subject_introduced".to_owned(),
-                detail: py_str_list_repr(&introduced),
+                detail: str_list_repr(&introduced),
             });
             continue;
         }
@@ -466,7 +465,7 @@ pub fn validate(
             });
             continue;
         }
-        let reason = py_str_field(payload, "reason").trim().to_owned();
+        let reason = render_str_field(payload, "reason").trim().to_owned();
         for &id in &ids {
             claimed.insert(id);
         }

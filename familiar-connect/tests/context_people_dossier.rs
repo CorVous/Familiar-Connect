@@ -1,5 +1,3 @@
-//! Ported from Python `tests/test_people_dossier_layer.py`.
-
 #[path = "context_helpers/mod.rs"]
 mod helpers;
 

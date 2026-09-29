@@ -38,6 +38,7 @@ tune per host without a rebuild.
 | RAG / fact retrieval ranking | `[memory.retrieval]` (M2 + M6) | unchanged |
 | Attentional unread-nudge controls | `[focus]` | unchanged |
 | Agentic tool-loop cap | `[tools]` | unchanged |
+| Voice-call roster narration window | `[voice]` | unchanged |
 | LLM request concurrency | `[llm].max_concurrent_requests` | unchanged |
 | Activities catalog + cadence | `data/familiars/<id>/activities.toml` | unchanged |
 
@@ -54,13 +55,12 @@ Set in `.env` or the host environment. Never log them.
 | `DEEPGRAM_API_KEY` | STT credential. |
 | `FAMILIAR_ID` | Character folder under the familiars root. Overridable by `--familiar`. |
 
-### TTS provider credentials (one set, depending on `[tts].provider`)
+### TTS provider credentials
 
 | Var | Provider |
 |---|---|
-| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure (default). |
-| `CARTESIA_API_KEY` | Cartesia. |
-| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | Gemini. |
+| `CARTESIA_API_KEY` | Cartesia — the default. |
+| `AZURE_SPEECH_KEY` + `AZURE_SPEECH_REGION` | Azure Speech (`provider = "azure"`, `azure-tts` build). Region is the bare name, e.g. `eastus`. |
 
 ### Optional path overrides
 
@@ -130,12 +130,10 @@ endpointing_ms  = 500
 keyterms        = []     # see § STT — Deepgram for the full set
 
 [tts]
-provider          = "azure"      # "azure" | "cartesia" | "gemini"
-azure_voice       = "en-US-AmberNeural"
+provider          = "cartesia"   # or "azure" (azure-tts build)
 cartesia_voice_id = "..."
 cartesia_model    = "sonic-3"
-gemini_voice      = "Kore"
-gemini_model      = "gemini-3.1-flash-tts-preview"
+azure_voice       = "en-US-AmberNeural"
 greetings         = []
 
 [llm]
@@ -147,7 +145,7 @@ temperature  = 0.7
 reasoning    = "off"        # "off" | "low" | "medium" | "high" | "default" | omit
                             # "default" = model default; overrides a level merged
                             # in from _default/character.toml (TOML has no null)
-tool_calling = false
+tool_calling = true         # default; `false` is refused at load
 
 [llm.prose]
 model                    = "z-ai/glm-5.2"
@@ -155,7 +153,7 @@ temperature              = 0.7
 provider_order           = ["z-ai"]   # optional — pin OpenRouter routing
 provider_allow_fallbacks = true       # optional — default true
 reasoning                = "medium"
-tool_calling             = false
+tool_calling             = true
 
 [llm.background]
 model          = "z-ai/glm-5.2"
@@ -180,6 +178,11 @@ nudge_debounce_seconds = 30.0     # rapid arrivals share one nudge
 
 [tools]
 loop_max_iterations = 5           # hard cap on agentic-loop rounds per turn
+allow_untrusted_image_urls = false # view_image: allowlist off (private IPs still refused)
+trusted_image_hosts = ["cdn.discordapp.com", "*.media.tumblr.com"]  # abridged
+
+[voice]
+roster_event_window_seconds = 120.0  # how long join/leave stays narrated
 ```
 
 ## Tuning by goal
@@ -245,20 +248,23 @@ longer needed.
 - **`[channels.<id>].message_rendering = "prefixed"`** — keeps the
   `[HH:MM Display Name]` prefix; timestamp rhythm helps the model
   judge multi-party flow.
-- **`<silent>` sentinel** — already wired (see
+- **Silence** — already wired (see
   [multi-party addressivity](context-pipeline.md#multi-party-addressivity)).
-  Don't override the sentinel instruction in the character prompt.
-  Under tool calling the `silent(reasoning)` tool is the equivalent
-  agentic-path gate.
+  Every tool call is silent unless it passes `silent: false`, and
+  `silent(reasoning)` is the explicit no-op. Don't override the
+  character prompt's silence instruction.
 
 ### Attentional focus
 
 The familiar attends to one text + one voice channel
 at a time; unfocused channels' messages are **staged** (stored, no
 reply) until the model shifts focus. Focus is model-driven through
-the `shift_focus(channel_id)` tool, so it only moves on slots with
-[`tool_calling = true`](#tool_calling) — otherwise focus stays on its
-startup default. On startup focus defaults to the first text and
+the `shift_focus(channel_id)` tool (see
+[`tool_calling`](#tool_calling)). On a responder with no tool path
+wired at all, one fallback keeps her reachable: a message that directly pings
+her in an unfocused channel shifts focus there and is answered (issue
+#221). Ambient traffic still stages, and with tools on the fallback is
+off entirely. On startup focus defaults to the first text and
 first voice subscription; thereafter it persists in the
 `focus_pointers` table across restarts. The
 `read_channel(limit?, before_id?, around_id?)` tool lets the familiar
@@ -294,6 +300,27 @@ genuinely **missed** rather than folded into her summary as if read.
 Raise it so she catches up on more; lower it so she misses more of what
 piled up while away.
 
+### Voice call roster
+
+The voice prompt carries a roster line (`In the call: Cor, Cassidy,
+Tam.`) plus brief narration of recent arrivals and departures (`Tam just
+joined.`). One knob:
+
+```toml
+[voice]
+roster_event_window_seconds = 120.0
+```
+
+| Field | Default | Purpose |
+|---|---|---|
+| `roster_event_window_seconds` | `120.0` | How long a join/leave stays narrated. Older events decay out; the roster line itself never decays. Must be positive. |
+
+Lower it (say `45.0`) if she keeps mentioning arrivals long after
+they stopped being news; raise it for slow-moving calls where a join two
+minutes ago is still worth reacting to. Text prompts never carry the
+roster. See
+[Context pipeline — Voice call roster](context-pipeline.md#voice-call-roster).
+
 ## Discord text channel knobs
 
 `[discord.text]` controls how the bot reacts to Discord's typing
@@ -323,9 +350,8 @@ typing_backoff_max_s     = 30.0
 While generating, the bot surfaces Discord's "Bot is typing…"
 indicator (via `BotHandle.trigger_typing`) so users see the in-flight
 signal — including on regenerated replies after a barge-in cancel.
-The indicator opens lazily, only after `SilentDetector` rules out the
-`<silent>` sentinel, so reasoning resolving to silence never flickers
-it on. Stops cleanly when the streaming context exits.
+The indicator opens lazily, only after `StreamGate` rules out a leaked
+tool call, so a reply resolving to silence never flickers it on. Stops cleanly when the streaming context exits.
 
 ## Activities
 
@@ -429,7 +455,7 @@ idle_close_s            = 30.0
 | `utterance_end_ms` | `1500` | Speech-end grace window. |
 | `smart_format` | `true` | Punctuation, number/date/unit normalization. |
 | `punctuate` | `true` | Explicit punctuation pass. |
-| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. Voice-channel member proper nouns (display names, usernames, aliases, nicknames) are auto-appended per speaker at connect time on top of this list, then deduped and capped — so this field is only for jargon the members' names don't already cover. |
+| `keyterms` | `[]` | List of jargon / proper nouns to bias nova-3 toward. The call's spoken vocabulary — the familiar's own `aliases`, voice-channel member proper nouns (display names, usernames, aliases, nicknames), and bots present — is auto-appended per speaker at connect time behind this list, then deduped and capped — so this field is only for jargon those names don't already cover. |
 | `replay_buffer_s` | `5.0` | Seconds replayed after WebSocket reconnect. |
 | `keepalive_interval_s` | `3.0` | Keepalive ping cadence. |
 | `reconnect_max_attempts` | `5` | Reconnect attempts before giving up. |
@@ -568,9 +594,12 @@ selected.
 
 | Provider | Voice field | Model field | Extras |
 |---|---|---|---|
-| `azure` (default) | `azure_voice` | (built-in) | — |
-| `cartesia` | `cartesia_voice_id` | `cartesia_model` | — |
-| `gemini` | `gemini_voice` | `gemini_model` | `gemini_style`, `gemini_scene`, `gemini_pace`, `gemini_accent`, `gemini_context`, `gemini_audio_profile` |
+| `cartesia` (default) | `cartesia_voice_id` | `cartesia_model` | — |
+| `azure` | `azure_voice` (default `en-US-AmberNeural`) | — | needs the `azure-tts` feature |
+
+Azure opens one WebSocket per utterance, like Cartesia, and requests
+`raw-48khz-16bit-mono-pcm`. The removed `gemini` stub is rejected at load. See
+[Configuration model — TTS providers](configuration-model.md#tts-providers).
 
 `greetings = ["..."]` pre-synthesises greeting audio at startup so
 first speech doesn't pay TTS cold-start.
@@ -605,8 +634,8 @@ presence_penalty         = 1.5              # optional, [-2, 2]
 provider_order           = ["z-ai"]         # optional, OpenRouter pin
 provider_allow_fallbacks = true             # optional, default true
 reasoning                = "medium"         # "off"|"none"|"low"|"medium"|"high"|"default"|omit
-think_prepend            = false            # optional, default false
-tool_calling             = false            # optional, default false
+think_prepend            = false            # optional, default false (only false)
+tool_calling             = true             # optional, default true (only true)
 image_tools              = false            # optional, default false
 multimodal               = false            # optional, default false
 ```
@@ -629,7 +658,7 @@ Maps to OpenRouter's `reasoning` parameter:
   models that reason by default, like GLM 5.1).
 - `"none"` → `reasoning.effort = "none"` (disable thinking generation
   entirely — the no-think mode for hybrid-reasoning models like
-  Qwen3.6; pair with `think_prepend`).
+  Qwen3.6).
 - `"low"` / `"medium"` / `"high"` → `reasoning.effort = <level>`.
 - `"default"` → no `reasoning` field; reclaims the model default over
   a level merged in from `_default/character.toml`.
@@ -641,8 +670,24 @@ Maps to OpenRouter's `reasoning` parameter:
 Appends a fake closed think block (`<think>\n\n</think>`) as an
 assistant prefill message on every request from this slot's client.
 Qwen3.6 no-think stabiliser: with `reasoning = "none"` and no prefill,
-the model leaks thinking as plain text. Useless on other models —
-leave `false`.
+the model leaks thinking as plain text.
+
+**Default `false`, and `true` is refused at config load.** A trailing
+assistant message *is* prefix completion, and providers that implement
+prefix mode refuse to pair it with a `tools` array — DeepSeek answers
+`Function call should not be used with prefix`. `tool_calling` is
+mandatory, so every slot sends tools and the prefill has nowhere left
+to work. Writing `think_prepend = true` fails the load with:
+
+```text
+[llm.<slot>].think_prepend = true is unsupported: it appends a trailing
+assistant message, which providers read as prefix completion, and prefix
+completion cannot be combined with the tools array every slot now sends —
+remove the key (it defaults to false) or set [llm.<slot>].think_prepend = false
+```
+
+See
+[`think_prepend` and tools](configuration-model.md#think_prepend-and-tools).
 
 ### `tool_calling`
 
@@ -650,11 +695,32 @@ Runs the slot's agentic loop with the full tool registry:
 `set_alarm` / `cancel_alarm`, `silent`, `shift_focus`, and (text
 only) `read_channel` plus `start_activity` (the latter only when the
 [activities catalog](activities.md#configuration) is non-empty).
-With it `false` the registry never installs, so
-the model can't shift focus or stay silent *via tools* — the
-`<silent>` text sentinel still works on the bare streaming path, but
-focus stays pinned to its startup default. Enable it on `prose` /
-`fast` to make the attentional stream model-driven.
+
+**Default `true`, and `false` is refused at config load.** Silence is a
+tool call now — every call is silent unless it passes `silent: false`,
+and `silent(reasoning)` is how the familiar declines to reply at all —
+so a slot without tool calling could never stay quiet. Writing
+`tool_calling = false` fails the load with:
+
+```text
+[llm.<slot>].tool_calling = false is unsupported: silence and every other
+decision the familiar declines to speak for are tool calls, so a slot
+without tool calling can never stay quiet — remove the key (it defaults to
+true) or set [llm.<slot>].tool_calling = true
+```
+
+Remove the key rather than flipping it; the default is the only supported
+value. A config built in-process (not through the loader) still hits a boot
+`ERROR` naming the slot. The same boot pass cross-checks
+`tool_calling` / `multimodal` / `image_tools` against the model's
+OpenRouter metadata — a model whose `supported_parameters` lack `tools`
+is now a hard mismatch with only one fix, picking a different model. See
+[Startup model diagnostics](configuration-model.md#startup-model-diagnostics).
+
+**Every call is silent by default.** Each tool's schema carries a shared
+`silent` boolean defaulting to `true`, injected by `Tool::new` so a new
+tool cannot forget it. The model passes `silent: false` on a call when it
+also means to speak that turn; the opt-in latches for the whole turn.
 
 The loop's per-turn iteration cap (model call → tool execution →
 re-call) is `[tools].loop_max_iterations` (default `5`, shared by
@@ -673,21 +739,24 @@ queue behind each other.
 
 When `true`, registers the `view_image` tool in the text tool registry
 for this slot. The agentic loop runs when either `tool_calling` or
-`image_tools` is set. `view_image` is never registered in the voice
+`image_tools` is set (in practice always, since `tool_calling` cannot be
+turned off). `view_image` is never registered in the voice
 registry. Only the `prose` slot is read — `image_tools` on `fast` or
 `background` is ignored (and warned about at startup). The describe
 prompt is neutral by default; append per-familiar persona constraints
 with `[prompt].image_description_constraints` (see below).
 
-On the `prose` slot, `image_tools = true` requires at least one way for
-the image to reach the model: `[llm].image_description_model` (text
-description) or that slot's `multimodal = true` (the image itself). With
-neither, the tool would spend a fetch and a compression to return the
-fixed string `"(no description model configured)"`, so config loading
-**fails** rather than degrading silently. The check is scoped to `prose`
-because that is the only slot whose flag registers anything — elsewhere
-the same combination is an inert no-op and only warns. See
-[Vision wiring checks](#vision-wiring-checks).
+On the `prose` slot, `image_tools = true` needs at least one way for the
+image to reach the model: `[llm].image_description_model` (text
+description) or that slot's `multimodal` (the image itself). Pinning
+`multimodal = false` with no describer closes both doors, so config
+loading **fails** rather than spending a fetch and a compression to
+return the fixed string `"(no description model configured)"`. Omitting
+`multimodal` is not rejected — detection may still turn it on — and the
+startup warnings report the mode that actually resolved. The check is
+scoped to `prose` because that is the only slot whose flag registers
+anything — elsewhere the same combination is an inert no-op and only
+warns. See [Vision wiring checks](#vision-wiring-checks).
 
 ### `[prompt].image_description_constraints`
 
@@ -702,8 +771,15 @@ is static for the familiar's lifetime — not carried per turn.
 
 When `true`, `ImageResult` tool-result messages include JPEG
 `image_url` content blocks so vision-capable models can see the image.
-When `false` (default), only the text description is sent.
-Set this only for slots backed by vision-capable models.
+When `false`, only the text description is sent.
+
+The key is tri-state: **omit it** and the flag is auto-detected from the
+OpenRouter catalog (cached on disk, refreshed in the background), which
+is the recommended setting. Write it explicitly only to override that —
+`false` on a vision model to save image tokens, `true` on a model the
+catalog does not list. An explicit value always beats detection. Full
+semantics at
+[Configuration model](configuration-model.md#multimodal-is-tri-state).
 
 ### Vision wiring checks
 
@@ -745,6 +821,98 @@ exposed in code as the derived `TierBudget.total_tokens` for
 reporting only — nothing trims against it. Token estimates use a fast
 `len(text) / 4` heuristic — no real tokenizer on the hot path;
 sub-microsecond per message.
+
+Four characters per token is a rough English default, **not** a safety
+margin. Measured against a real 54-call voice session, the heuristic
+under-counted badly on both models in play: observed `in_tokens /
+est_in_tokens` was **1.453** for `z-ai/glm-5.2` (26 calls) and **1.197**
+for `z-ai/glm-5v-turbo` (15 calls). Other tokenizers sit at or below
+`1.0`. So a raw estimate can be 20-45% low, which means the per-section
+caps were effectively that much larger than configured — a tuning-contract
+violation rather than a safety failure, but it invalidates the numbers any
+budget tuning would rest on.
+
+The divisor stays at `4` on purpose. Lowering it to bias safe would
+over-trim every model the default already fits, silently discarding
+context the operator configured. The targeted fix is per-model
+calibration, persisted across restarts.
+
+### Token-count calibration
+
+OpenRouter reports the *true* prompt-token count on every call, so the
+process keeps a running `Σ true / Σ estimated` ratio per model
+(`budget::TokenCalibration`, fed from the `[LLM call]` emit path). A ratio
+of totals rather than an EWMA: it needs no decay constant and is exact
+from the very first sample.
+
+The learned ratio is surfaced on the `[LLM call]` line as `cal_ratio`
+(see below) and applied by `budget::estimate_tokens_calibrated(text,
+model)`.
+
+**Calibration only ever revises an estimate upward.** The estimate gates
+client-side trimming *before* a request is sent, so its failure modes are
+asymmetric: over-counting drops slightly more context than strictly
+necessary, while under-counting ships an oversized request the API
+rejects outright. A model whose learned ratio is below `1.0` — meaning it
+tokenizes more cheaply than `len / 4` — therefore gains nothing; its
+estimate stays at the raw heuristic. Ratios above `1.0` apply, capped at
+`4.0`. The cap guards against degenerate samples: multimodal image blocks
+contribute zero characters to the estimate while the provider bills real
+tokens for them, and an uncapped ratio from such a call would silently
+over-trim everything after it. `4.0` still covers the densest legitimate
+case (CJK text, roughly one token per character).
+
+Calibration is enforced on the assembly path. `AssemblyContext` carries a
+`model` field, set by both responders from `LlmClient::model()`, and every
+layer trim in `src/context/layers.rs` — recent history, RAG lines,
+dossiers, summary, reflections, lorebook — estimates through it. A model
+that bills above the heuristic therefore trims *earlier*, keeping the
+request inside the caps the tier promises. Truncation inverts the same
+ratio (`budget::char_cap_for_tokens`) so a truncated section still
+measures under its own cap.
+
+`LlmClient::model()` defaults to `""`, which misses the calibration store
+and leaves the raw estimate — so a client that names no model, and every
+test double, behaves exactly as before. Only the OpenRouter client, which
+is also the only source of true counts, names one; a decorator wrapping it
+must forward `model()` or calibration goes silently dark.
+
+#### Persistence across restarts
+
+The store used to be in-memory only, so every boot started blind and the
+first calls of each session budgeted against the raw heuristic — up to 45%
+low on the models measured above. The accumulators are now cached on disk:
+
+- **File** — `token-calibration.json` in the same per-user cache directory
+  as the OpenRouter catalog (`openrouter-models.json`): the platform cache
+  dir via `ProjectDirs` (honours `XDG_CACHE_HOME`; `data/cache/` when no
+  home directory resolves). It is the **cache** tree, not the familiars
+  state tree — the file is entirely regenerable and safe to delete.
+- **Shape** — a write timestamp plus per-model `Σ estimated` / `Σ actual`,
+  keyed by model id exactly as the in-memory store is.
+- **Cold start** — `budget::get_token_calibration()` loads the file lazily,
+  on first access, from wherever the store is first touched; no boot hook.
+  A model with persisted totals is calibrated on its *first* call of the
+  new process, not after a warm-up.
+- **Missing, corrupt, truncated, or stale reads as absent.** A cache the
+  process cannot parse is never fatal — it degrades to exactly the old
+  cold-start behaviour and the next write replaces it. Totals older than
+  30 days are dropped rather than trusted: nothing decays them, so a
+  month-old accumulator would otherwise pin a rate a tokenizer change had
+  already invalidated.
+- **Write debounce** — persisting on every LLM call would put a file write
+  on the hot path. Instead a write happens when the first sample of the
+  process lands (so a one-call session still learns something), then only
+  after 8 further updates or 60 seconds, whichever comes first. On the
+  54-call session above that is roughly seven writes of a few hundred
+  bytes.
+- **What a hard kill loses** — whatever has not been flushed: at most the
+  last 7 samples, or 60 seconds of calls. Nothing calls `flush()` at
+  shutdown today, so that bound is the guarantee; losing those samples
+  shifts a ratio of totals by a fraction of a percent and the next session
+  relearns them.
+
+### Per-tier caps
 
 Every cap is a hard number. No "auto-fill from a total" — the source
 of truth is `data/familiars/_default/character.toml`, which spells
@@ -804,6 +972,154 @@ automatically when the per-section caps scale.
 recent_history_tokens = 2.5
 rag_tokens            = 1.5
 ```
+
+## Measuring prompt-cache behaviour (`diagnose`)
+
+`familiar-connect diagnose <logfile>` has always printed the span
+table. When the log also carries `[LLM call]` lines it now prints three
+more code-fenced tables built from them. This is measurement only —
+nothing about prompt assembly, layer order, cache breakpoints or worker
+cadence changes. It exists so the staged-pass / cache question (issue
+#206) can be settled with data instead of argument.
+
+Capture a log, then aggregate it:
+
+```bash
+cargo run -- run -v 2>&1 | tee bot.log   # -v is INFO; [LLM call] is an INFO line
+cargo run -- diagnose bot.log            # '-' reads stdin instead
+```
+
+ANSI colour in the captured log is fine — the parser strips
+single-parameter SGR codes before reading keys, and a log captured with
+colour disabled parses identically. Lines missing a key are tolerated
+(`cached` and `cal_ratio` ride only some calls; a failed call reports no
+tokens at all); a corrupt line is skipped rather than fatal. A log with
+no `[LLM call]` line prints exactly the span table it always did.
+
+### The three tables
+
+Example output (synthetic data, for shape only):
+
+**`LLM calls by slot / model`**
+
+```
+slot        model                        n  hit%  ctok%  in_tok  status
+----------------------------------------------------------------------------------
+background  z-ai/glm-5.2                 4   0.0    0.0   15200  ok=4
+fast        anthropic/claude-haiku-4.5  21   0.0    0.0    4180  cancelled=1 ok=20
+prose       z-ai/glm-5.2                16  80.0   72.4    8620  error=1 ok=15
+```
+
+| Column | Meaning |
+|---|---|
+| `slot` / `model` | Grouping key. A slot whose model changed mid-log gets one row per model. |
+| `n` | Lines parsed into the group, all statuses. |
+| `hit%` | Share of usage-bearing calls reporting `cached > 0`. Calls that reported no usage (error, cancelled) are excluded — unobservable, not cold. |
+| `ctok%` | Token-weighted: Σ`cached` / Σ`in_tokens`. **The number #206 turns on.** |
+| `in_tok` | Mean `in_tokens` over usage-bearing calls. |
+| `status` | Full breakdown. The status vocabulary is open, so every word seen is listed. |
+
+Both hit rates are reported because they answer different questions.
+`hit%` says whether caching engaged at all; `ctok%` says how much of the
+prompt prefix was actually reused. A call can "hit" on a sliver, so a
+high `hit%` beside a low `ctok%` still means the prompt is being re-read
+at full price.
+
+**`cache hit vs miss latency (ms)`**
+
+```
+slot   model         metric  hit_n  hit_p50  hit_p95  miss_n  miss_p50  miss_p95  cost_p50
+------------------------------------------------------------------------------------------
+prose  z-ai/glm-5.2  ttfb       12      372      391       3      1117      1176       744
+prose  z-ai/glm-5.2  ttft       12      462      481       3      1207      1266       744
+```
+
+Same percentile function as the span table (linear-interpolated), split
+by whether the call reported a cache hit. `cost_p50` is `miss_p50 -
+hit_p50` — what a miss costs at the median, and the number that turns
+"we are missing" into a latency budget. It renders `-` when one side has
+no samples, which is itself the finding: a group with `hit_n = 0` never
+cached at all, and the comparison has to be made against a different
+group.
+
+**`token estimator accuracy by model`**
+
+```
+model                        n  est_tok  in_tok    obs    cal
+-------------------------------------------------------------
+anthropic/claude-haiku-4.5  20    82000   83600  1.020  1.020
+z-ai/glm-5.2                19   187500  190100  1.014  1.014
+```
+
+`obs` is the observed Σ`in_tokens` / Σ`est_in_tokens` across the whole
+log; `est_in_tokens` is deliberately the **raw** heuristic, never the
+calibrated one, or the ratio would be self-referential and always ~1.0.
+`cal` is the last `cal_ratio` the process itself logged (see
+§ Token-count calibration). They should agree. A gap means early calls
+skewed the running ratio, or that the process started from persisted
+totals whose history predates the log. This is item 3 on issue #184's
+list.
+
+### Reading it for #206
+
+The two hot paths cache under different contracts, and the tables are
+laid out to compare them directly.
+
+**`slot=fast` — Anthropic, one explicit breakpoint.** All seven
+system-prompt layers (character card, operating mode, lorebook,
+conversation summary, reflections, people dossier, RAG context) join
+with `\n\n` into a single string, which becomes one system message.
+For `anthropic/*` models `build_payload` stamps `cache_control:
+{type: ephemeral}` on the **last content block** of that message — which
+is the whole prompt. Anthropic awards no partial credit inside a marked
+block: either the block matches a cached prefix exactly, or the call
+pays full price. Two things at the tail of that block change every turn:
+`rag_context` is the last layer and its retrieval cue is the literal text
+of the current utterance, and the voice head reminder appended after the
+layers carries an `It is now:` clock line.
+
+Signature to look for: `slot=fast` with `hit%` and `ctok%` both at or
+near `0.0` over many `ok` calls, at a large and stable `in_tok`. If that
+is what the log shows, the single breakpoint is being invalidated once
+per turn by its own volatile tail, and the fix direction is the one #206
+proposes — a stable prefix (character card, operating mode, lorebook)
+carrying its own breakpoint, with the per-turn material after it.
+
+The cost side has to be read before acting. `in_tok` is how many tokens
+are re-read at full price each turn; a cache *write* on Anthropic is
+priced above the base input rate and a read well below it, so
+restructuring only pays when `in_tok` is large **and** a stable prefix is
+most of it. A small `in_tok` means the breakpoint is working as well as
+it usefully can, and the restructure buys nothing.
+
+**`slot=prose` — GLM via z-ai, no explicit breakpoint.** Nothing stamps
+`cache_control`, so the slot relies on the provider's automatic prefix
+caching, which matches the longest common prefix and does award partial
+credit. Expect a non-zero `ctok%` roughly tracking how much of the prompt
+precedes the first per-turn change.
+
+The comparison is the point:
+
+- **High `ctok%` on `prose`, near-zero on `fast`, at similar prompt
+  sizes.** Same assembly, same layer order, different caching contract —
+  which isolates the all-or-nothing breakpoint as the cause rather than
+  the layer order. That is the strongest evidence for the #206
+  restructure, and it also bounds the prize: `prose`'s `ctok%` is roughly
+  what `fast` could reach if its prefix were marked separately, and its
+  `cost_p50` is roughly what each miss is costing.
+- **Near-zero `ctok%` on both.** The breakpoint is not the (only)
+  problem; something volatile sits early in the prompt, or provider
+  routing is scattering calls. Check `provider=` in the raw log and see
+  § Provider pinning first — an unpinned slot lands on a different
+  provider each call and every call is cold, which looks exactly like a
+  layer-order defect.
+
+Two cautions. `cached` comes straight from OpenRouter's
+`prompt_tokens_details.cached_tokens`; a provider that never reports the
+field is indistinguishable here from a provider that never caches, so
+confirm `provider=` in the raw log before drawing a conclusion. And
+`p95` over a handful of calls is noise — a few dozen usage-bearing calls
+per group before the latency split means anything.
 
 ## History / context layers
 
@@ -878,9 +1194,9 @@ the store side; non-numeric input drops to NULL.
 ```toml
 [providers.embedding]
 backend          = "off"   # "off" | "hash" | "fastembed"
-dim              = 256     # hash only — vector size
+# dim            = 256     # hash only — vector size; unset defaults to 256
 fastembed_model  = "BAAI/bge-small-en-v1.5"
-fastembed_cache_dir = ""   # blank = ~/.cache/fastembed
+fastembed_cache_dir = ""   # blank = ./.fastembed_cache (CWD-relative!)
 ```
 
 Three knobs gate the seam — flip all three to turn it on:
@@ -913,7 +1229,15 @@ cargo build --features local-embed
 ```
 
 Brings in the `fastembed` crate (ONNX via `ort`). Model downloads on
-first use (cached under `~/.cache/fastembed`). Common choices:
+first use. **Leave `fastembed_cache_dir` blank and the cache lands in
+`./.fastembed_cache`, relative to the process's working directory** —
+that's the crate's own default (`DEFAULT_CACHE_DIR` in
+`fastembed::common`), *not* a fixed path under `~/.cache`. Under `cargo
+run`/`cargo test` from the crate dir that means ~130 MB inside the
+repo. Set `fastembed_cache_dir` (or the `FASTEMBED_CACHE_DIR` env var
+the crate reads) to a stable absolute path for any long-lived deploy,
+so a redeploy from a different CWD doesn't re-download the model.
+Common choices:
 
 If `backend = "fastembed"` is selected but the feature isn't compiled
 in, the bot **refuses to start** — the built-in `fastembed` factory
@@ -929,6 +1253,29 @@ embed.)
 | `BAAI/bge-small-en-v1.5` | 384 | ~130 MB | Default. Best speed/quality tradeoff. |
 | `BAAI/bge-base-en-v1.5` | 768 | ~440 MB | Higher quality, ~2× slower. |
 | `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB | Smallest; older but well-tested. |
+
+### `dim` under `fastembed`
+
+The model fixes the vector width, so `dim` is not a free knob here.
+Config load cross-checks the two against a static model → native-dim
+table (no download, no ONNX — the table compiles without
+`local-embed`):
+
+- **`dim` unset** — resolves to the model's native dim (384 for the
+  BGE-small default), so `EmbeddingConfig.dim` never advertises a
+  width the model cannot produce.
+- **`dim` set and matching** — accepted unchanged.
+- **`dim` set and contradicting** — rejected at load:
+
+  ```text
+  [providers.embedding].dim = 256 contradicts fastembed_model
+  'BAAI/bge-small-en-v1.5' (native dim 384); remove `dim` or set it to 384.
+  ```
+
+- **Model not in the table** — the check is skipped; the true dim is
+  only knowable once the first real vector probes it at runtime.
+
+Other backends are unaffected: `hash` owns its `dim` outright.
 
 Vectors tag with the embedder's `name` (`fastembed:<model>`), so
 upgrading from BGE-small to BGE-base accumulates new vectors beside

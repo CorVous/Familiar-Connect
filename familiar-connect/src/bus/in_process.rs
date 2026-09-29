@@ -1,14 +1,13 @@
-//! [`InProcessEventBus`] + [`Lifecycle`] + [`Subscription`] (subsystem 01;
-//! Python `bus/bus.py`, renamed to `in_process` to avoid
-//! `clippy::module_inception` — DESIGN D-R1/D21).
+//! [`InProcessEventBus`] + [`Lifecycle`] + [`Subscription`] (subsystem 01).
+//! Named `in_process` rather than `bus` to avoid `clippy::module_inception`.
 //!
-//! Topic-keyed fan-out: each [`InProcessEventBus::subscribe`] creates an isolated
-//! queue whose [`BackpressurePolicy`] governs full-queue behaviour. Fan-out is
-//! **sequential in registration order** (`for sub in subs { sub.put(ev).await }`),
-//! so a full `BLOCK` subscriber back-pressures the publisher and delays delivery
-//! to later-registered subscribers — this head-of-line coupling is test-pinned
-//! (spec 01 §6). A `Drop` on the [`Subscription`] handle unsubscribes (D7)
-//! without changing observable semantics.
+//! Topic-keyed fan-out: each [`InProcessEventBus::subscribe`] creates an
+//! isolated queue whose [`BackpressurePolicy`] governs full-queue behaviour.
+//! Fan-out is **sequential in registration order** (`for sub in subs {
+//! sub.put(ev).await }`), so a full `BLOCK` subscriber back-pressures the
+//! publisher and delays delivery to later-registered subscribers — this
+//! head-of-line coupling is test-pinned. A `Drop` on the [`Subscription`]
+//! handle unsubscribes without changing observable semantics.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -21,11 +20,10 @@ use tracing::warn;
 use crate::bus::envelope::Event;
 use crate::bus::protocols::{BackpressurePolicy, EventBus};
 
-/// Default per-subscription queue bound for the bounded policies (Python
-/// `bus.bus._DEFAULT_MAXSIZE`).
+/// Default per-subscription queue bound for the bounded policies.
 const DEFAULT_MAXSIZE: usize = 64;
 
-/// Bus lifecycle states (Python `Lifecycle`).
+/// Bus lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lifecycle {
     /// Constructed, not yet started.
@@ -39,7 +37,7 @@ pub enum Lifecycle {
 }
 
 impl Lifecycle {
-    /// The wire string value (matches the Python enum member values).
+    /// The wire string value.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -53,9 +51,9 @@ impl Lifecycle {
 
 /// A bounded ring for the `DROP_OLDEST` / `DROP_NEWEST` policies.
 ///
-/// The producer must be able to evict, which `mpsc` cannot express from the send
-/// side, so these two policies get a hand-rolled `Mutex<VecDeque> + Notify` queue
-/// (DESIGN §4.4).
+/// The producer must be able to evict, which `mpsc` cannot express from the
+/// send side, so these two policies get a hand-rolled `Mutex<VecDeque> +
+/// Notify` queue.
 struct DropQueue {
     buf: Mutex<VecDeque<Arc<Event>>>,
     notify: Notify,
@@ -155,9 +153,8 @@ enum RxKind {
 /// The consumer handle returned by [`InProcessEventBus::subscribe`].
 ///
 /// [`recv`](Self::recv) yields events until the bus closes the subscription and
-/// its queue drains, then returns `None`. Dropping the handle unsubscribes
-/// (DESIGN D7): further `publish`es to this subscription are silently discarded,
-/// fixing the Python no-unsubscribe leak without changing observable semantics.
+/// its queue drains, then returns `None`. Dropping the handle unsubscribes:
+/// further `publish`es to this subscription are silently discarded.
 pub struct Subscription {
     handle: Arc<SubHandle>,
     rx: RxKind,
@@ -183,10 +180,10 @@ impl Subscription {
     /// Await the next event, or `None` once the subscription is closed **and** its
     /// queue has drained.
     ///
-    /// Semantics (spec 01 §9): while open, wait for the next event or the close
-    /// signal, whichever comes first; a racing event wins over close (`biased`
-    /// select + a drain-first check). On close, all already-queued events are
-    /// drained across successive calls before `None` is returned — so a consumer
+    /// Semantics: while open, wait for the next event or the close signal,
+    /// whichever comes first; a racing event wins over close (`biased` select +
+    /// a drain-first check). On close, all already-queued events are drained
+    /// across successive calls before `None` is returned — so a consumer
     /// mid-`recv` when the bus shuts down still receives every queued event.
     pub async fn recv(&mut self) -> Option<Arc<Event>> {
         let closed = self.handle.closed.clone();
@@ -231,7 +228,7 @@ impl Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         // Unsubscribe: mark closed so later `publish`es to this subscription are
-        // silently dropped and its queue stops accumulating (D7).
+        // silently dropped and its queue stops accumulating.
         self.handle.closed.cancel();
     }
 }
@@ -261,7 +258,7 @@ impl InProcessEventBus {
         }
     }
 
-    /// The current lifecycle state (Python's public `lifecycle` attribute).
+    /// The current lifecycle state.
     #[must_use]
     pub fn lifecycle(&self) -> Lifecycle {
         *self.lifecycle.lock().expect("bus lifecycle mutex poisoned")
@@ -291,14 +288,14 @@ impl EventBus for InProcessEventBus {
             sub.close();
         }
         // One event-loop tick for subscribers to observe close before STOPPED
-        // (Python `await asyncio.sleep(0)`); shutdown does not wait for consumers.
+        // (one yield point); shutdown does not wait for consumers.
         tokio::task::yield_now().await;
         *self.lifecycle.lock().expect("bus lifecycle mutex poisoned") = Lifecycle::Stopped;
     }
 
     async fn publish(&self, event: Event) {
         // Refused only when STOPPED; publishing while STARTING/DRAINING is allowed
-        // (lifecycle is bookkeeping, not a gate — spec 01 §2).
+        // (lifecycle is bookkeeping, not a gate).
         if self.lifecycle() == Lifecycle::Stopped {
             warn!(target: "familiar_connect.bus.bus", "publish after stop: topic={}", event.topic);
             return;

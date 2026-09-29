@@ -1,10 +1,9 @@
-//! Endpointer state-machine tests (ported from Python
-//! `tests/test_utterance_endpointer.py`).
+//! Endpointer state-machine tests.
 //!
-//! The native VAD + ONNX Smart Turn are replaced by scripted trait doubles
-//! (DESIGN §4.8): a pattern-walking [`Vad`] and a verdict-popping [`SmartTurn`].
-//! Timing is deterministic — each 768-sample (16 ms-equivalent) input chunk
-//! resamples to exactly one 256-sample VAD frame.
+//! The native VAD + ONNX Smart Turn are replaced by scripted trait doubles: a
+//! pattern-walking [`Vad`] and a verdict-popping [`SmartTurn`]. Timing is
+//! deterministic — each 768-sample (16 ms-equivalent) input chunk resamples
+//! to exactly one 256-sample VAD frame.
 
 // Scripted doubles guard shared state with a `Mutex` and build via factory
 // `new`s that return a `(handle, state)` tuple.
@@ -43,7 +42,7 @@ struct VadState {
 }
 
 /// Mock TEN-VAD whose `is_speech` walks a pattern (repeating the last value);
-/// `reset` rewinds the pattern iterator — matching Python's `_make_vad`.
+/// `reset` rewinds the pattern iterator.
 #[derive(Clone)]
 struct PatternVad {
     pattern: Arc<Vec<bool>>,
@@ -147,9 +146,8 @@ async fn no_classification_when_no_speech() {
     assert!(calls.lock().unwrap().is_empty());
 }
 
-// An odd-length (non-int16-aligned) chunk can't be framed; Python's resampler
-// raises `ValueError` and it propagates to the pump. The Rust endpointer mirrors
-// that loud failure with a panic rather than silently dropping the chunk.
+// An odd-length (non-int16-aligned) chunk can't be framed. The endpointer
+// fails loudly with a panic rather than silently dropping the chunk.
 #[tokio::test]
 #[should_panic(expected = "non-int16-aligned")]
 async fn feed_audio_panics_on_odd_length_chunk() {
@@ -360,8 +358,8 @@ async fn reset_drops_buffer_and_state() {
 
 #[tokio::test]
 async fn is_complete_runs_off_event_loop_thread() {
-    // Smart Turn ONNX inference must dispatch off the reactor thread (spec §27):
-    // sync wav2vec2 over up to 16 s of audio would trip Discord's heartbeat and
+    // Smart Turn ONNX inference must dispatch off the reactor thread: sync
+    // wav2vec2 over up to 16 s of audio would trip Discord's heartbeat and
     // Deepgram's keepalive. Pin the offload via thread ids.
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut pattern = vec![true; 3];

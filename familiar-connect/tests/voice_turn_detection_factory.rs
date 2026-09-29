@@ -1,8 +1,7 @@
-//! `create_local_turn_detector` tests (ported from Python
-//! `tests/test_turn_detection_factory.py`).
+//! `create_local_turn_detector` tests.
 //!
-//! Smart Turn weights are resolved through the [`ModelDownloader`] seam — the
-//! Rust analogue of Python's mocked `hf_hub_download`. The scripted downloader
+//! Smart Turn weights are resolved through the [`ModelDownloader`] seam. The
+//! scripted downloader
 //! records its `(repo_id, filename)` args and returns a canned path/error so CI
 //! never touches the network.
 

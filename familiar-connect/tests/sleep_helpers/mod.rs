@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use familiar_connect::history::async_store::AsyncHistoryStore;
 use familiar_connect::history::store::HistoryStore;
-use familiar_connect::llm::{LlmClient, LlmDelta, Message};
-use futures::stream::BoxStream;
+use familiar_connect::llm::{LlmClient, Message};
 use serde_json::Value;
 
 /// A fresh in-memory store wrapped in the async facade.
@@ -22,8 +21,8 @@ pub fn store() -> Arc<AsyncHistoryStore> {
 }
 
 /// A scripted `LlmClient`: pops canned replies from a queue and records every
-/// call for assertions (mirrors the Python `FakeLLMClient`). An exhausted queue
-/// returns an empty assistant message, like the Python double.
+/// call for assertions. An exhausted queue
+/// returns an empty assistant message.
 pub struct ScriptedLlm {
     replies: Mutex<VecDeque<String>>,
     calls: Mutex<Vec<Vec<Message>>>,
@@ -69,8 +68,10 @@ impl LlmClient for ScriptedLlm {
         &self,
         _messages: Vec<Message>,
         _tools: Option<Vec<Value>>,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LlmDelta>>> {
-        Ok(Box::pin(futures::stream::empty()))
+    ) -> anyhow::Result<familiar_connect::llm::LlmStream> {
+        Ok(familiar_connect::llm::LlmStream::new(
+            futures::stream::empty(),
+        ))
     }
 
     fn slot(&self) -> Option<&str> {

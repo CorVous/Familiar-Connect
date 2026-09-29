@@ -1,5 +1,4 @@
-//! Shared channel-history serialization for the focus tools (subsystem 08;
-//! Python `tools/channel_view.py`).
+//! Shared channel-history serialization for the focus tools (subsystem 08).
 //!
 //! `read_channel` and `shift_focus` render recent turns through
 //! [`serialize_turns`], which surfaces *conversation only*: `role="tool"` turns
@@ -44,7 +43,7 @@ pub fn serialize_turns(turns: &[HistoryTurn]) -> Vec<TurnView> {
         if t.role == "tool" || t.content.trim().is_empty() {
             continue;
         }
-        // Python: `t.author.display_name or t.author.username` — a non-empty
+        // A non-empty
         // display_name wins, otherwise fall through to the username value *as
         // is* (including an empty string or `None`, never re-filtered).
         let author = t.author.as_ref().and_then(|a| {
