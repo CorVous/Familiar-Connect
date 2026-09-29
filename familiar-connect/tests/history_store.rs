@@ -162,7 +162,7 @@ fn appended_turn_images_survive_a_reopen() {
 
     let reopened = HistoryStore::open(&path).unwrap();
     assert_eq!(
-        reopened.image_url("img_abc123de").unwrap(),
+        reopened.image_url(CHANNEL, "img_abc123de").unwrap(),
         Some("http://cdn.example.com/cat.png".to_owned())
     );
 }
@@ -184,18 +184,41 @@ fn images_from_different_turns_each_keep_their_own_url() {
             .unwrap();
     }
     assert_eq!(
-        store.image_url("img_1111aaaa2222bbbb").unwrap(),
+        store.image_url(CHANNEL, "img_1111aaaa2222bbbb").unwrap(),
         Some("http://cdn.example.com/cat.png".to_owned())
     );
     assert_eq!(
-        store.image_url("img_3333cccc4444dddd").unwrap(),
+        store.image_url(CHANNEL, "img_3333cccc4444dddd").unwrap(),
         Some("http://cdn.example.com/dog.png".to_owned())
     );
 }
 
 #[test]
 fn image_url_is_none_for_an_unknown_id() {
-    assert_eq!(mem().image_url("img_deadbeef").unwrap(), None);
+    assert_eq!(mem().image_url(CHANNEL, "img_deadbeef").unwrap(), None);
+}
+
+/// Retrieval quotes turns from other channels, so an id lifted into a guild
+/// prompt must stay unresolvable outside the channel that recorded it.
+#[test]
+fn image_url_is_scoped_to_the_recording_channel() {
+    let store = mem();
+    store
+        .append_turn(
+            AppendTurn::new(FAMILIAR, CHANNEL, "user", "look").images(HashMap::from([(
+                "img_1111aaaa2222bbbb".to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .unwrap();
+    assert_eq!(
+        store.image_url(CHANNEL, "img_1111aaaa2222bbbb").unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
+    assert_eq!(
+        store.image_url(CHANNEL + 1, "img_1111aaaa2222bbbb").unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -211,7 +234,7 @@ fn re_appending_the_same_image_id_keeps_one_row() {
             .unwrap();
     }
     assert_eq!(
-        store.image_url("img_abc123de").unwrap(),
+        store.image_url(CHANNEL, "img_abc123de").unwrap(),
         Some("http://cdn.example.com/cat.png".to_owned())
     );
 }

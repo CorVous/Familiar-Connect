@@ -480,6 +480,45 @@ async fn staged_turn_image_resolves_from_history_alone() {
     assert!(matches!(out, ToolOutput::Image(_)));
 }
 
+/// An id retrieved into another channel's prompt must not be fetchable there:
+/// a DM image surfaced by RAG stays out of the guild it was quoted into.
+#[tokio::test]
+async fn view_image_resolves_only_in_the_channel_that_recorded_it() {
+    let dm_channel = 42;
+    let guild_channel = 99;
+    let store = Arc::new(AsyncHistoryStore::new(
+        HistoryStore::open(":memory:").unwrap(),
+    ));
+    let img_id = "img_1111aaaa2222bbbb";
+    store
+        .append_turn(
+            AppendTurn::new("fam", dm_channel, "user", "look").images(HashMap::from([(
+                img_id.to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .await
+        .unwrap();
+
+    let tool = build_view_image_tool_with_fetcher("", fetcher(tiny_png()));
+    let resolver = Arc::clone(&store) as Arc<dyn ImageUrlResolver>;
+    let call = async |channel_id: i64| {
+        let ctx = ToolContext::new("fam", channel_id, "text", "turn-1")
+            .with_image_resolver(Arc::clone(&resolver));
+        tool.handler
+            .call(serde_json::json!({ "image_id": img_id }), &ctx)
+            .await
+            .unwrap()
+    };
+
+    assert!(matches!(call(dm_channel).await, ToolOutput::Image(_)));
+    let ToolOutput::Text(s) = call(guild_channel).await else {
+        panic!("expected a text error in the other channel");
+    };
+    let data: Value = serde_json::from_str(&s).unwrap();
+    assert!(data["error"].as_str().unwrap().contains("unknown image id"));
+}
+
 #[tokio::test]
 async fn view_image_no_description_llm_degrades() {
     let ctx = ctx_with_images(&[("img_0", "http://cdn.example.com/img.png")], None);

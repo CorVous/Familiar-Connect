@@ -205,7 +205,7 @@ async fn staged_message_images_are_persisted() {
     let turn = s.sync().recent("fam", 42, 10, None, None).unwrap();
     assert!(turn[0].consumed_at.is_none());
     assert_eq!(
-        s.image_url("img_abc123de").await.unwrap(),
+        s.image_url(42, "img_abc123de").await.unwrap(),
         Some("http://cdn.example.com/cat.png".to_owned())
     );
 }
