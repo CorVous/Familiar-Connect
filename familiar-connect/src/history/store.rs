@@ -3875,6 +3875,33 @@ mod tests {
             )
             .expect("turn persists even when its images cannot");
         assert_eq!(turn.content, "look");
+
+        let persisted = store.recent("fam", 7, 10, None, None).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].content, "look");
+    }
+
+    #[test]
+    fn re_appending_the_same_image_id_keeps_one_row() {
+        let store = HistoryStore::open(":memory:").unwrap();
+        let images = HashMap::from([(
+            "img_abc123de45f6789a".to_owned(),
+            "http://cdn.example.com/cat.png".to_owned(),
+        )]);
+        for _ in 0..2 {
+            store
+                .append_turn(AppendTurn::new("fam", 7, "user", "look").images(images.clone()))
+                .unwrap();
+        }
+        let rows: Vec<i64> = store
+            .db
+            .query_map(
+                "SELECT COUNT(*) AS n FROM turn_images WHERE img_id = ?",
+                vec![super::v_str("img_abc123de45f6789a")],
+                |r| r.get::<_, i64>("n"),
+            )
+            .unwrap();
+        assert_eq!(rows, vec![1]);
     }
 
     #[test]

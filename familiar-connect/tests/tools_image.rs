@@ -438,8 +438,8 @@ async fn view_image_unknown_to_both_returns_error() {
     assert!(data["error"].as_str().unwrap().contains("unknown image id"));
 }
 
-/// Issue: a message staged in an unfocused channel loses its payload image map,
-/// so the promoted turn's marker used to resolve to "unknown image id".
+/// A message staged in an unfocused channel carries no payload image map, so the
+/// promoted turn's marker resolves through history alone.
 #[tokio::test]
 async fn staged_turn_image_resolves_from_history_alone() {
     let url = "http://cdn.example.com/cat.png";

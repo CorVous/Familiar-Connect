@@ -167,8 +167,7 @@ fn appended_turn_images_survive_a_reopen() {
     );
 }
 
-/// Each turn's images must survive the next turn's — the id space is global, so
-/// per-message ids (the old `img_0, img_1, …`) would overwrite each other.
+/// The id space is global, so each turn's images must survive the next turn's.
 #[test]
 fn images_from_different_turns_each_keep_their_own_url() {
     let store = mem();
@@ -220,24 +219,6 @@ fn image_url_is_scoped_to_the_recording_channel() {
             .image_url(CHANNEL + 1, "img_1111aaaa2222bbbb")
             .unwrap(),
         None
-    );
-}
-
-#[test]
-fn re_appending_the_same_image_id_keeps_one_row() {
-    let store = mem();
-    let images = HashMap::from([(
-        "img_abc123de".to_owned(),
-        "http://cdn.example.com/cat.png".to_owned(),
-    )]);
-    for _ in 0..2 {
-        store
-            .append_turn(AppendTurn::new(FAMILIAR, CHANNEL, "user", "look").images(images.clone()))
-            .unwrap();
-    }
-    assert_eq!(
-        store.image_url(CHANNEL, "img_abc123de").unwrap(),
-        Some("http://cdn.example.com/cat.png".to_owned())
     );
 }
 
