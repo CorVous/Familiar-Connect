@@ -185,13 +185,14 @@ async fn describe_leg(
     describe_image(llm, &desc_b64, "image/jpeg", constraints).await
 }
 
-/// The turn's own image map first, then the persisted-history fallback.
+/// The turn's own image map first, then the persisted-history fallback, which
+/// only sees images recorded in this channel.
 async fn resolve_image_url(ctx: &ToolContext, img_id: &str) -> Option<String> {
     if let Some(url) = ctx.images.get(img_id) {
         return Some(url.clone());
     }
     let resolver = ctx.image_resolver.as_ref()?;
-    resolver.resolve(img_id).await
+    resolver.resolve(ctx.channel_id, img_id).await
 }
 
 async fn view_image_handler(

@@ -47,7 +47,7 @@ async fn persists_the_payload_images() {
         .unwrap();
 
     assert_eq!(
-        s.image_url("img_abc123de").await.unwrap(),
+        s.image_url(42, "img_abc123de").await.unwrap(),
         Some("http://cdn.example.com/cat.png".to_owned())
     );
 }

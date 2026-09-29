@@ -216,7 +216,9 @@ fn image_url_is_scoped_to_the_recording_channel() {
         Some("http://cdn.example.com/cat.png".to_owned())
     );
     assert_eq!(
-        store.image_url(CHANNEL + 1, "img_1111aaaa2222bbbb").unwrap(),
+        store
+            .image_url(CHANNEL + 1, "img_1111aaaa2222bbbb")
+            .unwrap(),
         None
     );
 }

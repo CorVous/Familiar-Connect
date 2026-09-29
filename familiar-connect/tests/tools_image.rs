@@ -101,7 +101,7 @@ impl MapResolver {
 
 #[async_trait]
 impl ImageUrlResolver for MapResolver {
-    async fn resolve(&self, img_id: &str) -> Option<String> {
+    async fn resolve(&self, _channel_id: i64, img_id: &str) -> Option<String> {
         self.asked.lock().unwrap().push(img_id.to_owned());
         self.urls.get(img_id).cloned()
     }

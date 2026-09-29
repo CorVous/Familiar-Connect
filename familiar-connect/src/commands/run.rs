@@ -2100,7 +2100,7 @@ mod tests {
                 .image_resolver
                 .expect("every tool context needs the image resolver");
             assert_eq!(
-                resolver.resolve("img_1111aaaa2222bbbb").await,
+                resolver.resolve(42, "img_1111aaaa2222bbbb").await,
                 Some("http://cdn.example.com/cat.png".to_owned())
             );
         }

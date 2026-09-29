@@ -96,9 +96,13 @@ impl AsyncHistoryStore {
     }
 
     /// See [`HistoryStore::image_url`].
-    pub async fn image_url(&self, img_id: &str) -> Result<Option<String>, StoreError> {
+    pub async fn image_url(
+        &self,
+        channel_id: i64,
+        img_id: &str,
+    ) -> Result<Option<String>, StoreError> {
         let img_id = img_id.to_owned();
-        self.run(move |s| s.image_url(&img_id)).await
+        self.run(move |s| s.image_url(channel_id, &img_id)).await
     }
 
     /// See [`HistoryStore::lookup_turn_by_platform_message_id`].

@@ -184,14 +184,15 @@ impl ChannelReadStore for AsyncHistoryStore {
 /// [`AsyncHistoryStore`] implements it; tests inject a map.
 #[async_trait]
 pub trait ImageUrlResolver: Send + Sync {
-    /// The URL behind `img_id`, or `None` when it is unknown.
-    async fn resolve(&self, img_id: &str) -> Option<String>;
+    /// The URL behind `img_id` in `channel_id`, or `None` when that channel has
+    /// no such image.
+    async fn resolve(&self, channel_id: i64, img_id: &str) -> Option<String>;
 }
 
 #[async_trait]
 impl ImageUrlResolver for AsyncHistoryStore {
-    async fn resolve(&self, img_id: &str) -> Option<String> {
-        match self.image_url(img_id).await {
+    async fn resolve(&self, channel_id: i64, img_id: &str) -> Option<String> {
+        match self.image_url(channel_id, img_id).await {
             Ok(url) => url,
             Err(err) => {
                 tracing::warn!(target: "familiar_connect.tools", img_id, %err, "image url lookup failed");

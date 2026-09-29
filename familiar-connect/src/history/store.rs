@@ -1370,12 +1370,15 @@ impl HistoryStore {
         })
     }
 
-    /// The URL behind an `img_id`, or `None` when it was never recorded (legacy
-    /// `img_N` markers predate the table).
-    pub fn image_url(&self, img_id: &str) -> Result<Option<String>, StoreError> {
+    /// The URL behind an `img_id` recorded in `channel_id`, or `None` when that
+    /// channel never recorded it.
+    ///
+    /// Retrieval quotes turns across channels, so the id alone is not authority
+    /// to fetch: an image from a DM must not be reachable from a guild prompt.
+    pub fn image_url(&self, channel_id: i64, img_id: &str) -> Result<Option<String>, StoreError> {
         let rows = self.db.query_map(
-            "SELECT url FROM turn_images WHERE img_id = ?",
-            vec![v_str(img_id)],
+            "SELECT url FROM turn_images WHERE img_id = ? AND channel_id = ?",
+            vec![v_str(img_id), v_int(channel_id)],
             |r| r.get::<_, String>("url"),
         )?;
         Ok(rows.into_iter().next())
