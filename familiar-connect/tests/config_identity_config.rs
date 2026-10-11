@@ -852,6 +852,20 @@ fn shipped_default_voice_budget() {
 }
 
 #[test]
+fn max_rag_turns_zero_disables_turn_retrieval() {
+    let cfg = load_ok("[budget.text]\nmax_rag_turns = 0\n");
+    assert_eq!(cfg.budgets.get("text").unwrap().max_rag_turns, 0);
+    assert_err(
+        load("[budget.text]\nmax_rag_turns = -1\n"),
+        "must be non-negative",
+    );
+    assert_err(
+        load("[budget.text]\nmax_rag_facts = 0\n"),
+        "must be positive",
+    );
+}
+
+#[test]
 fn shipped_default_text_and_background() {
     let cfg = load_ok("");
     let text = cfg.budgets.get("text").unwrap();
@@ -1237,6 +1251,14 @@ fn budget_for_applies_curve_when_model_matches() {
         b.total_tokens(),
         base.total_tokens() + base.recent_history_tokens
     );
+}
+
+#[test]
+fn budget_for_keeps_a_zero_cap_zero_under_a_curve() {
+    let cfg = load_ok(
+        "[budget.voice]\nmax_rag_turns = 0\n\n[llm.fast]\nmodel = \"claude-opus-4-7\"\napi_key_env = \"X\"\n\n[budget.model_curves.\"claude-opus-4-7\"]\nmax_rag_turns = 2.0\n",
+    );
+    assert_eq!(cfg.budget_for("voice").max_rag_turns, 0);
 }
 
 #[test]
