@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -179,6 +179,29 @@ impl ChannelReadStore for AsyncHistoryStore {
     }
 }
 
+/// Resolves an `img_id` a turn's own payload no longer carries — the marker
+/// persists in history text long after the triggering event is gone.
+/// [`AsyncHistoryStore`] implements it; tests inject a map.
+#[async_trait]
+pub trait ImageUrlResolver: Send + Sync {
+    /// The URL behind `img_id` in `channel_id`, or `None` when that channel has
+    /// no such image.
+    async fn resolve(&self, channel_id: i64, img_id: &str) -> Option<String>;
+}
+
+#[async_trait]
+impl ImageUrlResolver for AsyncHistoryStore {
+    async fn resolve(&self, channel_id: i64, img_id: &str) -> Option<String> {
+        match self.image_url(channel_id, img_id).await {
+            Ok(url) => url,
+            Err(err) => {
+                tracing::warn!(target: "familiar_connect.tools", img_id, %err, "image url lookup failed");
+                None
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ToolContext
 // ---------------------------------------------------------------------------
@@ -208,6 +231,13 @@ pub struct ToolContext {
     pub scheduler: Option<Arc<AlarmScheduler>>,
     /// `img_id` → URL placeholder map injected per-turn (for `view_image`).
     pub images: HashMap<String, String>,
+    /// Fallback lookup for `img_id`s absent from `images` (staged history).
+    pub image_resolver: Option<Arc<dyn ImageUrlResolver>>,
+    /// Turn-local sink the text responder shares with `shift_focus`: the channel
+    /// this turn moved to, once it has. The reply lands there, so an image
+    /// previewed from there belongs to this turn as much as its own channel's do.
+    /// Never the mutable global focus pointer (#170).
+    pub shift_target: Option<Arc<Mutex<Option<i64>>>>,
     /// **Substitution** vision client: describes the image for a calling model
     /// that cannot see it. Never consulted when [`multimodal`](Self::multimodal)
     /// is set — the model gets the image itself.
@@ -243,6 +273,8 @@ impl ToolContext {
             bus: None,
             scheduler: None,
             images: HashMap::new(),
+            image_resolver: None,
+            shift_target: None,
             description_llm: None,
             caption_llm: None,
             multimodal: false,
@@ -277,6 +309,34 @@ impl ToolContext {
     pub fn with_images(mut self, images: HashMap<String, String>) -> Self {
         self.images = images;
         self
+    }
+
+    /// Builder: attach the fallback `img_id` resolver.
+    #[must_use]
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageUrlResolver>) -> Self {
+        self.image_resolver = Some(resolver);
+        self
+    }
+
+    /// Builder: attach the turn-local `shift_focus` sink.
+    #[must_use]
+    pub fn with_shift_target(mut self, shift_target: Arc<Mutex<Option<i64>>>) -> Self {
+        self.shift_target = Some(shift_target);
+        self
+    }
+
+    /// The channels this turn spans: the one it was triggered from, then the one
+    /// `shift_focus` moved it to when that happened and differs.
+    #[must_use]
+    pub fn turn_channel_ids(&self) -> Vec<i64> {
+        let shifted = self
+            .shift_target
+            .as_ref()
+            .and_then(|cell| *cell.lock().expect("shift target mutex"));
+        match shifted {
+            Some(id) if id != self.channel_id => vec![self.channel_id, id],
+            _ => vec![self.channel_id],
+        }
     }
 
     /// Builder: attach the substitution vision client.

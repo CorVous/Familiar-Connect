@@ -2,6 +2,8 @@
 //! attentional stream, activities — plus the FTS-independent parts of the
 //! attentional store.
 
+use std::collections::HashMap;
+
 use chrono::{TimeZone, Utc};
 use familiar_connect::history::db::Value;
 use familiar_connect::history::{AppendTurn, Author, ChannelUnread, HistoryStore, HistoryTurn};
@@ -132,6 +134,118 @@ fn persistent_across_reopens() {
     let turns = reopened.recent(FAMILIAR, CHANNEL, 10, None, None).unwrap();
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].content, "persisted");
+}
+
+// --- turn images ----------------------------------------------------------
+
+#[test]
+fn appended_turn_images_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.db");
+    let store = HistoryStore::open(&path).unwrap();
+    store
+        .append_turn(
+            AppendTurn::new(
+                FAMILIAR,
+                CHANNEL,
+                "user",
+                "look [image: img_abc123de (cat.png)]",
+            )
+            .images(HashMap::from([(
+                "img_abc123de".to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .unwrap();
+    store.close();
+    drop(store);
+
+    let reopened = HistoryStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.image_url(CHANNEL, "img_abc123de").unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
+}
+
+/// Ids hash the URL, so two turns' images never collide.
+#[test]
+fn images_from_different_turns_each_keep_their_own_url() {
+    let store = mem();
+    for (img_id, url) in [
+        ("img_1111aaaa2222bbbb", "http://cdn.example.com/cat.png"),
+        ("img_3333cccc4444dddd", "http://cdn.example.com/dog.png"),
+    ] {
+        store
+            .append_turn(
+                AppendTurn::new(FAMILIAR, CHANNEL, "user", "look")
+                    .images(HashMap::from([(img_id.to_owned(), url.to_owned())])),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.image_url(CHANNEL, "img_1111aaaa2222bbbb").unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
+    assert_eq!(
+        store.image_url(CHANNEL, "img_3333cccc4444dddd").unwrap(),
+        Some("http://cdn.example.com/dog.png".to_owned())
+    );
+}
+
+#[test]
+fn image_url_is_none_for_an_unknown_id() {
+    assert_eq!(mem().image_url(CHANNEL, "img_deadbeef").unwrap(), None);
+}
+
+/// Retrieval quotes turns from other channels, so an id lifted into a guild
+/// prompt must stay unresolvable outside the channel that recorded it.
+#[test]
+fn image_url_is_scoped_to_the_recording_channel() {
+    let store = mem();
+    store
+        .append_turn(
+            AppendTurn::new(FAMILIAR, CHANNEL, "user", "look").images(HashMap::from([(
+                "img_1111aaaa2222bbbb".to_owned(),
+                "http://cdn.example.com/cat.png".to_owned(),
+            )])),
+        )
+        .unwrap();
+    assert_eq!(
+        store.image_url(CHANNEL, "img_1111aaaa2222bbbb").unwrap(),
+        Some("http://cdn.example.com/cat.png".to_owned())
+    );
+    assert_eq!(
+        store
+            .image_url(CHANNEL + 1, "img_1111aaaa2222bbbb")
+            .unwrap(),
+        None
+    );
+}
+
+/// Ids hash the URL, so the same image posted in two channels shares an id.
+/// Each channel keeps its own row: recording the second must not unresolve the
+/// first.
+#[test]
+fn the_same_url_in_two_channels_resolves_in_both() {
+    let store = mem();
+    let images = HashMap::from([(
+        "img_1111aaaa2222bbbb".to_owned(),
+        "http://cdn.example.com/cat.png".to_owned(),
+    )]);
+    for channel_id in [CHANNEL, CHANNEL + 1] {
+        store
+            .append_turn(
+                AppendTurn::new(FAMILIAR, channel_id, "user", "look").images(images.clone()),
+            )
+            .unwrap();
+    }
+    for channel_id in [CHANNEL, CHANNEL + 1] {
+        assert_eq!(
+            store.image_url(channel_id, "img_1111aaaa2222bbbb").unwrap(),
+            Some("http://cdn.example.com/cat.png".to_owned()),
+            "channel {channel_id} lost its image row"
+        );
+    }
 }
 
 // --- recent ---------------------------------------------------------------

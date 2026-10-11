@@ -37,7 +37,7 @@ pub struct PublishText {
     /// Mentioned users, resolved to [`Author`]s (bots included; never the
     /// familiar's own account).
     pub mentions: Vec<Author>,
-    /// `img_N` → URL map, empty when no images were detected.
+    /// `img_id` → URL map, empty when no images were detected.
     pub images: HashMap<String, String>,
     /// Whether the incoming message pinged the bot (mention or reply-ping).
     pub pings_bot: bool,
