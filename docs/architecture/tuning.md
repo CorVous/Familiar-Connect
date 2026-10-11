@@ -142,7 +142,7 @@ max_concurrent_requests = 4  # process-wide cap on in-flight LLM requests
 [llm.fast]
 model        = "anthropic/claude-haiku-4.5"
 temperature  = 0.7
-reasoning    = "off"        # "off" | "low" | "medium" | "high" | "default" | omit
+reasoning    = "off"        # "off" | "none" | "minimal" | "low" | "medium" | "high" | "default" | omit
                             # "default" = model default; overrides a level merged
                             # in from _default/character.toml (TOML has no null)
 tool_calling = true         # default; `false` is refused at load
@@ -623,6 +623,7 @@ unknown slots fail loudly at config load. See
 ```toml
 [llm]
 image_description_model  = ""              # shared; empty = disabled
+image_description_reasoning = "minimal"    # optional; same levels as a slot's reasoning
 max_concurrent_requests  = 4               # shared; process-wide cap
 
 [llm.<slot>]
@@ -633,7 +634,7 @@ top_k                    = 20               # optional, positive int
 presence_penalty         = 1.5              # optional, [-2, 2]
 provider_order           = ["z-ai"]         # optional, OpenRouter pin
 provider_allow_fallbacks = true             # optional, default true
-reasoning                = "medium"         # "off"|"none"|"low"|"medium"|"high"|"default"|omit
+reasoning                = "medium"         # "off"|"none"|"minimal"|"low"|"medium"|"high"|"default"|omit
 think_prepend            = false            # optional, default false (only false)
 tool_calling             = true             # optional, default true (only true)
 image_tools              = false            # optional, default false

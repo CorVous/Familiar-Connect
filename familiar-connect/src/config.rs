@@ -41,15 +41,17 @@ pub struct ConfigError(pub String);
 /// Canonical LLM call-site slot names.
 pub const LLM_SLOT_NAMES: [&str; 3] = ["fast", "prose", "background"];
 /// `[llm]` keys that are shared settings, not slot tables.
-const LLM_SHARED_KEYS: [&str; 3] = [
+const LLM_SHARED_KEYS: [&str; 4] = [
     "image_description_model",
     "image_caption_model",
+    "image_description_reasoning",
     "max_concurrent_requests",
 ];
 /// Canonical assembly-tier names.
 pub const BUDGET_TIER_NAMES: [&str; 3] = ["voice", "text", "background"];
 /// Allowed values for `[llm.<slot>].reasoning`.
-pub const REASONING_LEVELS: [&str; 6] = ["off", "none", "low", "medium", "high", "default"];
+pub const REASONING_LEVELS: [&str; 7] =
+    ["off", "none", "minimal", "low", "medium", "high", "default"];
 /// Default `[tts].azure_voice`.
 pub const DEFAULT_AZURE_TTS_VOICE: &str = "en-US-AmberNeural";
 
@@ -764,6 +766,10 @@ pub struct CharacterConfig {
     /// facts / summaries / dossiers). `""` falls back to
     /// [`image_description_model`](Self::image_description_model).
     pub image_caption_model: String,
+    /// `[llm].image_description_reasoning`: reasoning effort for the image
+    /// description client (same levels as a slot's `reasoning`); `None` =
+    /// provider default.
+    pub image_description_reasoning: Option<String>,
     /// Process-wide cap on concurrent LLM requests.
     pub llm_max_concurrent_requests: i64,
     /// Attentional unread-nudge controls.
@@ -815,6 +821,7 @@ impl Default for CharacterConfig {
             embedding: EmbeddingConfig::default(),
             image_description_model: String::new(),
             image_caption_model: String::new(),
+            image_description_reasoning: None,
             llm_max_concurrent_requests: 4,
             focus: FocusConfig::default(),
             tools: ToolsConfig::default(),
@@ -1023,6 +1030,22 @@ fn parse_character_config(
             ));
         }
     };
+    let image_description_reasoning = match llm_raw.get("image_description_reasoning") {
+        None => None,
+        Some(Value::String(s)) if s == "default" => None,
+        Some(Value::String(s)) if REASONING_LEVELS.contains(&s.as_str()) => Some(s.clone()),
+        Some(Value::String(s)) => {
+            return Err(ConfigError(format!(
+                "[llm].image_description_reasoning '{s}' unknown; valid options: {}",
+                sorted_join(&REASONING_LEVELS)
+            )));
+        }
+        Some(_) => {
+            return Err(ConfigError(
+                "[llm].image_description_reasoning must be a string".into(),
+            ));
+        }
+    };
     let llm_max_concurrent_requests = match llm_raw.get("max_concurrent_requests") {
         None => 4,
         Some(Value::Integer(n)) if *n > 0 => *n,
@@ -1153,6 +1176,7 @@ fn parse_character_config(
         embedding,
         image_description_model,
         image_caption_model,
+        image_description_reasoning,
         llm_max_concurrent_requests,
         focus,
         tools,
