@@ -83,9 +83,10 @@ const VISIBLE_TAIL: i64 = 10;
 const EARLY_BED_MINUTES: i64 = 60;
 const SCHEDULE_OVERFLOW_GRACE_MINUTES: i64 = 15;
 
-const NUDGE_CONTENT: &str = "[idle: the channel has been quiet for a while. If nothing needs \
-    your attention, you could head out and do something — start_activity. Nobody is around: call \
-    silent() with it to slip away without posting a goodbye. Staying is fine too; your call.]";
+const NUDGE_CONTENT: &str = "[idle: the channel has been quiet for a while. Being around is your \
+    usual state, and quiet stretches are part of it: you can simply keep hanging out, calling \
+    silent() to stay without posting. Heading out is for the times you truly want a change of \
+    scene; then use start_activity, with silent() to slip away unannounced if nobody is around.]";
 
 const BEDTIME_NUDGE_CONTENT: &str = "[late: your sleep window has begun. Wrap up and head to bed — \
     start_activity with 'sleep'. Nobody around: call silent() with it to slip away without posting \

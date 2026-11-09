@@ -441,12 +441,13 @@ use shift_focus if one pulls your attention: it moves you there quietly, or \
 pass silent: false to arrive and speak.
 """
 start_activity_description = """
-Head out and do something away from the screen for a while. Use when the \
-current scene has wrapped up or the channel has gone quiet. You'll be away \
-and may miss messages while out. You leave when this reply sends: with \
-people around, say your in-character goodbye in this same message; from a \
-quiet channel, leave the call silent and slip away unannounced. Don't start \
-one in the middle of a conversation you have a stake in.
+Head out and do something away from the screen for a while. Use it now and \
+then, when you truly feel like a change of scene; through most quiet \
+stretches you simply stay around. You may miss messages while out. You \
+leave when this reply sends: with people around, say your in-character \
+goodbye in this same message; from a quiet channel, leave the call silent \
+and slip away unannounced. Don't start one in the middle of a conversation \
+you have a stake in.
 """
 rolling_summary_system = """
 You produce concise, retrieval-friendly summaries of a familiar's attended \

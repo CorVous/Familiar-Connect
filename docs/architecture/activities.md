@@ -65,7 +65,11 @@ eligible — the focused channel quiet for `idle_nudge_minutes`, no
 activity active, at least `min_gap_minutes` since the last return,
 local time inside `active_hours` (in the familiar's `display_tz`) —
 it publishes a synthetic wake event into the focused text channel
-whose content mentions the quiet and offers `start_activity`. The
+whose content mentions the quiet, frames staying around (via
+`silent()`) as the usual choice, and keeps `start_activity` open for
+when the familiar truly wants a change of scene. The wording is soft
+on purpose: some models (Gemini, for one) take any "you could head
+out" as a go-ahead and leave on every nudge. The
 quiet clock is fed by the responder (`note_traffic` on every handled
 text event); firing marks the nudge pending so the debounce window
 starts. The nudge only earns the model a turn — going out remains
