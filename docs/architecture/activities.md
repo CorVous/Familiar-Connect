@@ -207,7 +207,7 @@ Top-level knobs (all optional):
 | `archive_after_minutes` | `45` | Absence at/above this sets the archive watermark for all channels at the departure turn. |
 | `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge may fire; also the nudge debounce window. |
 | `min_gap_minutes` | `90` | Minimum gap after a return before the next nudge. Gates nudges only — never blocks a `start_activity` call. |
-| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. Keep it disjoint from the sleep `window` — overlap lets an idle "do something" nudge and the bedtime "go to bed" nudge co-fire in the pre-grace stretch (once force-sleep fires, the active state suppresses the idle nudge). |
+| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. Keep it disjoint from the sleep `window` — overlap lets an idle nudge and the bedtime "go to bed" nudge co-fire in the pre-grace stretch (once force-sleep fires, the active state suppresses the idle nudge). |
 
 Catalog entry (`[[catalog]]`, one per activity type):
 
