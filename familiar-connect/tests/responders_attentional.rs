@@ -472,6 +472,34 @@ async fn overridden_shift_focus_coaching_reaches_the_trailing_reminder() {
     assert!(!trailing.contains("pulls your attention"), "{trailing}");
 }
 
+/// The unread digest names only channels she follows. A message left unread
+/// in a channel she has since unsubscribed from stays out of it — listing it
+/// sent her after a channel `shift_focus` refuses.
+#[tokio::test]
+async fn unread_digest_lists_only_subscribed_channels() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+        text_delta("ok"),
+        finish("stop"),
+    ]]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, _fm, _s) = real_focus_responder(Arc::clone(&llm), send);
+    // 200 is subscribed; 300 is not (the harness subscribes 100 and 200).
+    for (channel, event_id) in [(300, "e-old"), (200, "e-new")] {
+        r.handle(
+            &discord_text_event(text_payload(channel, "chatter"), event_id),
+            &bus(),
+        )
+        .await
+        .unwrap();
+    }
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    let trailing = llm.calls()[0].last().unwrap().content_str();
+    assert!(trailing.contains("(id 200)"), "{trailing}");
+    assert!(!trailing.contains("(id 300)"), "{trailing}");
+}
+
 /// Serves the same PNG for any URL, so `view_image` never touches the network.
 #[cfg(feature = "images")]
 struct CannedFetcher;

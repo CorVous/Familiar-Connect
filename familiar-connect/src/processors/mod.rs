@@ -192,6 +192,12 @@ pub trait FocusManagerApi: Send + Sync {
     fn is_focused(&self, channel_id: i64) -> bool;
     /// Whether a non-focused arrival warrants a nudge (debounced).
     fn should_wake(&self, channel_id: i64) -> bool;
+    /// Whether `channel_id` is a channel she follows — one `shift_focus` can
+    /// reach. The unread digest lists only these. Defaults to `true` for
+    /// implementations with no subscription list.
+    fn is_subscribed(&self, _channel_id: i64) -> bool {
+        true
+    }
     /// Move focus to `channel_id` now (same path the `shift_focus` tool takes).
     /// The text responder's no-tools ping fallback needs it (#221).
     async fn shift_now(&self, channel_id: i64);
@@ -223,6 +229,9 @@ impl FocusManagerApi for crate::focus::FocusManager {
     }
     fn should_wake(&self, channel_id: i64) -> bool {
         Self::should_wake(self, channel_id)
+    }
+    fn is_subscribed(&self, channel_id: i64) -> bool {
+        Self::is_subscribed(self, channel_id)
     }
     async fn shift_now(&self, channel_id: i64) {
         Self::shift_now(self, channel_id).await;

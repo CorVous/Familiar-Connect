@@ -807,7 +807,7 @@ impl TextResponder {
             .focus_manager
             .as_ref()
             .and_then(|fm| fm.get_focus("text"));
-        let unread_digest: Option<Vec<(i64, (i64, i64))>> = if self.focus_manager.is_some() {
+        let unread_digest: Option<Vec<(i64, (i64, i64))>> = if let Some(fm) = &self.focus_manager {
             let staged = self
                 .history
                 .staged_channels(self.familiar_id.clone())
@@ -816,6 +816,10 @@ impl TextResponder {
             Some(
                 staged
                     .into_iter()
+                    // Only channels `shift_focus` can reach: a turn left staged
+                    // in a channel she has since stopped following would send
+                    // her after a channel the tool refuses.
+                    .filter(|(cid, _)| fm.is_subscribed(*cid))
                     .map(|(cid, cu)| (cid, (cu.unread(), cu.pings())))
                     .collect(),
             )

@@ -88,6 +88,13 @@ const NUDGE_CONTENT: &str = "[idle: the channel has been quiet for a while. Bein
     silent() to stay without posting. Heading out is for the times you truly want a change of \
     scene; then use start_activity, with silent() to slip away unannounced if nobody is around.]";
 
+/// The idle nudge when a channel she follows has messages waiting: the quiet
+/// is the moment to go and read them.
+const NUDGE_CONTENT_UNREAD: &str = "[idle: the channel has been quiet for a while, and messages \
+    are waiting in another channel. A quiet stretch is the time to catch up: use shift_focus to \
+    go and read them, one channel at a time. Once you are there, reply if something is for you, \
+    or call silent() to simply read.]";
+
 const BEDTIME_NUDGE_CONTENT: &str = "[late: your sleep window has begun. Wrap up and head to bed — \
     start_activity with 'sleep'. Nobody around: call silent() with it to slip away without posting \
     a goodnight. Stay up much longer and sleep will claim you anyway.]";
@@ -115,6 +122,11 @@ pub trait FocusLike: Send + Sync {
     fn get_focus(&self, modality: &str) -> Option<i64>;
     /// The per-channel promotion cap applied at return-time staged promotion.
     fn catch_up_limit(&self) -> usize;
+    /// Whether `channel_id` is a channel she follows — one `shift_focus` can
+    /// reach. Defaults to `true` for fakes with no subscription list.
+    fn is_subscribed(&self, _channel_id: i64) -> bool {
+        true
+    }
 }
 
 impl FocusLike for crate::focus::FocusManager {
@@ -123,6 +135,9 @@ impl FocusLike for crate::focus::FocusManager {
     }
     fn catch_up_limit(&self) -> usize {
         Self::catch_up_limit(self)
+    }
+    fn is_subscribed(&self, channel_id: i64) -> bool {
+        Self::is_subscribed(self, channel_id)
     }
 }
 
@@ -294,6 +309,10 @@ pub trait ActivityStore: Send + Sync {
         before: i64,
         after: i64,
     ) -> anyhow::Result<Vec<HistoryTurn>>;
+    /// Channels holding staged (unread) turns. Defaults to none.
+    async fn staged_channels(&self, _familiar_id: String) -> anyhow::Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
     /// The concrete store for the sleep passes, or `None` (disables the passes).
     fn maintenance_store(&self) -> Option<Arc<AsyncHistoryStore>> {
         None
@@ -457,6 +476,13 @@ impl ActivityStore for RealActivityStore {
         self.0
             .turns_around(familiar_id, channel_id, turn_id, before, after)
             .await
+            .map_err(|e| store_err(&e))
+    }
+    async fn staged_channels(&self, familiar_id: String) -> anyhow::Result<Vec<i64>> {
+        self.0
+            .staged_channels(familiar_id)
+            .await
+            .map(|staged| staged.into_keys().collect())
             .map_err(|e| store_err(&e))
     }
     fn maintenance_store(&self) -> Option<Arc<AsyncHistoryStore>> {
@@ -1184,13 +1210,29 @@ impl ActivityEngine {
             return;
         };
         self.mark_nudge_pending();
-        self.publish_synthetic(channel_id, NUDGE_CONTENT, "activity-nudge")
+        let content = if self.unread_waits_elsewhere(channel_id).await {
+            NUDGE_CONTENT_UNREAD
+        } else {
+            NUDGE_CONTENT
+        };
+        self.publish_synthetic(channel_id, content, "activity-nudge")
             .await;
         tracing::info!(
             "{} nudge {}",
             ls::tag("\u{1f6b6} Activity", ls::G),
             ls::kv_styled("channel", &channel_id.to_string(), ls::W, ls::LW),
         );
+    }
+
+    /// Whether a channel she follows, other than the focused one, holds
+    /// unread messages. A store fault reads as "nothing waiting".
+    async fn unread_waits_elsewhere(&self, focused: i64) -> bool {
+        self.store
+            .staged_channels(self.familiar_id.clone())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .any(|cid| cid != focused && self.focus.is_subscribed(cid))
     }
 
     fn in_active_hours(&self, now: DateTime<Utc>) -> bool {
@@ -2096,6 +2138,7 @@ mod tests {
 
     struct FakeFocus {
         channel_id: Option<i64>,
+        unsubscribed: Vec<i64>,
     }
     impl FocusLike for FakeFocus {
         fn get_focus(&self, modality: &str) -> Option<i64> {
@@ -2107,6 +2150,9 @@ mod tests {
         }
         fn catch_up_limit(&self) -> usize {
             20
+        }
+        fn is_subscribed(&self, channel_id: i64) -> bool {
+            !self.unsubscribed.contains(&channel_id)
         }
     }
 
@@ -2295,6 +2341,10 @@ mod tests {
         ) -> anyhow::Result<Vec<HistoryTurn>> {
             self.guard("turns_around")?;
             self.inner.turns_around(f, c, t, b, a).await
+        }
+        async fn staged_channels(&self, f: String) -> anyhow::Result<Vec<i64>> {
+            self.guard("staged_channels")?;
+            self.inner.staged_channels(f).await
         }
         fn maintenance_store(&self) -> Option<Arc<AsyncHistoryStore>> {
             None
@@ -2574,6 +2624,9 @@ mod tests {
         ) -> anyhow::Result<Vec<HistoryTurn>> {
             self.inner.turns_around(f, c, t, b, a).await
         }
+        async fn staged_channels(&self, f: String) -> anyhow::Result<Vec<i64>> {
+            self.inner.staged_channels(f).await
+        }
         fn maintenance_store(&self) -> Option<Arc<AsyncHistoryStore>> {
             self.inner.maintenance_store()
         }
@@ -2588,6 +2641,7 @@ mod tests {
         presence: Arc<PresenceRec>,
         presence_cb: Option<PresenceCb>,
         focused: Option<i64>,
+        unsubscribed: Vec<i64>,
         llm: Arc<ScriptedLlm>,
         voice_active: bool,
         bot_id: BotUserIdFn,
@@ -2619,6 +2673,7 @@ mod tests {
                 presence: PresenceRec::new(),
                 presence_cb: None,
                 focused: Some(CHANNEL),
+                unsubscribed: Vec::new(),
                 llm: ScriptedLlm::new(vec![
                     "I walked along the creek and watched dragonflies.".to_owned(),
                 ]),
@@ -2664,6 +2719,7 @@ mod tests {
                 bus: Arc::clone(&self.bus) as Arc<dyn EventBus>,
                 focus: Arc::new(FakeFocus {
                     channel_id: self.focused,
+                    unsubscribed: self.unsubscribed.clone(),
                 }),
                 presence_cb,
                 familiar_id: self.familiar_id.clone(),
@@ -3841,6 +3897,56 @@ mod tests {
         assert!(!engine.should_nudge(clock.now()));
         engine.stop().await;
         fx.bus.shutdown().await;
+    }
+
+    /// Publish one idle nudge with an unread message staged in `staged_in`
+    /// and return its content.
+    async fn nudge_content_with_unread(staged_in: i64, unsubscribed: Vec<i64>) -> String {
+        let clock = FakeClock::new(noon());
+        let mut fx = Fx::new(clock.clone());
+        fx.nudge_tick = StdDur::from_secs_f64(0.01);
+        fx.unsubscribed = unsubscribed;
+        fx.bus.start().await;
+        fx.real
+            .sync()
+            .append_turn(
+                AppendTurn::new(FAMILIAR, staged_in, "user", "anyone around?")
+                    .author(author())
+                    .consumed(false),
+            )
+            .unwrap();
+        let engine = fx.build();
+        clock.advance_minutes(30);
+        let mut sub = subscribe_text(&fx.bus);
+        engine.start().await;
+        let ev = recv_wake(&mut sub).await.expect("nudge");
+        engine.stop().await;
+        fx.bus.shutdown().await;
+        let p = wake_payload(&ev);
+        assert_eq!(p.channel_id, CHANNEL);
+        p.content
+    }
+
+    #[tokio::test]
+    async fn nudge_points_at_unread_waiting_in_another_followed_channel() {
+        let content = nudge_content_with_unread(CHANNEL + 1, Vec::new()).await;
+        assert!(content.contains("messages are waiting"), "{content}");
+        assert!(content.contains("shift_focus"), "{content}");
+        assert!(!content.contains("start_activity"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn nudge_ignores_unread_in_a_channel_she_no_longer_follows() {
+        let content = nudge_content_with_unread(CHANNEL + 1, vec![CHANNEL + 1]).await;
+        assert!(!content.contains("shift_focus"), "{content}");
+        assert!(content.contains("start_activity"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn nudge_ignores_unread_staged_in_the_focused_channel() {
+        let content = nudge_content_with_unread(CHANNEL, Vec::new()).await;
+        assert!(!content.contains("shift_focus"), "{content}");
+        assert!(content.contains("start_activity"), "{content}");
     }
 
     #[tokio::test]
