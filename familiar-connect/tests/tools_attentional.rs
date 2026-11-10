@@ -323,6 +323,52 @@ async fn shift_focus_unsubscribed_error_lists_available_channels() {
 }
 
 #[tokio::test]
+async fn shift_focus_unusable_channel_id_still_lists_available_channels() {
+    // Missing, junk and float-with-no-match all get the list of valid ids.
+    for (args, needle) in [
+        (json!({}), "missing 'channel_id'"),
+        (json!({"channel_id": null}), "missing 'channel_id'"),
+        (
+            json!({"channel_id": "#general"}),
+            "channel #general is not subscribed",
+        ),
+        (json!({"channel_id": 1.5e18}), "is not subscribed"),
+    ] {
+        let fm = Arc::new(MockFocus::new());
+        let ctx = ctx_with(Some(fm.clone()), None);
+        let parsed = parse(shift_focus_handler(&args, &ctx).await.unwrap());
+        let error = parsed["error"].as_str().unwrap();
+        assert!(error.contains(needle), "{args}: {error}");
+        assert_eq!(
+            parsed["available_channels"][0]["channel_id"], "55",
+            "{args}"
+        );
+        assert!(fm.shift_calls.lock().unwrap().is_empty(), "{args}");
+    }
+}
+
+#[tokio::test]
+async fn shift_focus_resolves_ids_from_raw_argument_text() {
+    // The production path: `arguments` is JSON text, parsed, then handled.
+    const DM: i64 = 1_257_165_677_052_170_301;
+    for raw in [
+        r#"{"channel_id":"1257165677052170301"}"#,
+        r#"{"channel_id":1257165677052170200}"#,
+        r#"{"channel_id":1.2571656770521702e18}"#,
+        r#"{"channel_id":"<#1257165677052170301>"}"#,
+    ] {
+        let mut fm = MockFocus::new();
+        fm.subscribed = vec![55, DM];
+        let fm = Arc::new(fm);
+        let ctx = ctx_with(Some(fm.clone()), None);
+        let args: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let parsed = parse(shift_focus_handler(&args, &ctx).await.unwrap());
+        assert_eq!(parsed["channel_id"], "1257165677052170301", "{raw}");
+        assert_eq!(*fm.shift_calls.lock().unwrap(), [DM], "{raw}");
+    }
+}
+
+#[tokio::test]
 async fn shift_focus_accepts_a_snowflake_as_a_string() {
     const DM: i64 = 1_257_165_677_052_170_301;
     let mut fm = MockFocus::new();

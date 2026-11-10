@@ -1113,9 +1113,11 @@ Shifts are **model-decided and applied immediately**:
    **string of digits** in both directions: Discord ids exceed 2^53,
    and some providers (Gemini) round a JSON number argument through a
    float64, which turned every shift into a "not subscribed" refusal.
-   A number is still accepted, and one that matches no subscription is
-   snapped to the single subscribed channel that rounds to the same
-   float64.
+   A number, a `<#id>` mention or a label containing the id is still
+   accepted, and an id that matches no subscription is snapped to the
+   single subscribed channel with the same float64 value (two
+   candidates is a refusal, not a guess). Every refusal, including a
+   missing or unreadable `channel_id`, carries `available_channels`.
 2. `shift_now` applies the move **at tool-call time**, under that
    lock. For a text shift it calls
    `promote_staged_turns(channel_id, catch_up_limit)` — flipping only

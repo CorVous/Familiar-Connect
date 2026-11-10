@@ -17,44 +17,95 @@ use crate::log_style as ls;
 use crate::tools::channel_view::{TurnView, serialize_turns};
 use crate::tools::registry::{FnHandler, Tool, ToolContext, ToolOutput};
 
+/// Longest echo of an unusable `channel_id` in the refusal message.
+const GIVEN_ID_ECHO_LIMIT: usize = 80;
+
 fn error_output(msg: &str) -> ToolOutput {
     ToolOutput::Text(json!({ "error": msg }).to_string())
 }
 
-/// Resolve the `channel_id` argument to a subscribed channel id.
+/// Shortest digit run that is taken for a channel id inside a longer string
+/// (`<#123…>`, `#general(123…)`); shorter runs are part of a name.
+const MIN_EMBEDDED_ID_DIGITS: usize = 15;
+
+/// Whether `id` is `approx` once both are float64s, give or take one ULP.
+///
+/// The slack covers `serde_json` (built without `float_roundtrip`) parsing an
+/// exponent-form number one ULP off. At snowflake magnitude that is a few
+/// hundred ids — still inside one Discord millisecond.
+fn same_float(id: i64, approx: f64) -> bool {
+    if id <= 0 || !approx.is_finite() || approx <= 0.0 {
+        return false;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "deliberately reproducing the provider's float64 rounding"
+    )]
+    let as_float = id as f64;
+    as_float.to_bits().abs_diff(approx.to_bits()) <= 1
+}
+
+/// Read the model's `channel_id` as `(exact id, float64 value)`, generously:
+/// a digit string, a number, an id wrapped in other text (`<#id>`, a label), or
+/// a float spelled out in a string.
+fn read_channel_arg(arg: &Value) -> (Option<i64>, Option<f64>) {
+    match arg {
+        Value::Number(n) => (n.as_i64(), n.as_f64()),
+        Value::String(s) => {
+            let text = s.trim();
+            if let Ok(id) = text.parse::<i64>() {
+                return (Some(id), None);
+            }
+            // A float spelled out ("1.25e18") before the embedded-run scan,
+            // which would otherwise lift its mantissa digits as an id.
+            if let Ok(float) = text.parse::<f64>() {
+                return (None, Some(float));
+            }
+            let mut runs = text
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|run| run.len() >= MIN_EMBEDDED_ID_DIGITS);
+            match (runs.next(), runs.next()) {
+                (Some(run), None) => (run.parse::<i64>().ok(), None),
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
+    }
+}
+
+/// Resolve the `channel_id` argument against the subscribed channels.
 ///
 /// Discord snowflakes exceed 2^53, and some providers (Gemini) round a JSON
 /// *number* argument through a float64 on the way here — `1257165677052170301`
-/// arrives as `1257165677052170200`. So the schema asks for a digit **string**,
-/// which is taken exactly. A number is still accepted: used as-is when it names
-/// a subscribed channel, otherwise snapped to the one subscribed channel that
-/// rounds to the same float64 (ambiguous or no match ⇒ left as given, and the
-/// caller's not-subscribed error lists the valid ids).
+/// arrives as `1257165677052170200`. So the schema asks for a digit **string**.
+/// Numbers are still accepted, and rounded ids also linger as text in replayed
+/// tool results, so every form goes through the same two steps:
 ///
-/// `None` ⇒ missing or unparseable.
-fn resolve_channel_id(arg: Option<&Value>, subscribed: &[i64]) -> Option<i64> {
-    match arg? {
-        Value::String(s) => s.trim().parse::<i64>().ok(),
-        Value::Number(n) => {
-            let exact = n.as_i64();
-            if let Some(id) = exact {
-                if subscribed.contains(&id) {
-                    return Some(id);
-                }
-            }
-            let approx = n.as_f64()?;
-            #[allow(
-                clippy::cast_precision_loss,
-                clippy::float_cmp,
-                reason = "deliberately reproducing the provider's float64 rounding"
-            )]
-            let mut matches = subscribed.iter().copied().filter(|c| *c as f64 == approx);
-            match (matches.next(), matches.next()) {
-                (Some(only), None) => Some(only),
-                _ => exact,
-            }
+/// 1. an exact id that is subscribed wins;
+/// 2. otherwise the id snaps to the **one** subscribed channel with the same
+///    float64 value ([`same_float`]) — two candidates is a refusal, not a guess.
+///
+/// Failing both, the exact id (if any) is returned as given so the caller can
+/// name it in the not-subscribed error. `None` ⇒ no usable id at all.
+fn resolve_channel_id(arg: &Value, subscribed: &[i64]) -> Option<i64> {
+    let (exact, approx) = read_channel_arg(arg);
+    if let Some(id) = exact {
+        if subscribed.contains(&id) {
+            return Some(id);
         }
-        _ => None,
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "deliberately reproducing the provider's float64 rounding"
+    )]
+    let target = approx.or_else(|| exact.map(|id| id as f64))?;
+    let mut matches = subscribed
+        .iter()
+        .copied()
+        .filter(|id| same_float(*id, target));
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => Some(only),
+        _ => exact,
     }
 }
 
@@ -78,33 +129,50 @@ pub async fn shift_focus_handler(args: &Value, ctx: &ToolContext) -> anyhow::Res
     };
 
     let subscribed = fm.subscribed_channels();
-    let Some(channel_id) = resolve_channel_id(args.get("channel_id"), &subscribed) else {
-        return Ok(error_output(
-            "missing or invalid 'channel_id' (the channel's id digits, as a string)",
-        ));
-    };
-
-    if !fm.is_subscribed(channel_id) {
-        let available: Vec<Value> = subscribed
-            .into_iter()
-            .map(|cid| json!({"channel_id": cid.to_string(), "label": fm.channel_label(cid)}))
-            .collect();
-        tracing::info!(
-            "{} rejected {} (not subscribed)",
-            ls::tag("\u{1f500} shift_focus", ls::LC),
-            ls::kv_styled("channel", &channel_id.to_string(), ls::W, ls::LW),
-        );
-        return Ok(ToolOutput::Text(
-            json!({
-                "error": format!(
-                    "channel {channel_id} is not subscribed — cannot focus there. \
-                     Pick one of available_channels."
+    let arg = args.get("channel_id").filter(|v| !v.is_null());
+    let resolved = arg.and_then(|v| resolve_channel_id(v, &subscribed));
+    let channel_id = match resolved {
+        Some(id) if fm.is_subscribed(id) => id,
+        _ => {
+            // Every refusal carries the valid ids: for a quiet channel this
+            // list is the main place the model can read one.
+            let available: Vec<Value> = subscribed
+                .into_iter()
+                .map(|cid| json!({"channel_id": cid.to_string(), "label": fm.channel_label(cid)}))
+                .collect();
+            let given = arg.map(|v| match (resolved, v) {
+                (Some(id), _) => id.to_string(),
+                (None, Value::String(s)) => ls::trunc(s, GIVEN_ID_ECHO_LIMIT),
+                (None, other) => ls::trunc(&other.to_string(), GIVEN_ID_ECHO_LIMIT),
+            });
+            tracing::info!(
+                "{} rejected {} (not subscribed)",
+                ls::tag("\u{1f500} shift_focus", ls::LC),
+                ls::kv_styled(
+                    "channel",
+                    given.as_deref().unwrap_or("<missing>"),
+                    ls::W,
+                    ls::LW
                 ),
-                "available_channels": available,
-            })
-            .to_string(),
-        ));
-    }
+            );
+            let error = given.map_or_else(
+                || {
+                    "missing 'channel_id' — pass the channel_id of one of \
+                     available_channels, as a string."
+                        .to_owned()
+                },
+                |given| {
+                    format!(
+                        "channel {given} is not subscribed — cannot focus there. \
+                         Pick one of available_channels."
+                    )
+                },
+            );
+            return Ok(ToolOutput::Text(
+                json!({ "error": error, "available_channels": available }).to_string(),
+            ));
+        }
+    };
 
     fm.shift_now(channel_id).await;
 
@@ -184,63 +252,101 @@ mod tests {
 
     const DM: i64 = 1_257_165_677_052_170_301;
     const GENERAL: i64 = 324_917_760_578_682_880;
+    /// What Gemini sent for [`DM`] and [`GENERAL`].
+    const DM_ROUNDED: i64 = 1_257_165_677_052_170_200;
+    const GENERAL_ROUNDED: i64 = 324_917_760_578_682_900;
+    /// An id whose exponent form `serde_json` parses one ULP off.
+    const OFF_BY_ULP: i64 = 1_185_233_071_271_705_465;
+
+    fn resolve(arg: &Value, subscribed: &[i64]) -> Option<i64> {
+        resolve_channel_id(arg, subscribed)
+    }
+
+    /// The model's arguments as they really arrive: raw JSON text, parsed.
+    fn parsed_arg(raw: &str) -> Value {
+        let args: Value = serde_json::from_str(raw).unwrap();
+        args["channel_id"].clone()
+    }
 
     #[test]
     fn resolve_takes_a_digit_string_exactly() {
         let subs = [DM, GENERAL];
-        let arg = json!("1257165677052170301");
-        assert_eq!(resolve_channel_id(Some(&arg), &subs), Some(DM));
-        let padded = json!(" 324917760578682880 ");
-        assert_eq!(resolve_channel_id(Some(&padded), &subs), Some(GENERAL));
-        // A string is never snapped: an unknown id stays unknown.
-        let rounded = json!("1257165677052170200");
+        assert_eq!(resolve(&json!("1257165677052170301"), &subs), Some(DM));
         assert_eq!(
-            resolve_channel_id(Some(&rounded), &subs),
-            Some(1_257_165_677_052_170_200)
+            resolve(&json!(" 324917760578682880 "), &subs),
+            Some(GENERAL)
         );
+        assert_eq!(resolve(&json!("55"), &[55, 66]), Some(55));
+    }
+
+    #[test]
+    fn resolve_finds_the_id_inside_a_mention_or_label() {
+        let subs = [DM, GENERAL];
+        assert_eq!(resolve(&json!("<#1257165677052170301>"), &subs), Some(DM));
+        assert_eq!(
+            resolve(&json!("#general2(324917760578682880)"), &subs),
+            Some(GENERAL)
+        );
+        // Two id-length runs: no way to tell which was meant.
+        let both = json!("1257165677052170301 324917760578682880");
+        assert_eq!(resolve(&both, &subs), None);
     }
 
     #[test]
     fn resolve_snaps_a_float_rounded_number_to_the_subscribed_channel() {
         let subs = [DM, GENERAL];
-        // What Gemini actually sent for the two channels above.
-        let dm = json!(1_257_165_677_052_170_200_i64);
-        assert_eq!(resolve_channel_id(Some(&dm), &subs), Some(DM));
-        let general = json!(324_917_760_578_682_900_i64);
-        assert_eq!(resolve_channel_id(Some(&general), &subs), Some(GENERAL));
-        // Float-typed numbers snap too.
-        let float = json!(1.257_165_677_052_170_2e18);
-        assert_eq!(resolve_channel_id(Some(&float), &subs), Some(DM));
+        assert_eq!(resolve(&json!(DM_ROUNDED), &subs), Some(DM));
+        assert_eq!(resolve(&json!(GENERAL_ROUNDED), &subs), Some(GENERAL));
+        // The rounded digits copied back as a string (they sit in old tool
+        // results) and a float spelled out in a string snap the same way.
+        assert_eq!(resolve(&json!("1257165677052170200"), &subs), Some(DM));
+        assert_eq!(resolve(&json!("1.2571656770521702e18"), &subs), Some(DM));
     }
 
     #[test]
-    fn resolve_keeps_exact_numbers_and_refuses_ambiguous_snaps() {
-        // Exact subscribed number wins even when a float-neighbour is subscribed.
+    fn resolve_snaps_numbers_parsed_from_raw_json_text() {
+        let subs = [DM, GENERAL];
+        let int = parsed_arg(r#"{"channel_id":1257165677052170200}"#);
+        assert_eq!(resolve(&int, &subs), Some(DM));
+        let float = parsed_arg(r#"{"channel_id":1.2571656770521702e18}"#);
+        assert_eq!(resolve(&float, &subs), Some(DM));
+        // serde_json parses this exponent form one ULP below the id's float64.
+        let float = parsed_arg(r#"{"channel_id":1.1852330712717053e18}"#);
+        assert_eq!(resolve(&float, &[OFF_BY_ULP, GENERAL]), Some(OFF_BY_ULP));
+    }
+
+    #[test]
+    fn resolve_keeps_exact_ids_and_refuses_ambiguous_snaps() {
+        // An exact subscribed id wins even when a float-neighbour is subscribed.
         let subs = [DM, DM - 1];
-        assert_eq!(resolve_channel_id(Some(&json!(DM)), &subs), Some(DM));
-        // Two subscribed ids round to the same float: no guess.
-        let rounded = json!(1_257_165_677_052_170_200_i64);
+        assert_eq!(resolve(&json!(DM), &subs), Some(DM));
+        assert_eq!(resolve(&json!("1257165677052170300"), &subs), Some(DM - 1));
+        // Two subscribed ids share the rounded float: no guess, id as given.
+        assert_eq!(resolve(&json!(DM_ROUNDED), &subs), Some(DM_ROUNDED));
         assert_eq!(
-            resolve_channel_id(Some(&rounded), &subs),
-            Some(1_257_165_677_052_170_200)
+            resolve(&json!("1.2571656770521702e18"), &subs),
+            None,
+            "an ambiguous float has no exact id to fall back on"
         );
-        // Small ids and unknown numbers pass through untouched.
-        assert_eq!(resolve_channel_id(Some(&json!(55)), &[55, 66]), Some(55));
-        assert_eq!(resolve_channel_id(Some(&json!(77)), &[55, 66]), Some(77));
+        // Small and unknown ids pass through untouched.
+        assert_eq!(resolve(&json!(55), &[55, 66]), Some(55));
+        assert_eq!(resolve(&json!(77), &[55, 66]), Some(77));
+        assert_eq!(resolve(&json!(-5), &[55, 66]), Some(-5));
     }
 
     #[test]
-    fn resolve_rejects_missing_and_non_id_values() {
+    fn resolve_rejects_values_that_hold_no_id() {
         let subs = [DM];
-        assert_eq!(resolve_channel_id(None, &subs), None);
         for bad in [
             json!(null),
             json!(true),
             json!("general"),
+            json!("#general2"),
             json!(""),
             json!([DM]),
+            json!(u64::MAX),
         ] {
-            assert_eq!(resolve_channel_id(Some(&bad), &subs), None, "{bad}");
+            assert_eq!(resolve(&bad, &subs), None, "{bad}");
         }
     }
 }
