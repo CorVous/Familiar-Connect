@@ -655,7 +655,8 @@ typing_backoff_max_s     = 30.0
 #
 # unread_nudge_enabled: when true, an unfocused-channel arrival nudges
 # the model so unreads surface promptly (the nudge never moves focus —
-# only the model's shift_focus tool does); false disables it.
+# only the model's shift_focus tool does); false disables it, and also
+# stops the idle nudge from pointing at channels with messages waiting.
 # nudge_debounce_seconds: rapid arrivals within this window share one
 # nudge.
 # catch_up_limit: how many staged turns she actually catches up on when
