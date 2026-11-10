@@ -139,6 +139,7 @@ fn strip_leaked_tool_calls(content: &str) -> (String, bool) {
         }
         Some(LeadingLeak::CallSilent) => (String::new(), true),
         Some(LeadingLeak::CallTool) => (String::new(), false),
+        Some(LeadingLeak::ApiCall { silent }) => (String::new(), silent),
         None => (content.to_owned(), false),
     }
 }
@@ -701,6 +702,28 @@ mod tests {
     fn leak_call_silent_case_insensitive() {
         let (cleaned, silent) = strip_leaked_tool_calls("Silent(reasoning=\"x\")");
         assert!(silent);
+        assert!(cleaned.is_empty());
+    }
+
+    /// Gemini's text form of a call it failed to emit (posted verbatim before
+    /// this guard knew the shape).
+    #[test]
+    fn leak_api_call_silent_is_silent() {
+        let leak = "CALL:default_api:silent{reasoning:The porch bit has already run for many \
+                    turns; Ceri didn't ask a question, so I will let the bit rest.}";
+        let (cleaned, silent) = strip_leaked_tool_calls(leak);
+        assert!(silent);
+        assert!(cleaned.is_empty());
+        let (cleaned, silent) = strip_leaked_tool_calls(" callable:default_api:silent{reasoning:x");
+        assert!(silent);
+        assert!(cleaned.is_empty());
+    }
+
+    #[test]
+    fn leak_api_call_other_tool_stripped_not_silent() {
+        let (cleaned, silent) =
+            strip_leaked_tool_calls("CALL:default_api:shift_focus{channel_id:\"42\"}");
+        assert!(!silent);
         assert!(cleaned.is_empty());
     }
 

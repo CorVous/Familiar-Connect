@@ -125,7 +125,10 @@ Locations verified against the current tree. Paths are under
    `Suppress` on a leaked tool-call prefix (`classify_leading_leak`), logged
    `decision=leaked_tool_suppressed`, and `Silent` on a leaked `silent(` call,
    logged `decision=silent`. *Prevents:* speaking / posting a leaked
-   `<invoke>` / `silent(` / `<tool_call>` block. The agentic loop's finished
+   `<invoke>` / `silent(` / `<tool_call>` block, or the
+   `CALL:default_api:<tool>{…}` / `callable:…` text Gemini returns when it
+   fails to emit a structured call (silent when it names `silent`, suppressed
+   otherwise). The agentic loop's finished
    reply is covered as well by the return-time strip guard in `tools::agentic`.
    There is no text sentinel for silence: `<silent>` in model output is ordinary
    prose.

@@ -240,6 +240,43 @@ async fn call_style_leaked_silent_case_insensitive() {
     assert!(result.final_content.is_empty());
 }
 
+/// Gemini's text form of a `silent` call it failed to emit as a structured
+/// one: the turn goes silent and none of the text is delivered.
+#[tokio::test]
+async fn api_call_text_leaked_silent_becomes_silent() {
+    for leak in [
+        "CALL:default_api:silent{reasoning:The bit has already run for many turns; nobody \
+         asked a question here, so I will let it rest.}",
+        " callable:default_api:silent{reasoning:they are reacting to their own username",
+    ] {
+        let mut msgs = vec![user("hi")];
+        let result = run(
+            vec![vec![delta_text(leak), delta_finish("stop")]],
+            &ToolRegistry::new(),
+            &mut msgs,
+        )
+        .await;
+        assert!(result.is_silent, "{leak}");
+        assert!(result.final_content.is_empty(), "{leak}");
+    }
+}
+
+#[tokio::test]
+async fn api_call_text_leaked_tool_stripped_not_silent() {
+    let mut msgs = vec![user("hi")];
+    let result = run(
+        vec![vec![
+            delta_text("CALL:default_api:shift_focus{channel_id:\"42\"}"),
+            delta_finish("stop"),
+        ]],
+        &ToolRegistry::new(),
+        &mut msgs,
+    )
+    .await;
+    assert!(!result.is_silent);
+    assert!(result.final_content.is_empty());
+}
+
 #[tokio::test]
 async fn call_style_leaked_read_channel_stripped_not_silent() {
     let mut msgs = vec![user("hi")];

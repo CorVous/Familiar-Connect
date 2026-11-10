@@ -1,8 +1,8 @@
 //! Leaked-tool-call detection for LLM reply streams (subsystem 06).
 //!
 //! Models occasionally emit a tool call as plain assistant *text*
-//! (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`) instead of
-//! calling it. [`StreamGate`] catches that *mid-stream* — before the raw XML
+//! (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`,
+//! `CALL:default_api:silent{…}`) instead of calling it. [`StreamGate`] catches that *mid-stream* — before the raw XML
 //! reaches Discord or TTS (issue #109) — staying pending while the leading text
 //! could still complete a leak token, and latching *speak* once every one is
 //! ruled out. The confirmed-leak classification ([`classify_leading_leak`]) is
@@ -33,6 +33,17 @@ static CALL_SILENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*silent\s*\(").expect("valid regex"));
 static CALL_TOOL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*(read_channel|shift_focus)\s*\(").expect("valid regex"));
+/// Gemini's text rendering of a function call it failed to emit as one:
+/// `CALL:default_api:silent{…}` / `callable:default_api:silent{…}`. Captures
+/// the tool name.
+static API_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*call(?:able)?:\s*\w+:(\w+)\s*[{(]").expect("valid regex")
+});
+/// A lowercased prefix that could still grow into an [`API_CALL_RE`] match:
+/// past the `call:` / `callable:` keyword, inside the namespace or tool name,
+/// with no opening brace yet.
+static API_CALL_PREFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^call(?:able)?:\s*\w*(?::\w*\s*)?$").expect("valid regex"));
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
 
@@ -58,6 +69,10 @@ pub(crate) enum LeadingLeak {
     CallSilent,
     /// A leaked function-call-style `read_channel(…)` / `shift_focus(…)` string.
     CallTool,
+    /// A leaked `CALL:<namespace>:<tool>{…}` string — the text form Gemini
+    /// falls back to when it fails to emit a structured call. `silent` is true
+    /// when it names the `silent` tool.
+    ApiCall { silent: bool },
 }
 
 /// Classify a leaked tool call that *leads* `content`; `None` when `content`
@@ -74,7 +89,9 @@ pub(crate) fn classify_leading_leak(content: &str) -> Option<LeadingLeak> {
     } else if CALL_TOOL_RE.is_match(content) {
         Some(LeadingLeak::CallTool)
     } else {
-        None
+        API_CALL_RE.captures(content).map(|c| LeadingLeak::ApiCall {
+            silent: c[1].eq_ignore_ascii_case("silent"),
+        })
     }
 }
 
@@ -146,12 +163,12 @@ impl StreamGate {
         // persisted turn), so an as-yet-unnamed invoke latches suppress.
         if let Some(leak) = classify_leading_leak(stripped) {
             let decision = match leak {
-                LeadingLeak::Invoke { silent: true } | LeadingLeak::CallSilent => {
-                    StreamDecision::Silent
-                }
-                LeadingLeak::Invoke { silent: false } | LeadingLeak::CallTool => {
-                    StreamDecision::Suppress
-                }
+                LeadingLeak::Invoke { silent: true }
+                | LeadingLeak::ApiCall { silent: true }
+                | LeadingLeak::CallSilent => StreamDecision::Silent,
+                LeadingLeak::Invoke { silent: false }
+                | LeadingLeak::ApiCall { silent: false }
+                | LeadingLeak::CallTool => StreamDecision::Suppress,
             };
             return self.latch(decision);
         }
@@ -199,12 +216,21 @@ fn local_name_possible(after: &str, local: &str) -> bool {
     is_xml_name(after)
 }
 
-/// Call-style prefixes: `silent(`, `read_channel(`, `shift_focus(`.
+/// Call-style prefixes: `silent(`, `read_channel(`, `shift_focus(`, and the
+/// `call:<namespace>:<tool>{` / `callable:…` form.
 fn call_prefix_possible(stripped: &str) -> bool {
     let lc = stripped.to_ascii_lowercase();
     ["silent", "read_channel", "shift_focus"]
         .iter()
         .any(|name| call_name_possible(&lc, name))
+        || api_call_prefix_possible(&lc)
+}
+
+/// Whether the lowercased `lc` could still complete `call:<namespace>:<tool>{`
+/// or its `callable:` spelling: still typing the keyword, or past it and inside
+/// the namespace or tool name.
+fn api_call_prefix_possible(lc: &str) -> bool {
+    "callable:".starts_with(lc) || API_CALL_PREFIX_RE.is_match(lc)
 }
 
 /// Whether the lowercased `lc` could still complete `name` (optionally followed
@@ -280,6 +306,30 @@ mod tests {
         assert_eq!(classify_leading_leak("Let me invoke my wit."), None);
     }
 
+    /// The two text forms Gemini has produced in place of a structured call.
+    #[test]
+    fn classify_api_call_text_forms() {
+        assert_eq!(
+            classify_leading_leak("CALL:default_api:silent{reasoning:the bit can rest.}"),
+            Some(LeadingLeak::ApiCall { silent: true })
+        );
+        assert_eq!(
+            classify_leading_leak(" callable:default_api:silent{reasoning:x"),
+            Some(LeadingLeak::ApiCall { silent: true })
+        );
+        assert_eq!(
+            classify_leading_leak("call:default_api:shift_focus{channel_id:\"42\"}"),
+            Some(LeadingLeak::ApiCall { silent: false })
+        );
+        // Only a leading call counts, and only with the namespaced shape.
+        assert_eq!(
+            classify_leading_leak("She wrote CALL:default_api:silent{x} again."),
+            None
+        );
+        assert_eq!(classify_leading_leak("Call: me later {maybe}"), None);
+        assert_eq!(classify_leading_leak("Callable: yes, any time."), None);
+    }
+
     // -- StreamGate ----------------------------------------------------------
 
     #[test]
@@ -322,6 +372,60 @@ mod tests {
             gate_run(&["read_channel(limit=10)"]),
             StreamDecision::Suppress
         );
+    }
+
+    #[test]
+    fn gate_leaked_api_call_silent_is_silent() {
+        assert_eq!(
+            gate_run(&["CALL:default_api:silent{reasoning:the bit can rest.}"]),
+            StreamDecision::Silent
+        );
+        assert_eq!(
+            gate_run(&[" call", "able:default", "_api:sil", "ent{reasoning:x"]),
+            StreamDecision::Silent
+        );
+    }
+
+    #[test]
+    fn gate_leaked_api_call_tool_suppresses() {
+        assert_eq!(
+            gate_run(&["CALL:default_api:shift_focus{channel_id:\"42\"}"]),
+            StreamDecision::Suppress
+        );
+    }
+
+    #[test]
+    fn gate_char_by_char_leaked_api_call_never_speaks() {
+        for leak in [
+            "CALL:default_api:silent{reasoning: the bit can rest}",
+            "callable:default_api:silent{reasoning: the bit can rest}",
+        ] {
+            let mut g = StreamGate::new();
+            let mut decided = StreamDecision::Pending;
+            for c in leak.chars() {
+                let d = g.feed(&c.to_string());
+                assert_ne!(d, StreamDecision::Speak, "opened on prefix of {leak}");
+                decided = d;
+            }
+            assert_eq!(decided, StreamDecision::Silent);
+        }
+    }
+
+    #[test]
+    fn gate_call_led_prose_speaks() {
+        assert_eq!(
+            gate_run(&["Call me when the kettle is on."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(
+            gate_run(&["Callable at any hour, that one."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(
+            gate_run(&["Call: the harpy answers, eventually."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(gate_run(&["Calm down."]), StreamDecision::Speak);
     }
 
     #[test]
