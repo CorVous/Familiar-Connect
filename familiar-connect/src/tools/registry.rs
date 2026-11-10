@@ -325,15 +325,19 @@ impl ToolContext {
         self
     }
 
+    /// The channel `shift_focus` has moved this turn to so far, if it has.
+    #[must_use]
+    pub fn shifted_to(&self) -> Option<i64> {
+        self.shift_target
+            .as_ref()
+            .and_then(|cell| *cell.lock().expect("shift target mutex"))
+    }
+
     /// The channels this turn spans: the one it was triggered from, then the one
     /// `shift_focus` moved it to when that happened and differs.
     #[must_use]
     pub fn turn_channel_ids(&self) -> Vec<i64> {
-        let shifted = self
-            .shift_target
-            .as_ref()
-            .and_then(|cell| *cell.lock().expect("shift target mutex"));
-        match shifted {
+        match self.shifted_to() {
             Some(id) if id != self.channel_id => vec![self.channel_id, id],
             _ => vec![self.channel_id],
         }
@@ -418,6 +422,12 @@ pub const SILENT_ARG: &str = "silent";
 const SILENT_ARG_DESCRIPTION: &str = "Silence is the default: calling this tool \
      sends no reply this turn. Pass false to also say something this turn.";
 
+/// Model-facing wording for [`SILENT_ARG`] on a look-first tool
+/// ([`Tool::look_first`]), where the default is the other way round.
+const LOOK_FIRST_SILENT_ARG_DESCRIPTION: &str = "This tool shows you something \
+     before you decide: after its result you can reply in the same turn, or call \
+     silent() to say nothing. Pass true to stay quiet whatever follows.";
+
 /// Inject [`SILENT_ARG`] into a tool's `parameters` schema.
 ///
 /// [`Tool::new`] applies it, so a new tool cannot forget the flag. Never
@@ -425,7 +435,12 @@ const SILENT_ARG_DESCRIPTION: &str = "Silence is the default: calling this tool 
 /// `properties` is not an object) passes through untouched; nothing shipped
 /// builds one.
 #[must_use]
-pub fn with_silent_flag(mut parameters: Value) -> Value {
+pub fn with_silent_flag(parameters: Value) -> Value {
+    set_silent_flag(parameters, true, SILENT_ARG_DESCRIPTION)
+}
+
+/// Write the [`SILENT_ARG`] property with the given default and wording.
+fn set_silent_flag(mut parameters: Value, default: bool, description: &str) -> Value {
     if let Some(obj) = parameters.as_object_mut()
         && let Some(props) = obj
             .entry("properties")
@@ -436,8 +451,8 @@ pub fn with_silent_flag(mut parameters: Value) -> Value {
             SILENT_ARG.to_owned(),
             json!({
                 "type": "boolean",
-                "default": true,
-                "description": SILENT_ARG_DESCRIPTION,
+                "default": default,
+                "description": description,
             }),
         );
     }
@@ -450,6 +465,13 @@ pub fn with_silent_flag(mut parameters: Value) -> Value {
 #[must_use]
 pub fn opts_into_speech(args: &Value) -> bool {
     args.get(SILENT_ARG).and_then(Value::as_bool) == Some(false)
+}
+
+/// Whether decoded tool `args` carry an explicit `silent: true` — the only way
+/// a look-first tool ([`Tool::look_first`]) silences the turn.
+#[must_use]
+pub fn asks_for_silence(args: &Value) -> bool {
+    args.get(SILENT_ARG).and_then(Value::as_bool) == Some(true)
 }
 
 /// One callable tool exposed to the model.
@@ -465,6 +487,9 @@ pub struct Tool {
     pub handler: Arc<dyn ToolHandler>,
     /// Per-call wall-clock cap (seconds); default `10.0`.
     pub timeout_s: f64,
+    /// The tool exists to show the model something before it decides whether to
+    /// speak, so calling it does not silence the turn. See [`Tool::look_first`].
+    pub look_first: bool,
 }
 
 impl Tool {
@@ -483,7 +508,27 @@ impl Tool {
             parameters: with_silent_flag(parameters),
             handler,
             timeout_s: 10.0,
+            look_first: false,
         }
+    }
+
+    /// Builder: mark the tool **look-first**.
+    ///
+    /// Any other tool call silences the turn unless it passes `silent: false`,
+    /// so a model that only acts never has to invent a reply. A look-first tool
+    /// (`shift_focus`, `read_channel`, `view_image`) is the opposite case: its
+    /// result is what the model needs to see *before* it can know whether to
+    /// answer, and the opt-in would have to be given blind. So calling it leaves
+    /// the turn free to speak — text written after the result is the reply, and
+    /// `silent()` (or writing nothing) stays quiet. An explicit `silent: true`
+    /// on the call still silences the turn. The injected [`SILENT_ARG`] wording
+    /// and default are flipped to match.
+    #[must_use]
+    pub fn look_first(mut self) -> Self {
+        self.look_first = true;
+        self.parameters =
+            set_silent_flag(self.parameters, false, LOOK_FIRST_SILENT_ARG_DESCRIPTION);
+        self
     }
 
     /// Builder: override the timeout (seconds).
@@ -672,6 +717,30 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Pass false")
         );
+    }
+
+    #[test]
+    fn look_first_flips_the_silent_flag_default_and_wording() {
+        let tool = make_tool("peek").look_first();
+        assert!(tool.look_first);
+        assert!(!make_tool("echo").look_first);
+        let flag = &tool.parameters["properties"]["silent"];
+        assert_eq!(flag["type"], "boolean");
+        assert_eq!(flag["default"], json!(false));
+        let description = flag["description"].as_str().unwrap_or_default();
+        assert!(description.contains("Pass true"), "{description}");
+        assert!(
+            description.contains("reply in the same turn"),
+            "{description}"
+        );
+    }
+
+    #[test]
+    fn asks_for_silence_only_on_explicit_true() {
+        assert!(asks_for_silence(&json!({"silent": true})));
+        assert!(!asks_for_silence(&json!({"silent": false})));
+        assert!(!asks_for_silence(&json!({})));
+        assert!(!asks_for_silence(&json!({"silent": "true"})));
     }
 
     #[test]

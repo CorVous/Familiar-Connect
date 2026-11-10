@@ -22,9 +22,13 @@ pub use crate::tools::shift_focus::build_shift_focus_tool;
 pub use crate::tools::silent::build_silent_tool;
 pub use crate::tools::start_activity::build_start_activity_tool;
 
-/// Voice-tier registry: `set_alarm` + `cancel_alarm` + `silent`; `shift_focus`
-/// when a focus manager is present. `view_image` / `read_channel` /
-/// `start_activity` are never in the voice registry.
+/// Voice-tier registry.
+///
+/// `set_alarm` + `cancel_alarm` + `silent`; `shift_focus` when a focus manager
+/// is present. `view_image` / `read_channel` / `start_activity` are never in
+/// the voice registry. No tool is look-first here: the voice path speaks
+/// sentence by sentence as text streams, and keeps its own "a tool call means
+/// silence" latch.
 #[must_use]
 pub fn build_voice_registry(scheduler: &AlarmScheduler, with_focus_manager: bool) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
@@ -48,7 +52,9 @@ pub fn build_voice_registry(scheduler: &AlarmScheduler, with_focus_manager: bool
 /// `set_alarm` + `cancel_alarm` + `silent`; plus `view_image` (when
 /// `image_tools`, gated by `image_url_policy`), `shift_focus` + `read_channel`
 /// (when a focus manager is present), and `start_activity` (when an activity
-/// engine is provided, with its config-sourced description).
+/// engine is provided, with its config-sourced description). The three tools
+/// that show her something — `view_image`, `shift_focus`, `read_channel` — are
+/// [`Tool::look_first`]: a reply written after their result is posted.
 #[must_use]
 pub fn build_text_registry(
     scheduler: &AlarmScheduler,
@@ -70,22 +76,27 @@ pub fn build_text_registry(
     if image_tools {
         #[cfg(feature = "images")]
         registry
-            .register(crate::tools::image::build_view_image_tool(
-                describe_constraints,
-                Arc::new(crate::tools::image_policy::UrlGuard::production(
-                    image_url_policy.clone(),
-                )),
-            ))
+            .register(
+                crate::tools::image::build_view_image_tool(
+                    describe_constraints,
+                    Arc::new(crate::tools::image_policy::UrlGuard::production(
+                        image_url_policy.clone(),
+                    )),
+                )
+                .look_first(),
+            )
             .expect("unique tool");
         #[cfg(not(feature = "images"))]
         let _ = (describe_constraints, image_url_policy);
     }
     if with_focus_manager {
+        // Look-first in text: she reads the channel, then decides whether to
+        // reply. Voice keeps `shift_focus` silent-by-default (see above).
         registry
-            .register(build_shift_focus_tool())
+            .register(build_shift_focus_tool().look_first())
             .expect("unique tool");
         registry
-            .register(build_read_channel_tool())
+            .register(build_read_channel_tool().look_first())
             .expect("unique tool");
     }
     // text-only by design — absence while voice-connected is refused by the engine
@@ -249,8 +260,39 @@ mod tests {
         assert_eq!(tool.description, "POLICY_MARKER");
     }
 
-    /// Every shipped tool carries the shared `silent` flag, defaulting true —
-    /// the whole registry, so a new tool cannot ship without it.
+    /// Look-first is a text-tier property of exactly the tools whose result
+    /// she has to read before deciding whether to answer.
+    #[test]
+    fn only_the_text_tools_that_show_something_are_look_first() {
+        let look_first = |reg: &ToolRegistry| -> BTreeSet<String> {
+            reg.tools()
+                .filter(|t| t.look_first)
+                .map(|t| t.name.clone())
+                .collect()
+        };
+        let text = build_text_registry(
+            &scheduler(),
+            true,
+            "be brief",
+            &policy(),
+            true,
+            Some(Arc::new(FakeEngine)),
+            "go outside",
+        );
+        let mut expected: BTreeSet<String> = ["read_channel", "shift_focus"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if cfg!(feature = "images") {
+            expected.insert("view_image".to_owned());
+        }
+        assert_eq!(look_first(&text), expected);
+        // Voice speaks as it streams and keeps every tool silent by default.
+        assert!(look_first(&build_voice_registry(&scheduler(), true)).is_empty());
+    }
+
+    /// Every shipped tool carries the shared `silent` flag — the whole
+    /// registry, so a new tool cannot ship without it.
     #[test]
     fn every_tool_carries_the_silent_flag() {
         let registries = [
@@ -269,7 +311,9 @@ mod tests {
             for tool in reg.tools() {
                 let flag = &tool.parameters["properties"]["silent"];
                 assert_eq!(flag["type"], "boolean", "{}", tool.name);
-                assert_eq!(flag["default"], json!(true), "{}", tool.name);
+                // Silent by default — except a look-first tool, whose result
+                // she reads before deciding.
+                assert_eq!(flag["default"], json!(!tool.look_first), "{}", tool.name);
                 let required = tool.parameters["required"].as_array();
                 assert!(
                     !required.is_some_and(|r| r.iter().any(|v| v == "silent")),

@@ -130,9 +130,11 @@ Locations verified against the current tree. Paths are under
    There is no text sentinel for silence: `<silent>` in model output is ordinary
    prose.
 8. **Turn silence gate** — `reply_gate`, predicate veto. `tools::agentic`
-   suppresses the reply of any turn that called a tool without passing
+   suppresses the reply of any turn that called an acting tool without passing
    `silent: false` on at least one call (`AgenticResult::is_silent`); the
-   `silent` tool is the explicit no-op. Tool calls are still persisted — only
+   `silent` tool is the explicit no-op. Look-first tools (`shift_focus`,
+   `read_channel`, `view_image` in the text tier) do not trip the gate unless
+   called with `silent: true`. Tool calls are still persisted — only
    the `silent` call and its private reasoning are withheld. *Prevents:* the
    familiar narrating every tool use, and (historically) a `shift_focus` that
    committed globally but left no trace in history.

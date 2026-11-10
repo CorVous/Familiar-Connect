@@ -250,7 +250,7 @@ longer needed.
   judge multi-party flow.
 - **Silence** — already wired (see
   [multi-party addressivity](context-pipeline.md#multi-party-addressivity)).
-  Every tool call is silent unless it passes `silent: false`, and
+  A tool call that acts is silent unless it passes `silent: false`, and
   `silent(reasoning)` is the explicit no-op. Don't override the
   character prompt's silence instruction.
 
@@ -698,7 +698,7 @@ only) `read_channel` plus `start_activity` (the latter only when the
 [activities catalog](activities.md#configuration) is non-empty).
 
 **Default `true`, and `false` is refused at config load.** Silence is a
-tool call now — every call is silent unless it passes `silent: false`,
+tool call now — a call that acts is silent unless it passes `silent: false`,
 and `silent(reasoning)` is how the familiar declines to reply at all —
 so a slot without tool calling could never stay quiet. Writing
 `tool_calling = false` fails the load with:
@@ -718,10 +718,13 @@ OpenRouter metadata — a model whose `supported_parameters` lack `tools`
 is now a hard mismatch with only one fix, picking a different model. See
 [Startup model diagnostics](configuration-model.md#startup-model-diagnostics).
 
-**Every call is silent by default.** Each tool's schema carries a shared
-`silent` boolean defaulting to `true`, injected by `Tool::new` so a new
-tool cannot forget it. The model passes `silent: false` on a call when it
-also means to speak that turn; the opt-in latches for the whole turn.
+**A call that acts is silent by default.** Each tool's schema carries a
+shared `silent` boolean defaulting to `true`, injected by `Tool::new` so a
+new tool cannot forget it. The model passes `silent: false` on a call when
+it also means to speak that turn; the opt-in latches for the whole turn.
+The text tier's look-first tools (`shift_focus`, `read_channel`,
+`view_image`) default the flag to `false` instead: she reads the result,
+then replies or calls `silent()`.
 
 The loop's per-turn iteration cap (model call → tool execution →
 re-call) is `[tools].loop_max_iterations` (default `5`, shared by

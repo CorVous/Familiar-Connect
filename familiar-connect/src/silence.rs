@@ -12,7 +12,7 @@
 //! Prefix-only: a stray `silent(` mid-reply is content, not a gate.
 //!
 //! There is no text sentinel for silence. A turn goes quiet by calling a tool
-//! (every call is silent unless it passes `silent: false`); `<silent>` in model
+//! (a call that acts is silent unless it passes `silent: false`); `<silent>` in model
 //! output is ordinary prose.
 
 use std::sync::LazyLock;

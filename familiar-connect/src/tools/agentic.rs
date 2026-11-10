@@ -8,10 +8,22 @@
 //! plain text (they would otherwise ship to the user / seed a mimicry cascade);
 //! a leaked `silent` call is honoured as silence.
 //!
-//! **Silence is the default of any tool call.** A turn that called a tool is
-//! silent unless some call passed `silent: false` ([`calls_opt_into_speech`]) —
-//! the model declares "and say something" the same way it declares any other
-//! argument, so a model that only calls tools never has to invent a reply.
+//! **Silence is the default of a tool call that acts.** A turn that called such
+//! a tool is silent unless some call passed `silent: false`
+//! ([`calls_opt_into_speech`]) — the model declares "and say something" the same
+//! way it declares any other argument, so a model that only calls tools never
+//! has to invent a reply.
+//!
+//! **A look-first tool is the exception** ([`Tool::look_first`]: `shift_focus`,
+//! `read_channel`, `view_image` in the text registry). Its result is what the
+//! model must see before it can know whether to answer, so the opt-in would
+//! have to be given blind — and a reply written after the look was thrown
+//! away. Calling one does not silence the turn ([`calls_default_to_silence`]):
+//! text after the result is the reply; `silent()`, an explicit `silent: true`,
+//! or writing nothing stays quiet. Text written in the *same* message as a
+//! look-first call was said before the look, so it is returned separately
+//! ([`AgenticResult::earlier`]) with the channel the turn stood in then — a
+//! remark made before `shift_focus` belongs to the channel being left.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -25,7 +37,9 @@ use serde_json::{Value, json};
 use crate::llm::{Content, LlmClient, LlmDelta, Message};
 use crate::log_style as ls;
 use crate::silence::{LeadingLeak, classify_leading_leak};
-use crate::tools::registry::{Tool, ToolContext, ToolOutput, ToolRegistry, opts_into_speech};
+use crate::tools::registry::{
+    Tool, ToolContext, ToolOutput, ToolRegistry, asks_for_silence, opts_into_speech,
+};
 use crate::tools::silent::SILENT_RESULT;
 
 // Re-exported here so callers can reach it from the `tools::agentic` path.
@@ -34,9 +48,25 @@ pub use crate::tools::registry::serialize_image_result;
 /// Library-default iteration cap.
 pub const DEFAULT_MAX_ITERATIONS: usize = 5;
 
+/// Text the model wrote in the same message as a look-first call — said
+/// *before* it looked, so it belongs to wherever the turn stood at that moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EarlierText {
+    /// The text (leak-guarded, non-blank).
+    pub text: String,
+    /// The channel `shift_focus` had already moved this turn to when the text
+    /// was written; `None` while the turn is still where it was triggered.
+    pub shifted_to: Option<i64>,
+}
+
 /// Outcome of an [`agentic_loop`] run.
 #[derive(Debug, Clone)]
 pub struct AgenticResult {
+    /// Text written ahead of look-first calls, oldest first. Chronologically it
+    /// precedes [`final_content`](Self::final_content), and it stands whatever
+    /// the turn did afterwards — [`is_silent`](Self::is_silent) speaks only for
+    /// the final text.
+    pub earlier: Vec<EarlierText>,
     /// Final assistant text (leak-guarded).
     pub final_content: String,
     /// Iterations run.
@@ -45,8 +75,9 @@ pub struct AgenticResult {
     pub tool_calls_made: usize,
     /// The full transcript (a snapshot of `messages` at return).
     pub transcript: Vec<Message>,
-    /// Set when the turn stays quiet: a `silent` tool (or leaked `silent`
-    /// call), or any tool call at all with no `silent: false` opt-in.
+    /// Set when the final text stays unsaid: a `silent` tool (or leaked `silent`
+    /// call), or a silencing tool call ([`calls_default_to_silence`]) with no
+    /// `silent: false` opt-in.
     pub is_silent: bool,
 }
 
@@ -155,14 +186,36 @@ pub fn tool_content_as_text(content: &Content) -> String {
 /// silence is the default and stays it.
 #[must_use]
 pub fn calls_opt_into_speech(tool_calls: &[Value]) -> bool {
+    tool_calls
+        .iter()
+        .any(|tc| call_args(tc).as_ref().is_some_and(opts_into_speech))
+}
+
+/// Whether any call in `tool_calls` makes the turn silent by default.
+///
+/// Every call does, except one to a look-first tool ([`Tool::look_first`]) —
+/// and even that one does when it carries an explicit `silent: true`. A name
+/// the registry does not know is not look-first.
+#[must_use]
+pub fn calls_default_to_silence(tool_calls: &[Value], registry: &ToolRegistry) -> bool {
     tool_calls.iter().any(|tc| {
-        tc.get("function")
-            .and_then(|f| f.get("arguments"))
+        let look_first = tc
+            .get("function")
+            .and_then(|f| f.get("name"))
             .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .as_ref()
-            .is_some_and(opts_into_speech)
+            .and_then(|name| registry.get(name))
+            .is_some_and(|tool| tool.look_first);
+        !look_first || call_args(tc).as_ref().is_some_and(asks_for_silence)
     })
+}
+
+/// A wire-shape tool call's arguments, decoded (`None` when not valid JSON).
+fn call_args(tool_call: &Value) -> Option<Value> {
+    tool_call
+        .get("function")
+        .and_then(|f| f.get("arguments"))
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +423,12 @@ pub async fn agentic_loop(
     let mut last_content = String::new();
     let mut iterations = 0usize;
     let mut tool_calls_made = 0usize;
-    // Silence bookkeeping: any call at all silences the turn; one `silent:
-    // false` anywhere in it opts back into speech, and the opt-in latches.
-    let mut any_tool_call = false;
+    // Silence bookkeeping: a call silences the turn (look-first tools aside —
+    // see `calls_default_to_silence`); one `silent: false` anywhere in it opts
+    // back into speech, and the opt-in latches.
+    let mut silenced_by_call = false;
     let mut speak_opt_in = false;
+    let mut earlier: Vec<EarlierText> = Vec::new();
 
     while iterations < max_iterations {
         iterations += 1;
@@ -412,7 +467,20 @@ pub async fn agentic_loop(
         messages.push(assistant_msg.clone());
 
         if !tool_calls.is_empty() {
-            any_tool_call = true;
+            let silencing = calls_default_to_silence(&tool_calls, registry);
+            if !silencing {
+                // Look-first calls only: what she wrote alongside them was said
+                // before the look. Captured now, ahead of the handlers, so a
+                // `shift_focus` in this very message has not moved it yet.
+                let (said, silent_leak) = strip_leaked_tool_calls(&strip_think_artifacts(&content));
+                if !silent_leak && !said.trim().is_empty() {
+                    earlier.push(EarlierText {
+                        text: said,
+                        shifted_to: ctx.shifted_to(),
+                    });
+                }
+            }
+            silenced_by_call |= silencing;
             speak_opt_in |= calls_opt_into_speech(&tool_calls);
             if let Some(h) = hooks {
                 h.on_before_tools(&assistant_msg).await;
@@ -463,6 +531,7 @@ pub async fn agentic_loop(
                 }
             }
             return Ok(AgenticResult {
+                earlier,
                 final_content: String::new(),
                 iterations,
                 tool_calls_made,
@@ -506,8 +575,9 @@ pub async fn agentic_loop(
             ls::kv_styled("silent", &silent_leak.to_string(), ls::W, ls::LY),
         );
     }
-    let is_silent = (silent_leak && cleaned.is_empty()) || (any_tool_call && !speak_opt_in);
+    let is_silent = (silent_leak && cleaned.is_empty()) || (silenced_by_call && !speak_opt_in);
     Ok(AgenticResult {
+        earlier,
         // `is_silent` implies empty content, so a caller cannot speak by
         // reading the text and forgetting the flag.
         final_content: if is_silent { String::new() } else { cleaned },

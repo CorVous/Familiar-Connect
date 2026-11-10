@@ -839,8 +839,8 @@ When a `FocusManager` is wired, the block also carries a prose
 
 > Your attention is currently on #general. There is a new message in
 > #other-channel (id 456) — use shift_focus if one pulls your
-> attention: it moves you there quietly, or pass silent: false to
-> arrive and speak.
+> attention: it moves you there and shows you the channel, and what
+> you write next is your reply there. Call silent() to simply read.
 
 The focus clause names the active channel; the unread clause lists
 channels with staged (unconsumed) turns and nudges toward the
@@ -863,12 +863,15 @@ sees the plain `There is a new message in #other-channel (id 456).`
 instead: coaching a model toward a tool it has no way to call only
 invites it to type the call out as prose (issue #221).
 
-The shipped wording names both ways to use the tool. Since every tool
-call defaults to `silent: true`, a bare `shift_focus` is "move and say
-nothing" — strictly `silent` plus a side effect — so a model told only
-to "use shift_focus if it pulls your attention" reaches for the plainly
-described `silent` every time and never shifts. Spelling out the quiet
-move *and* the `silent: false` opt-in makes the choice legible.
+The shipped wording describes the tool the way the text tier runs it.
+`shift_focus` is **look-first** there (see
+[tools](overview.md#tools)): the call moves her and returns the channel,
+and whatever she writes after that result is posted to it, with no
+`silent: false` needed. The earlier wording ("it moves you there
+quietly, or pass silent: false to arrive and speak") asked for that
+opt-in before she had seen the channel; a model that switched first
+and wrote its reply second had the reply dropped. `silent()` after the
+look is the "just read" path.
 
 Both responders also append a *second* copy of the same block as a
 trailing `system` message, after recent history, with
@@ -1030,8 +1033,9 @@ turn for me?" without a separate gating LLM call:
    between humans. The `#channel_id` disambiguates source once the
    cross-channel window mixes multiple channels.
 2. **Silence as a tool call.** When the latest message isn't for it, the
-   model calls a tool instead of writing a reply. Every tool call is
-   silent unless it passes `silent: false`, and `silent(reasoning)` is
+   model calls a tool instead of writing a reply. A tool call that acts is
+   silent unless it passes `silent: false` (look-first tools leave the
+   reply open — see [tools](overview.md#tools)), and `silent(reasoning)` is
    the explicit "do nothing, say nothing" case: it returns a sentinel
    that makes `agentic_loop` return `AgenticResult(is_silent=true)`
    without re-prompting, and the responder skips Discord posting / TTS
@@ -1130,7 +1134,11 @@ Shifts are **model-decided and applied immediately**:
    (presence). Because the move is immediate, any reply later in the
    same turn posts to the **new** channel (the reply routes to the
    channel this turn's own shift moved to, recorded turn-locally —
-   never the global focus read at send time), and a turn that goes
+   never the global focus read at send time), while text she wrote
+   *beside* the `shift_focus` call posts first, to the channel she is
+   leaving (each part goes where the turn stood when it was written).
+   In the text tier the call is look-first, so that later reply needs
+   no `silent: false`. A turn that goes
    **silent** still leaves her
    where she went — there is no deferred state to leak into a later turn.
    (Earlier designs deferred the shift to `end_turn`; an uncommitted
@@ -1319,13 +1327,20 @@ Discord text on channel C
       (shift_focus, if called, already moved focus + promoted staged, and is
        recorded turn-locally as this turn's send target; its call is persisted
        even when the turn is silent)
-      if the turn is silent (any tool call without `silent: false`, the
-       `silent` tool, or a leaked `silent(` call): bail (no send, no
-       assistant prose turn)
-      if wake turn AND no shift this turn: suppress (shift-or-silent, #170)
-      else: BotHandle.send_text(this turn's shift target, else channel C, reply)
-            append assistant turn to that same channel  (never the global focus
-            read at send time — #170's cross-channel misroute)
+      text written beside a look-first call (shift_focus / read_channel /
+       view_image) is kept as earlier text, tagged with the shift target the
+       turn had at that moment
+      if the turn is silent (an acting tool call without `silent: false`, a
+       look-first call with `silent: true`, the `silent` tool, or a leaked
+       `silent(` call): no final reply (a leaked `silent(` drops the earlier
+       text too)
+      for each part in the order written — earlier text, then the reply:
+        if wake turn AND the part predates any shift: suppress
+         (shift-or-silent, #170)
+        else: BotHandle.send_text(the part's shift target, else channel C)
+      append the reply as an assistant turn in the channel it went to (never
+       the global focus read at send time — #170's cross-channel misroute);
+       earlier text is already the content of its tool-call turn
       router.end_turn(scope)
       FocusManager.end_turn()  (idle-clock bookkeeping only)
 

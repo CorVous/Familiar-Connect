@@ -364,8 +364,9 @@ fn real_focus_responder(
     );
     fm.set_focus_immediately(100, "text");
 
+    // Look-first, as the text registry ships them (`build_text_registry`).
     let mut reg = ToolRegistry::new();
-    reg.register(build_shift_focus_tool()).unwrap();
+    reg.register(build_shift_focus_tool().look_first()).unwrap();
     reg.register(familiar_connect::tools::silent::build_silent_tool())
         .unwrap();
     #[cfg(feature = "images")]
@@ -373,7 +374,8 @@ fn real_focus_responder(
         familiar_connect::tools::image::build_view_image_tool_with_fetcher(
             "",
             Arc::new(CannedFetcher),
-        ),
+        )
+        .look_first(),
     )
     .unwrap();
 
@@ -431,7 +433,8 @@ async fn shipped_default_shift_focus_coaching_reaches_the_trailing_reminder() {
     assert!(
         trailing.contains(
             "\u{2014} use shift_focus if one pulls your attention: it moves you \
-             there quietly, or pass silent: false to arrive and speak."
+             there and shows you the channel, and what you write next is your reply \
+             there. Call silent() to simply read."
         ),
         "{trailing}"
     );
@@ -516,12 +519,27 @@ async fn view_image_resolves_a_marker_from_this_turns_shift_target() {
     );
 }
 
-/// A silent `shift_focus` call — no `silent: false`, so the turn stays quiet.
+/// What the turn posted, in order: `(channel, text)`.
+fn posted(send: &CapturingSend) -> Vec<(i64, String)> {
+    send.calls().into_iter().map(|c| (c.0, c.1)).collect()
+}
+
+/// A plain `shift_focus` call: no `silent` flag, so what she writes after
+/// seeing the channel is her reply.
 fn shift_tc(channel_id: i64) -> familiar_connect::llm::LlmDelta {
     tc_delta("sf-1", "shift_focus", json!({ "channel_id": channel_id }))
 }
 
-/// `shift_focus` that also opts the turn into speaking.
+/// `shift_focus` with `silent: true`: the turn stays quiet whatever follows.
+fn shift_tc_quiet(channel_id: i64) -> familiar_connect::llm::LlmDelta {
+    tc_delta(
+        "sf-1",
+        "shift_focus",
+        json!({ "channel_id": channel_id, "silent": true }),
+    )
+}
+
+/// `shift_focus` with the explicit `silent: false` opt-in older prompts teach.
 fn shift_tc_speaking(channel_id: i64) -> familiar_connect::llm::LlmDelta {
     tc_delta(
         "sf-1",
@@ -533,7 +551,7 @@ fn shift_tc_speaking(channel_id: i64) -> familiar_connect::llm::LlmDelta {
 #[tokio::test]
 async fn silent_shift_focus_moves_immediately() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
-        vec![shift_tc(200), finish("tool_calls")],
+        vec![shift_tc_quiet(200), finish("tool_calls")],
         vec![text_delta("moved"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
@@ -551,7 +569,7 @@ async fn silent_shift_focus_moves_immediately() {
 #[tokio::test]
 async fn silent_peek_then_old_channel_stages() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
-        vec![shift_tc(200), finish("tool_calls")],
+        vec![shift_tc_quiet(200), finish("tool_calls")],
         vec![text_delta("peeked"), finish("stop")],
         vec![text_delta("should not send"), finish("stop")],
     ]));
@@ -627,6 +645,138 @@ async fn shift_focus_with_reply_posts_to_new_channel() {
     assert_eq!(send.calls().len(), 1);
     assert_eq!(send.calls()[0].0, 200);
     assert_eq!(send.calls()[0].1, "hello over here");
+}
+
+/// The DM regression: she switched to the channel, read it, wrote a reply — and
+/// the reply was dropped because the switch counted as a silent tool call.
+#[tokio::test]
+async fn reply_after_a_plain_shift_posts_to_the_new_channel() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![shift_tc(200), finish("tool_calls")],
+        vec![text_delta("hey, what's up?"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, s) = real_focus_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    let posted = posted(&send);
+    assert_eq!(posted, vec![(200, "hey, what's up?".to_owned())]);
+    let there = s.sync().recent("fam", 200, 10, None, None).unwrap();
+    assert!(
+        there
+            .iter()
+            .any(|t| t.role == "assistant" && t.content == "hey, what's up?"),
+        "the reply is recorded in the channel it went to: {there:?}"
+    );
+}
+
+/// Chronological routing: what she writes before the switch goes to the channel
+/// she is leaving; what she writes after it goes to the one she moved to.
+#[tokio::test]
+async fn text_before_a_shift_posts_to_the_old_channel_then_the_reply_to_the_new() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            text_delta("back in a bit"),
+            shift_tc(200),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("hi, you rang?"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, s) = real_focus_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    let posted = posted(&send);
+    assert_eq!(
+        posted,
+        vec![
+            (100, "back in a bit".to_owned()),
+            (200, "hi, you rang?".to_owned()),
+        ]
+    );
+
+    // The earlier text is the tool-call turn's own content — recorded once, in
+    // the channel it was said in, not a second time as a turn of its own.
+    let here = s.sync().recent("fam", 100, 20, None, None).unwrap();
+    let earlier_turns = here
+        .iter()
+        .filter(|t| t.role == "assistant" && t.content == "back in a bit")
+        .count();
+    assert_eq!(earlier_turns, 1, "{here:?}");
+    let there = s.sync().recent("fam", 200, 20, None, None).unwrap();
+    let replies: Vec<&str> = there
+        .iter()
+        .filter(|t| t.role == "assistant")
+        .map(|t| t.content.as_str())
+        .collect();
+    assert_eq!(replies, vec!["hi, you rang?"], "{there:?}");
+}
+
+/// She says something, switches, reads the channel and decides to stay quiet
+/// there: the words she already wrote are still delivered where she wrote them.
+#[tokio::test]
+async fn text_before_a_shift_is_posted_even_when_she_then_goes_silent() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![text_delta("one sec"), shift_tc(200), finish("tool_calls")],
+        vec![
+            tc_delta("si-1", "silent", json!({"reasoning": "nothing for me"})),
+            finish("tool_calls"),
+        ],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, _) = real_focus_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    let posted = posted(&send);
+    assert_eq!(posted, vec![(100, "one sec".to_owned())]);
+}
+
+/// `silent: true` on the switch keeps its meaning: quiet whatever follows, and
+/// text written beside it is not posted either.
+#[tokio::test]
+async fn explicit_silent_true_on_a_shift_posts_nothing() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            text_delta("slipping out"),
+            shift_tc_quiet(200),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("should not send"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, _) = real_focus_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    assert!(send.calls().is_empty(), "{:?}", send.calls());
+}
+
+/// Wake = shift-or-silent (#170), part by part: a wake turn has nobody to
+/// answer in the channel it woke in, so text ahead of the switch stays unposted
+/// and only what she writes after moving is delivered.
+#[tokio::test]
+async fn wake_turn_posts_only_what_was_written_after_the_shift() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            text_delta("let me check that"),
+            shift_tc(200),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("over here now"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, _) = real_focus_responder(llm, send.clone());
+    r.handle(&wake_event(100), &bus()).await.unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    let posted = posted(&send);
+    assert_eq!(posted, vec![(200, "over here now".to_owned())]);
 }
 
 #[tokio::test]

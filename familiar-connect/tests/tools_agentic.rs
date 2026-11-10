@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use familiar_connect::llm::{Content, LlmClient, LlmDelta, Message};
 use familiar_connect::tools::agentic::{
-    AgenticHooks, DEFAULT_MAX_ITERATIONS, agentic_loop, serialize_image_result,
+    AgenticHooks, DEFAULT_MAX_ITERATIONS, EarlierText, agentic_loop, serialize_image_result,
     tool_content_as_text,
 };
 use familiar_connect::tools::registry::{
@@ -998,6 +998,289 @@ async fn unparseable_arguments_stay_silent() {
     let mut msgs = vec![user("hi")];
     let result = run(scripts, &registry, &mut msgs).await;
     assert!(result.is_silent);
+}
+
+// ---------------------------------------------------------------------------
+// Look-first tools: she reads the result, then decides whether to speak
+// ---------------------------------------------------------------------------
+
+/// A registry with a look-first `peek`, an acting `noop`, and `silent`.
+fn look_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(named_ok_tool("peek").look_first())
+        .unwrap();
+    registry.register(named_ok_tool("noop")).unwrap();
+    registry
+        .register(familiar_connect::tools::silent::build_silent_tool())
+        .unwrap();
+    registry
+}
+
+/// The reply written after a look is the reply — no `silent: false` needed,
+/// since she could not have known to pass it before looking.
+#[tokio::test]
+async fn reply_after_a_look_first_call_is_spoken() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("there you are"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(!result.is_silent);
+    assert_eq!(result.final_content, "there you are");
+    assert!(result.earlier.is_empty());
+}
+
+#[tokio::test]
+async fn nothing_written_after_a_look_first_call_is_just_empty() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(!result.is_silent);
+    assert!(result.final_content.is_empty());
+}
+
+#[tokio::test]
+async fn silent_tool_after_a_look_first_call_stays_silent() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_tool_call("c2", "silent", &json!({"reasoning": "nothing for me"})),
+            delta_finish("tool_calls"),
+        ],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(result.is_silent);
+    assert!(result.final_content.is_empty());
+}
+
+#[tokio::test]
+async fn explicit_silent_true_on_a_look_first_call_silences_the_turn() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "peek", &json!({"silent": true})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("unsaid"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(result.is_silent);
+    assert!(result.final_content.is_empty());
+}
+
+/// An acting tool anywhere in the turn keeps its silence, look or no look —
+/// in the same message or a later one.
+#[tokio::test]
+async fn an_acting_call_still_silences_a_turn_that_also_looked() {
+    let same_message = vec![
+        vec![
+            delta_tool_call_at(0, "c1", "peek", &json!({})),
+            delta_tool_call_at(1, "c2", "noop", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("unsaid"), delta_finish("stop")],
+    ];
+    let later_message = vec![
+        vec![
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_tool_call("c2", "noop", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("unsaid"), delta_finish("stop")],
+    ];
+    for scripts in [same_message, later_message] {
+        let mut msgs = vec![user("hi")];
+        let result = run(scripts, &look_registry(), &mut msgs).await;
+        assert!(result.is_silent);
+        assert!(result.final_content.is_empty());
+    }
+}
+
+/// A name the registry does not know is not look-first.
+#[tokio::test]
+async fn unknown_tool_is_not_look_first() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "mystery", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("unsaid"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(result.is_silent);
+}
+
+/// Text in the same message as a look-first call was said before the look. It
+/// comes back as `earlier`, ahead of the reply written after the result, and
+/// records that the turn had not moved yet.
+#[tokio::test]
+async fn text_ahead_of_a_look_first_call_is_kept_as_earlier() {
+    let scripts = vec![
+        vec![
+            delta_text("one moment"),
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("there you are"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(!result.is_silent);
+    assert_eq!(result.final_content, "there you are");
+    assert_eq!(
+        result.earlier,
+        [EarlierText {
+            text: "one moment".to_owned(),
+            shifted_to: None,
+        }]
+    );
+}
+
+/// `earlier` records where the turn stood when each part was written: before
+/// this message's own shift, and after any shift an earlier message made.
+#[tokio::test]
+async fn earlier_text_records_the_shift_target_of_its_moment() {
+    let shift_target = Arc::new(Mutex::new(None::<i64>));
+    let sink = Arc::clone(&shift_target);
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(
+            Tool::new(
+                "hop",
+                "",
+                json!({}),
+                Arc::new(FnHandler(move |args: Value, _c: ToolContext| {
+                    let sink = Arc::clone(&sink);
+                    async move {
+                        *sink.lock().unwrap() = args["to"].as_i64();
+                        Ok(ToolOutput::Text("ok".to_owned()))
+                    }
+                })),
+            )
+            .look_first(),
+        )
+        .unwrap();
+    let scripts = vec![
+        vec![
+            delta_text("leaving the first room"),
+            delta_tool_call("c1", "hop", &json!({"to": 200})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_text("leaving the second room"),
+            delta_tool_call("c2", "hop", &json!({"to": 300})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("arrived"), delta_finish("stop")],
+    ];
+    let llm = ScriptedLlm::new(scripts);
+    let ctx = ctx().with_shift_target(Arc::clone(&shift_target));
+    let mut msgs = vec![user("hi")];
+    let result = agentic_loop(
+        &llm,
+        &mut msgs,
+        &registry,
+        &ctx,
+        None,
+        DEFAULT_MAX_ITERATIONS,
+    )
+    .await
+    .unwrap();
+    let said: Vec<(&str, Option<i64>)> = result
+        .earlier
+        .iter()
+        .map(|e| (e.text.as_str(), e.shifted_to))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            ("leaving the first room", None),
+            ("leaving the second room", Some(200)),
+        ]
+    );
+    assert_eq!(result.final_content, "arrived");
+    assert_eq!(*shift_target.lock().unwrap(), Some(300));
+}
+
+/// What she said before looking stands even when the turn goes quiet after.
+#[tokio::test]
+async fn earlier_text_survives_a_later_silent_call() {
+    let scripts = vec![
+        vec![
+            delta_text("one moment"),
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_tool_call("c2", "silent", &json!({"reasoning": "nothing for me"})),
+            delta_finish("tool_calls"),
+        ],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(result.is_silent);
+    assert_eq!(result.earlier.len(), 1);
+    assert_eq!(result.earlier[0].text, "one moment");
+}
+
+/// Text beside an acting call (or beside `silent`) is not speech: the acting
+/// tool's silence covers its own message.
+#[tokio::test]
+async fn text_beside_an_acting_call_is_not_earlier_text() {
+    for (name, args) in [
+        ("noop", json!({})),
+        ("silent", json!({"reasoning": "hush"})),
+        ("peek", json!({"silent": true})),
+    ] {
+        let scripts = vec![
+            vec![
+                delta_text("thinking out loud"),
+                delta_tool_call("c1", name, &args),
+                delta_finish("tool_calls"),
+            ],
+            vec![delta_text("unsaid"), delta_finish("stop")],
+        ];
+        let mut msgs = vec![user("hi")];
+        let result = run(scripts, &look_registry(), &mut msgs).await;
+        assert!(result.is_silent, "{name}");
+        assert!(result.earlier.is_empty(), "{name}");
+    }
+}
+
+/// A leaked tool call or think block is stripped from earlier text like it is
+/// from the final reply; text that was only a leak is dropped.
+#[tokio::test]
+async fn earlier_text_goes_through_the_leak_guard() {
+    let scripts = vec![
+        vec![
+            delta_text("silent()"),
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("hello"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(result.earlier.is_empty());
 }
 
 #[tokio::test]

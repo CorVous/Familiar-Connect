@@ -225,8 +225,8 @@ pub fn build_shift_focus_tool() -> Tool {
     Tool::new(
         "shift_focus",
         "Move your attention to a different channel — for real, right now. You \
-         stop following your current channel until you shift back, and any reply \
-         this turn posts to the new channel. Returns the target's recent messages \
+         stop following your current channel until you shift back, and what you \
+         write after it this turn posts to the new channel. Returns the target's recent messages \
          (empty list = nothing there yet). Use it to actually go somewhere, not to \
          glance. Modality (text/voice) inferred from channel subscription.",
         json!({
