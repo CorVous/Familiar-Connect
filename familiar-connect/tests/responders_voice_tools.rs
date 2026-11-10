@@ -284,6 +284,78 @@ async fn leaked_invoke_xml_content_never_reaches_tts_or_history() {
     assert!(turns.iter().all(|t| !t.content.contains("invoke")));
 }
 
+/// Run one voice turn through the tool loop with a single scripted reply and
+/// return what reached TTS plus the persisted assistant turns.
+async fn voice_tool_turn(deltas: Vec<&str>) -> (Vec<String>, Vec<String>) {
+    let spoken = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = FnHandler(|_a: Value, _c: ToolContext| async move {
+        Ok(ToolOutput::Text(json!({"ok": true}).to_string()))
+    });
+    let mut reg = ToolRegistry::new();
+    reg.register(Tool::new("read_channel", "", json!({}), Arc::new(handler)))
+        .unwrap();
+    let mut script: Vec<_> = deltas.into_iter().map(text_delta).collect();
+    script.push(finish("stop"));
+    let llm = Arc::new(ScriptedToolLlm::new(vec![script]));
+    let player = Arc::new(RecordingVoicePlayer {
+        spoken: Arc::clone(&spoken),
+    });
+    let s = store();
+    let r = VoiceResponder::new(
+        make_assembler(Arc::clone(&s)),
+        llm,
+        player,
+        Arc::clone(&s),
+        Arc::new(TurnRouter::new()),
+        "fam",
+    )
+    .with_tools(Arc::new(reg), voice_ctx_factory());
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(
+        &voice_final("anyone there?", "voice:1", "t-1", None),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    r.wait_until_idle().await;
+    let said = spoken.lock().unwrap().clone();
+    let recorded = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.role == "assistant")
+        .map(|t| t.content)
+        .collect();
+    (said, recorded)
+}
+
+/// Gemini's text form of a `silent` call it failed to emit: nothing is
+/// spoken and nothing is recorded.
+#[tokio::test]
+async fn leaked_api_call_text_never_reaches_tts_or_history() {
+    let (said, recorded) = voice_tool_turn(vec![
+        "CALL:default_",
+        "api:silent{reasoning:nobody asked me anything.}",
+    ])
+    .await;
+    assert!(said.is_empty(), "{said:?}");
+    assert!(recorded.is_empty(), "{recorded:?}");
+}
+
+/// A one-word reply that is still a prefix of a leak token when the stream
+/// ends is speech: it is spoken, not only recorded.
+#[tokio::test]
+async fn short_reply_left_pending_by_the_gate_is_spoken() {
+    for reply in ["Call", "Silent"] {
+        let (said, recorded) = voice_tool_turn(vec![reply]).await;
+        assert_eq!(said, vec![reply.to_owned()], "{reply}");
+        assert_eq!(recorded, vec![reply.to_owned()], "{reply}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Voice tool nudge is config (#151)
 // ---------------------------------------------------------------------------

@@ -35,15 +35,18 @@ static CALL_TOOL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*(read_channel|shift_focus)\s*\(").expect("valid regex"));
 /// Gemini's text rendering of a function call it failed to emit as one:
 /// `CALL:default_api:silent{…}` / `callable:default_api:silent{…}`. Captures
-/// the tool name.
+/// the tool name. Namespace and tool are identifiers and the arguments open
+/// with a brace, so note-style prose (`Call: 10:30 (don't be late)`,
+/// `Call: Sarah:Jones (work)`) stays prose.
 static API_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*call(?:able)?:\s*\w+:(\w+)\s*[{(]").expect("valid regex")
+    Regex::new(r"(?i)^\s*call(?:able)?:\s*[a-z_]\w*:([a-z_]\w*)\s*\{").expect("valid regex")
 });
 /// A lowercased prefix that could still grow into an [`API_CALL_RE`] match:
 /// past the `call:` / `callable:` keyword, inside the namespace or tool name,
 /// with no opening brace yet.
-static API_CALL_PREFIX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^call(?:able)?:\s*\w*(?::\w*\s*)?$").expect("valid regex"));
+static API_CALL_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^call(?:able)?:\s*(?:[a-z_]\w*(?::(?:[a-z_]\w*\s*)?)?)?$").expect("valid regex")
+});
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
 
@@ -328,6 +331,31 @@ mod tests {
         );
         assert_eq!(classify_leading_leak("Call: me later {maybe}"), None);
         assert_eq!(classify_leading_leak("Callable: yes, any time."), None);
+    }
+
+    /// Notes that lead with `Call:` and carry a time, a number or a name are
+    /// prose: the namespace and tool must be identifiers, opened by a brace.
+    #[test]
+    fn classify_call_led_notes_are_prose() {
+        for prose in [
+            "Call: 10:30 (don't be late)",
+            "Call:555:1234(home)",
+            "CALL: 911:now {seriously}",
+            "Call: Sarah:Jones (work)",
+            "call:default_api:silent(reasoning=x)",
+        ] {
+            assert_eq!(classify_leading_leak(prose), None, "{prose}");
+            assert_eq!(gate_run(&[prose]), StreamDecision::Speak, "{prose}");
+        }
+    }
+
+    /// A whole reply that is only a prefix of the call shape never resolves;
+    /// the gate reports Pending and the caller treats the reply as speech.
+    #[test]
+    fn gate_reply_that_is_only_a_call_prefix_stays_pending() {
+        for prose in ["Call", "Callable", "Call:", "Call: Sarah", "call:mom"] {
+            assert_eq!(gate_run(&[prose]), StreamDecision::Pending, "{prose}");
+        }
     }
 
     // -- StreamGate ----------------------------------------------------------

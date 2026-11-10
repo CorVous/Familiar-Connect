@@ -621,6 +621,15 @@ impl VoiceInner {
             self.log_silent(&scope.turn_id, channel_id);
             return None;
         }
+        // Stream ended undecided with non-whitespace content (a very short
+        // reply that is still a prefix of a leak token, such as "Silent" or
+        // "Call") → treat as the speak path, so what is recorded as said is
+        // also spoken.
+        if !st.gate_open && st.gate.decided().is_none() && !st.accumulated.trim().is_empty() {
+            self.log_respond(&scope.turn_id, channel_id);
+            st.decision_logged = true;
+            st.gate_open = true;
+        }
         if st.gate_open {
             // `speak` is the single speakable gate; push the tail as-is.
             let tail = st.streamer.flush();
@@ -631,10 +640,6 @@ impl VoiceInner {
                 }
                 self.speak(&sentence, scope).await;
             }
-        }
-        if !st.gate_open && st.gate.decided().is_none() && !st.accumulated.trim().is_empty() {
-            self.log_respond(&scope.turn_id, channel_id);
-            st.decision_logged = true;
         }
         if scope.is_cancelled() && !st.decision_logged {
             log_preempted(&scope.turn_id);

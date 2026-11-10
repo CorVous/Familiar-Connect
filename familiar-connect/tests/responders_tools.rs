@@ -303,6 +303,40 @@ async fn silent_tool_alone_yields_a_silent_turn() {
     assert!(turns.iter().all(|t| !t.content.contains("not for me")));
 }
 
+/// Gemini sometimes returns a `silent` call as plain text with no structured
+/// call (`CALL:default_api:silent{…}`). That is still her choosing silence:
+/// nothing is posted and the leaked text never reaches history.
+#[tokio::test]
+async fn silent_call_written_as_text_yields_a_silent_turn() {
+    for leak in [
+        "CALL:default_api:silent{reasoning:The bit has run for many turns; nobody asked me \
+         anything here, so I will let it rest.}",
+        " callable:default_api:silent{reasoning:they are reacting to their own username",
+    ] {
+        let s = store();
+        let mut reg = ToolRegistry::new();
+        reg.register(familiar_connect::tools::silent::build_silent_tool())
+            .unwrap();
+        let llm = Arc::new(ScriptedToolLlm::new(vec![vec![
+            text_delta(leak),
+            finish("stop"),
+        ]]));
+        let send = Arc::new(CapturingSend::new());
+        let r = responder_with_tools(Arc::clone(&s), llm, send.clone(), Arc::new(reg));
+        r.handle(
+            &discord_text_event(text_payload(42, "chatter"), "e-1"),
+            &bus(),
+        )
+        .await
+        .unwrap();
+        assert!(send.calls().is_empty(), "{leak}: {:?}", send.calls());
+        let turns = s.sync().recent("fam", 42, 20, None, None).unwrap();
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(roles, ["user"], "{leak}");
+        assert!(turns.iter().all(|t| !t.content.contains("default_api")));
+    }
+}
+
 #[tokio::test]
 async fn loop_max_iterations_caps_agentic_loop() {
     let s = store();
