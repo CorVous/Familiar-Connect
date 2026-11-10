@@ -1532,3 +1532,21 @@ async fn undelivered_earlier_text_stays_on_the_persisted_tool_call_turn() {
     assert_eq!(recorder.earlier.lock().unwrap().len(), 1);
     assert_eq!(recorder.persisted.lock().unwrap()[0], "one moment");
 }
+
+/// A leaked `<tool_call …>` block beside a look is the call written out twice,
+/// not earlier text.
+#[tokio::test]
+async fn leaked_tool_call_block_beside_a_look_is_not_earlier_text() {
+    let scripts = vec![
+        vec![
+            delta_text("<tool_call>{\"name\":\"peek\"}</tool_call>"),
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("there you are"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert_eq!(result.earlier, []);
+    assert_eq!(result.final_content, "there you are");
+}

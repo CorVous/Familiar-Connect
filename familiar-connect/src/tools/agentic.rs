@@ -39,7 +39,7 @@ use serde_json::{Value, json};
 
 use crate::llm::{Content, LlmClient, LlmDelta, Message};
 use crate::log_style as ls;
-use crate::silence::{LeadingLeak, classify_leading_leak};
+use crate::silence::{LeadingLeak, classify_leading_leak, leads_with_tool_call_block};
 use crate::tools::registry::{
     Tool, ToolContext, ToolOutput, ToolRegistry, asks_for_silence, opts_into_speech,
 };
@@ -494,7 +494,10 @@ pub async fn agentic_loop(
             // message has not moved the turn yet.
             if !silencing && (!silenced_by_call || speak_opt_in) {
                 let (said, silent_leak) = strip_leaked_tool_calls(&strip_think_artifacts(&content));
-                if !silent_leak && !said.trim().is_empty() {
+                // A leaked `<tool_call …>` block is the call spelled out a
+                // second time, not something she said.
+                let leaked_block = leads_with_tool_call_block(&said);
+                if !silent_leak && !leaked_block && !said.trim().is_empty() {
                     let said = EarlierText {
                         text: said,
                         shifted_to: ctx.shifted_to(),

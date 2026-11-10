@@ -36,6 +36,16 @@ static CALL_TOOL_RE: LazyLock<Regex> =
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
 
+/// Whether `content` leads with a leaked `<tool_call …>` block.
+///
+/// The template form the streaming gate suppresses but
+/// [`classify_leading_leak`] leaves to it; for text that is delivered outside
+/// the streaming gate's verdict.
+#[must_use]
+pub fn leads_with_tool_call_block(content: &str) -> bool {
+    TOOL_CALL_RE.is_match(content)
+}
+
 /// A tool-call invocation the model leaked into plain assistant text,
 /// classified by shape. Single source of truth for the return-time strip guard
 /// ([`crate::tools::agentic`]) and the streaming [`StreamGate`].

@@ -489,10 +489,16 @@ impl TextResponder {
         )
         .await;
 
-        if scope.is_cancelled() {
-            if let Some(engine) = &self.activity_engine {
-                engine.end_turn().await;
-            }
+        // Per-turn routing (#170): the reply goes to the turn's own shift target
+        // (set by `shift_focus` this turn) or the triggering channel — never the
+        // mutable global focus read at send time (the cross-channel misroute).
+        // Text she wrote ahead of a look was already posted where the turn stood
+        // then (`TextToolHooks::on_earlier_text`), so the reply comes last.
+        let shifted_to = *shift_target.lock().expect("shift target mutex");
+        let send_channel_id = shifted_to.unwrap_or(channel_id);
+        if post.interrupted(&scope, send_channel_id) {
+            self.finish_turn(&scope, judgment, speech.said_earlier)
+                .await;
             return Ok(());
         }
         let mut reply = speech.reply;
@@ -505,13 +511,6 @@ impl TextResponder {
             );
             reply = None;
         }
-
-        // Per-turn routing (#170): the reply goes to the turn's own shift target
-        // (set by `shift_focus` this turn) or the triggering channel — never the
-        // mutable global focus read at send time (the cross-channel misroute).
-        // Text she wrote ahead of a look was already posted where the turn stood
-        // then (`TextToolHooks::on_earlier_text`), so the reply comes last.
-        let shifted_to = *shift_target.lock().expect("shift target mutex");
         if reply.is_some() && post.wake_suppresses(shifted_to) {
             log_wake_suppressed(&scope);
             reply = None;
@@ -519,33 +518,44 @@ impl TextResponder {
 
         let mut said_something = speech.said_earlier;
         if let Some(reply) = reply {
-            let send_channel_id = shifted_to.unwrap_or(channel_id);
             match self
                 .post_part(&scope, &post, &reply, send_channel_id)
                 .await?
             {
                 Posted::Sent => said_something = true,
+                Posted::Unrecorded(e) => return Err(e.into()),
                 Posted::Failed => {}
-                Posted::Cancelled => return Ok(()),
+                Posted::Cancelled => {
+                    // The reply went out as the turn was cancelled: left
+                    // unrecorded, as before. Earlier text that was posted and
+                    // recorded still closes the turn properly.
+                    if said_something {
+                        self.finish_turn(&scope, judgment, true).await;
+                    }
+                    return Ok(());
+                }
             }
         }
-        if !said_something {
-            if let Some(engine) = &self.activity_engine {
-                engine.end_turn().await;
+        self.finish_turn(&scope, judgment, said_something).await;
+        Ok(())
+    }
+
+    /// End-of-turn bookkeeping; `said_something` = a message went out this turn.
+    /// A turn that said nothing only lets the activity engine apply a staged
+    /// start.
+    async fn finish_turn(&self, scope: &TurnScope, judgment: bool, said_something: bool) {
+        if said_something {
+            self.router.end_turn(scope);
+            if let Some(fm) = &self.focus_manager {
+                fm.end_turn().await;
             }
-            return Ok(());
-        }
-        self.router.end_turn(&scope);
-        if let Some(fm) = &self.focus_manager {
-            fm.end_turn().await;
         }
         if let Some(engine) = &self.activity_engine {
-            if judgment {
+            if said_something && judgment {
                 engine.notify_reply_sent().await;
             }
             engine.end_turn().await;
         }
-        Ok(())
     }
 
     /// Send one message of the turn to `send_channel_id` and record it there
@@ -558,7 +568,8 @@ impl TextResponder {
     /// who spoke there.
     ///
     /// # Errors
-    /// Propagates a store failure on the lookup / persistence path.
+    /// A store failure on the lookups *before* the send; nothing went out. A
+    /// failure to record a message that did go out is [`Posted::Unrecorded`].
     async fn post_part(
         &self,
         scope: &TurnScope,
@@ -645,7 +656,7 @@ impl TextResponder {
             ls::kv_styled("text", &ls::trunc(&rewritten, 200), ls::W, ls::LW),
         );
 
-        if scope.is_cancelled() {
+        if post.interrupted(scope, send_channel_id) {
             return Ok(Posted::Cancelled);
         }
 
@@ -660,8 +671,10 @@ impl TextResponder {
         if let Some(tt) = &thread_target {
             append = append.reply_to_message_id(tt);
         }
-        self.history.append_turn(append).await?;
-        Ok(Posted::Sent)
+        Ok(match self.history.append_turn(append).await {
+            Ok(_) => Posted::Sent,
+            Err(e) => Posted::Unrecorded(e),
+        })
     }
 
     fn origin_fields(&self, channel_id: i64) -> (String, String) {
@@ -1082,7 +1095,7 @@ impl TextResponder {
                 );
                 break 'block None;
             }
-            if scope.is_cancelled() {
+            if post.interrupted(scope, hooks.here()) {
                 break 'block None;
             }
             Some(result.final_content)
@@ -1135,12 +1148,22 @@ impl PostContext<'_> {
     const fn wake_suppresses(&self, shifted_to: Option<i64>) -> bool {
         self.is_wake && shifted_to.is_none()
     }
+
+    /// Whether the turn's cancellation stops a message bound for
+    /// `send_channel_id`. A scope is cancelled when someone types or speaks in
+    /// the triggering channel, so that she does not talk over them *there*;
+    /// words bound for a channel she moved to this turn are still delivered.
+    fn interrupted(&self, scope: &TurnScope, send_channel_id: i64) -> bool {
+        scope.is_cancelled() && send_channel_id == self.channel_id
+    }
 }
 
 /// How [`TextResponder::post_part`] ended.
 enum Posted {
     /// Sent and recorded.
     Sent,
+    /// Sent, but the store refused the record.
+    Unrecorded(crate::history::StoreError),
     /// The send failed (logged); nothing recorded.
     Failed,
     /// The turn was cancelled around the send; nothing recorded.
@@ -1182,6 +1205,15 @@ struct TextToolHooks<'a> {
 }
 
 impl TextToolHooks<'_> {
+    /// Where she is writing right now: the channel this turn shifted to, else
+    /// the one it was triggered in.
+    fn here(&self) -> i64 {
+        self.shift_target
+            .lock()
+            .expect("shift target mutex")
+            .unwrap_or(self.post.channel_id)
+    }
+
     /// Close the typing indicator, if one is open; the next text reopens it.
     async fn close_typing(&self) {
         let ind = self.typing.lock().expect("typing mutex").take();
@@ -1195,7 +1227,8 @@ impl TextToolHooks<'_> {
 #[async_trait]
 impl AgenticHooks for TextToolHooks<'_> {
     async fn on_delta(&self, delta: &LlmDelta) {
-        if self.scope.is_cancelled() || self.bail_silent.load(Ordering::SeqCst) {
+        if self.post.interrupted(self.scope, self.here()) || self.bail_silent.load(Ordering::SeqCst)
+        {
             return;
         }
         if delta.content.is_empty() {
@@ -1217,14 +1250,7 @@ impl AgenticHooks for TextToolHooks<'_> {
                 if !self.typing_started.swap(true, Ordering::SeqCst)
                     && let Some(trigger) = &self.responder.trigger_typing
                 {
-                    // She types where she is now: the channel this turn
-                    // shifted to, else the one it was triggered in.
-                    let here = self
-                        .shift_target
-                        .lock()
-                        .expect("shift target mutex")
-                        .unwrap_or(self.post.channel_id);
-                    let ind = trigger.open(here).await;
+                    let ind = trigger.open(self.here()).await;
                     *self.typing.lock().expect("typing mutex") = Some(ind);
                 }
             }
@@ -1236,14 +1262,17 @@ impl AgenticHooks for TextToolHooks<'_> {
     /// words before a `shift_focus` reach the channel she is leaving before she
     /// leaves it.
     async fn on_earlier_text(&self, earlier: &EarlierText) -> bool {
-        if self.scope.is_cancelled() || self.bail_silent.load(Ordering::SeqCst) {
+        let send_channel_id = earlier.shifted_to.unwrap_or(self.post.channel_id);
+        if self.post.interrupted(self.scope, send_channel_id)
+            || self.bail_silent.load(Ordering::SeqCst)
+        {
             return false;
         }
         if self.post.wake_suppresses(earlier.shifted_to) {
             log_wake_suppressed(self.scope);
+            self.close_typing().await;
             return false;
         }
-        let send_channel_id = earlier.shifted_to.unwrap_or(self.post.channel_id);
         let posted = self
             .responder
             .post_part(self.scope, self.post, &earlier.text, send_channel_id)
@@ -1255,12 +1284,18 @@ impl AgenticHooks for TextToolHooks<'_> {
                 self.said_earlier.store(true, Ordering::SeqCst);
                 true
             }
-            Ok(Posted::Failed | Posted::Cancelled) => false,
-            Err(e) => {
+            // Out but unrecorded: it stays on the tool-call turn instead.
+            Ok(Posted::Unrecorded(e)) => {
+                self.said_earlier.store(true, Ordering::SeqCst);
                 tracing::warn!(
                     "{} earlier-text persist failed: {e}",
                     ls::tag("Text", ls::R)
                 );
+                false
+            }
+            Ok(Posted::Failed | Posted::Cancelled) => false,
+            Err(e) => {
+                tracing::warn!("{} earlier text not posted: {e}", ls::tag("Text", ls::R));
                 false
             }
         }

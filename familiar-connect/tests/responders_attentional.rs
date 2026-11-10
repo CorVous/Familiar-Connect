@@ -361,7 +361,7 @@ fn real_focus_responder(
         .look_first(),
     )
     .unwrap();
-    focus_responder_with_registry(llm, send, |_| reg)
+    focus_responder_with_registry(llm, send, Arc::new(TurnRouter::new()), |_| reg)
 }
 
 /// [`real_focus_responder`] with the registry the bot actually ships for text.
@@ -369,7 +369,7 @@ fn shipped_registry_responder(
     llm: Arc<ScriptedToolLlm>,
     send: Arc<CapturingSend>,
 ) -> (TextResponder, Arc<FocusManager>, Arc<AsyncHistoryStore>) {
-    focus_responder_with_registry(llm, send, |s| {
+    focus_responder_with_registry(llm, send, Arc::new(TurnRouter::new()), |s| {
         let scheduler = familiar_connect::tools::scheduler::AlarmScheduler::new(
             Arc::clone(s),
             Arc::new(bus()),
@@ -389,7 +389,8 @@ fn shipped_registry_responder(
 
 fn focus_responder_with_registry(
     llm: Arc<ScriptedToolLlm>,
-    send: Arc<CapturingSend>,
+    send: Arc<dyn familiar_connect::processors::SendText>,
+    router: Arc<TurnRouter>,
     registry: impl FnOnce(&Arc<AsyncHistoryStore>) -> ToolRegistry,
 ) -> (TextResponder, Arc<FocusManager>, Arc<AsyncHistoryStore>) {
     let tmp = tempfile::tempdir().unwrap();
@@ -422,16 +423,9 @@ fn focus_responder_with_registry(
     });
 
     let assembler = make_assembler(Arc::clone(&s));
-    let r = TextResponder::new(
-        assembler,
-        llm,
-        send,
-        Arc::clone(&s),
-        Arc::new(TurnRouter::new()),
-        "fam",
-    )
-    .with_focus_manager(Arc::clone(&fm) as Arc<dyn FocusManagerApi>)
-    .with_tools(Arc::new(reg), factory);
+    let r = TextResponder::new(assembler, llm, send, Arc::clone(&s), router, "fam")
+        .with_focus_manager(Arc::clone(&fm) as Arc<dyn FocusManagerApi>)
+        .with_tools(Arc::new(reg), factory);
     (r, fm, s)
 }
 
@@ -951,6 +945,199 @@ async fn typing_indicator_follows_her_across_a_shift() {
     assert_eq!(typing.calls(), vec![100, 200]);
     assert_eq!(typing.entered(), 2);
     assert_eq!(typing.exited(), 2);
+}
+
+/// A sender that, on its first send, cancels the turn in channel 100 the way a
+/// user typing there does (`TypingInterruptHandler::cancel_active_turn`).
+struct TypingOverSend {
+    inner: Arc<CapturingSend>,
+    router: Arc<TurnRouter>,
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl familiar_connect::processors::SendText for TypingOverSend {
+    async fn send(
+        &self,
+        channel_id: i64,
+        content: &str,
+        reply_to_message_id: Option<&str>,
+        mention_user_ids: &[i64],
+    ) -> anyhow::Result<Option<String>> {
+        let sent = self
+            .inner
+            .send(channel_id, content, reply_to_message_id, mention_user_ids)
+            .await;
+        if !self
+            .cancelled
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+            && let Some(scope) = self.router.active_scope("discord:100")
+        {
+            scope.cancel();
+        }
+        sent
+    }
+}
+
+/// [`real_focus_responder`] whose turn in channel 100 is cancelled as soon as
+/// its first message is out.
+fn typed_over_responder(
+    llm: Arc<ScriptedToolLlm>,
+    send: Arc<CapturingSend>,
+) -> (TextResponder, Arc<FocusManager>, Arc<AsyncHistoryStore>) {
+    let router = Arc::new(TurnRouter::new());
+    let typed_over = Arc::new(TypingOverSend {
+        inner: send,
+        router: Arc::clone(&router),
+        cancelled: std::sync::atomic::AtomicBool::new(false),
+    });
+    focus_responder_with_registry(llm, typed_over, router, |_| {
+        let mut reg = ToolRegistry::new();
+        reg.register(build_shift_focus_tool().look_first()).unwrap();
+        reg
+    })
+}
+
+/// Someone typing in the channel she just left cancels that channel's turn, so
+/// she does not talk over them there. The reply is bound for the channel she
+/// moved to, and still arrives.
+#[tokio::test]
+async fn reply_to_the_new_channel_survives_typing_in_the_old_one() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            text_delta("back in a bit"),
+            shift_tc(200),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("hi, you rang?"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, fm, s) = typed_over_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(fm.get_focus("text"), Some(200));
+    assert_eq!(
+        posted(&send),
+        vec![
+            (100, "back in a bit".to_owned()),
+            (200, "hi, you rang?".to_owned()),
+        ]
+    );
+    let there = s.sync().recent("fam", 200, 20, None, None).unwrap();
+    assert!(
+        there
+            .iter()
+            .any(|t| t.role == "assistant" && t.content == "hi, you rang?"),
+        "{there:?}"
+    );
+}
+
+/// The interruption still holds where it applies: a reply bound for the
+/// channel that was typed in is dropped.
+#[tokio::test]
+async fn reply_bound_for_the_typed_in_channel_is_still_dropped() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![shift_tc_id("sf-1", 200), finish("tool_calls")],
+        vec![
+            text_delta("just passing through"),
+            shift_tc_id("sf-2", 100),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("and back"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, _fm, _) = typed_over_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(
+        posted(&send),
+        vec![(200, "just passing through".to_owned())]
+    );
+}
+
+/// A leaked `<tool_call …>` block written beside the real call is the call
+/// spelled out twice, not something she said: it is not posted.
+#[tokio::test]
+async fn leaked_tool_call_block_beside_a_shift_is_not_posted() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            text_delta("<tool_call>{\"name\":\"shift_focus\",\"arguments\":{}}</tool_call>"),
+            shift_tc(200),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("hi there"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, _fm, _) = real_focus_responder(llm, send.clone());
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(posted(&send), vec![(200, "hi there".to_owned())]);
+}
+
+/// `[↩ <id>]` threads onto the named message only when that message lives in
+/// the channel the reply is going to.
+#[tokio::test]
+async fn explicit_thread_target_must_live_in_the_channel_the_reply_goes_to() {
+    for (marker_id, expected) in [("777", Some("777")), ("555", None)] {
+        let llm = Arc::new(ScriptedToolLlm::new(vec![
+            vec![shift_tc(200), finish("tool_calls")],
+            vec![
+                text_delta(&format!("[\u{21a9} {marker_id}] about that")),
+                finish("stop"),
+            ],
+        ]));
+        let send = Arc::new(CapturingSend::new());
+        let (r, _fm, s) = real_focus_responder(llm, send.clone());
+        for (channel, id) in [(100, "555"), (200, "777")] {
+            s.append_turn(
+                AppendTurn::new("fam", channel, "user", "earlier message").platform_message_id(id),
+            )
+            .await
+            .unwrap();
+        }
+        r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+            .await
+            .unwrap();
+        let calls = send.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!((calls[0].0, calls[0].1.as_str()), (200, "about that"));
+        assert_eq!(calls[0].2.as_deref(), expected, "marker {marker_id}");
+    }
+}
+
+/// `[@Name]` in a reply posted after a switch resolves against the people of
+/// the channel it is posted to.
+#[tokio::test]
+async fn ping_after_a_shift_resolves_against_the_new_channel() {
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![shift_tc(200), finish("tool_calls")],
+        vec![text_delta("sure thing, [@Bob]"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let (r, _fm, s) = real_focus_responder(llm, send.clone());
+    s.append_turn(
+        AppendTurn::new("fam", 200, "user", "anyone around?").author(
+            familiar_connect::identity::Author::new(
+                "discord",
+                "222",
+                Some("bob".to_owned()),
+                Some("Bob".to_owned()),
+            ),
+        ),
+    )
+    .await
+    .unwrap();
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    let calls = send.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].0, 200);
+    assert!(calls[0].1.contains("<@222>"), "{calls:?}");
+    assert!(calls[0].3.contains(&222), "{calls:?}");
 }
 
 /// Wake = shift-or-silent (#170), part by part: a wake turn has nobody to
