@@ -1109,7 +1109,13 @@ Shifts are **model-decided and applied immediately**:
    returns them in the tool result, so the agentic loop feeds the
    channel's content back into the same turn — the model sees the
    channel before it responds rather than narrating one it can't see.
-   Voice/empty channels yield an empty list.
+   Voice/empty channels yield an empty list. `channel_id` travels as a
+   **string of digits** in both directions: Discord ids exceed 2^53,
+   and some providers (Gemini) round a JSON number argument through a
+   float64, which turned every shift into a "not subscribed" refusal.
+   A number is still accepted, and one that matches no subscription is
+   snapped to the single subscribed channel that rounds to the same
+   float64.
 2. `shift_now` applies the move **at tool-call time**, under that
    lock. For a text shift it calls
    `promote_staged_turns(channel_id, catch_up_limit)` — flipping only

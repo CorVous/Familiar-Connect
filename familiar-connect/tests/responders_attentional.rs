@@ -606,7 +606,7 @@ async fn shift_focus_plus_silent_moves_focus_and_records_the_shift() {
     );
     let tool_turns: Vec<&_> = turns.iter().filter(|t| t.role == "tool").collect();
     assert_eq!(tool_turns.len(), 1, "only the shift result: {tool_turns:?}");
-    assert!(tool_turns[0].content.contains("\"channel_id\":200"));
+    assert!(tool_turns[0].content.contains("\"channel_id\":\"200\""));
     // The silent tool's own call and private reasoning stay out of history.
     assert!(turns.iter().all(|t| !t.content.contains("slip away")));
     assert!(turns.iter().all(|t| !t.content.contains("__SILENT__")));
