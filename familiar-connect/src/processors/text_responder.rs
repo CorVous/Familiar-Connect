@@ -1150,7 +1150,7 @@ impl PostContext<'_> {
     }
 
     /// Whether the turn's cancellation stops a message bound for
-    /// `send_channel_id`. A scope is cancelled when someone types or speaks in
+    /// `send_channel_id`. A scope is cancelled when someone starts typing in
     /// the triggering channel, so that she does not talk over them *there*;
     /// words bound for a channel she moved to this turn are still delivered.
     fn interrupted(&self, scope: &TurnScope, send_channel_id: i64) -> bool {
@@ -1266,6 +1266,9 @@ impl AgenticHooks for TextToolHooks<'_> {
         if self.post.interrupted(self.scope, send_channel_id)
             || self.bail_silent.load(Ordering::SeqCst)
         {
+            // Unsaid here; whatever she writes next reopens the indicator
+            // where she is by then.
+            self.close_typing().await;
             return false;
         }
         if self.post.wake_suppresses(earlier.shifted_to) {
@@ -1293,7 +1296,12 @@ impl AgenticHooks for TextToolHooks<'_> {
                 );
                 false
             }
-            Ok(Posted::Failed | Posted::Cancelled) => false,
+            // Out as the turn was cancelled, so unrecorded — but said.
+            Ok(Posted::Cancelled) => {
+                self.said_earlier.store(true, Ordering::SeqCst);
+                false
+            }
+            Ok(Posted::Failed) => false,
             Err(e) => {
                 tracing::warn!("{} earlier text not posted: {e}", ls::tag("Text", ls::R));
                 false

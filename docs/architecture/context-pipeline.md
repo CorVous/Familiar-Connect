@@ -1345,7 +1345,7 @@ Discord text on channel C
        turn
       a part posted outside channel C threads only onto a message that lives
        in the channel it goes to, and resolves `[@Name]` against that channel
-      cancellation (someone typing or speaking in channel C) drops only what
+      cancellation (someone starts typing in channel C) drops only what
        is bound for channel C; a part bound for the channel she moved to is
        still sent
       router.end_turn(scope)

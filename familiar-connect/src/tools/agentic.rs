@@ -484,6 +484,9 @@ pub async fn agentic_loop(
         // turn's final text), and a hook delivered and recorded it.
         let mut said_earlier = false;
         let mut delivered = false;
+        // This message's text is a leaked `<tool_call …>` block beside a look:
+        // the call written out twice, never something to say.
+        let mut leaked_beside_look = false;
         if !tool_calls.is_empty() {
             let silencing = calls_default_to_silence(&tool_calls, registry);
             silenced_by_call |= silencing;
@@ -494,10 +497,8 @@ pub async fn agentic_loop(
             // message has not moved the turn yet.
             if !silencing && (!silenced_by_call || speak_opt_in) {
                 let (said, silent_leak) = strip_leaked_tool_calls(&strip_think_artifacts(&content));
-                // A leaked `<tool_call …>` block is the call spelled out a
-                // second time, not something she said.
-                let leaked_block = leads_with_tool_call_block(&said);
-                if !silent_leak && !leaked_block && !said.trim().is_empty() {
+                leaked_beside_look = leads_with_tool_call_block(&said);
+                if !silent_leak && !leaked_beside_look && !said.trim().is_empty() {
                     let said = EarlierText {
                         text: said,
                         shifted_to: ctx.shifted_to(),
@@ -582,8 +583,13 @@ pub async fn agentic_loop(
         }
 
         // Text already said ahead of a look is not the final text as well: a
-        // turn cut off at the iteration cap must not say it twice.
-        last_content = if said_earlier { String::new() } else { content };
+        // turn cut off at the iteration cap must not say it twice. Nor does a
+        // leaked block beside a look become the reply there.
+        last_content = if said_earlier || leaked_beside_look {
+            String::new()
+        } else {
+            content
+        };
         if tool_calls.is_empty() {
             break;
         }

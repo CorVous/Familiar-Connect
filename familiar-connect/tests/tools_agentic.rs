@@ -1550,3 +1550,19 @@ async fn leaked_tool_call_block_beside_a_look_is_not_earlier_text() {
     assert_eq!(result.earlier, []);
     assert_eq!(result.final_content, "there you are");
 }
+
+/// At the iteration cap the leaked block does not fall through as the reply.
+#[tokio::test]
+async fn leaked_tool_call_block_beside_a_look_at_the_cap_is_not_the_final_text() {
+    let llm = ScriptedLlm::new(vec![vec![
+        delta_text("<tool_call>{\"name\":\"peek\"}</tool_call>"),
+        delta_tool_call("c1", "peek", &json!({})),
+        delta_finish("tool_calls"),
+    ]]);
+    let mut msgs = vec![user("hi")];
+    let result = agentic_loop(&llm, &mut msgs, &look_registry(), &ctx(), None, 1)
+        .await
+        .unwrap();
+    assert_eq!(result.earlier, []);
+    assert_eq!(result.final_content, "");
+}
