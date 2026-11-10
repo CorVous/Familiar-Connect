@@ -136,7 +136,8 @@ Locations verified against the current tree. Paths are under
    `read_channel`, `view_image` in the text tier) do not trip the gate unless
    called with `silent: true`. Tool calls are still persisted — only
    the `silent` call and its private reasoning are withheld. *Prevents:* the
-   familiar narrating every tool use, and (historically) a `shift_focus` that
+   familiar narrating every acting tool use (what she writes beside a
+   look-first call is posted as a message), and (historically) a `shift_focus` that
    committed globally but left no trace in history.
 9. **Leaked-metadata prefix scrub** — `reply_gate`, rewrite.
    `processors/text_responder.rs` `strip_leaked_metadata_prefix`

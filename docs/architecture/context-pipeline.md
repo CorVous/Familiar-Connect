@@ -1135,8 +1135,9 @@ Shifts are **model-decided and applied immediately**:
    same turn posts to the **new** channel (the reply routes to the
    channel this turn's own shift moved to, recorded turn-locally —
    never the global focus read at send time), while text she wrote
-   *beside* the `shift_focus` call posts first, to the channel she is
-   leaving (each part goes where the turn stood when it was written).
+   *beside* the `shift_focus` call is posted before the move, to the
+   channel she is leaving (each part goes where the turn stood when it
+   was written).
    In the text tier the call is look-first, so that later reply needs
    no `silent: false`. A turn that goes
    **silent** still leaves her
@@ -1328,19 +1329,22 @@ Discord text on channel C
        recorded turn-locally as this turn's send target; its call is persisted
        even when the turn is silent)
       text written beside a look-first call (shift_focus / read_channel /
-       view_image) is kept as earlier text, tagged with the shift target the
-       turn had at that moment
+       view_image) while the turn can still speak is earlier text: posted at
+       once, before that message's tools run, to the shift target the turn
+       has at that moment (else channel C), and appended there as an
+       assistant turn of its own; the tool-call turn then carries no text
       if the turn is silent (an acting tool call without `silent: false`, a
        look-first call with `silent: true`, the `silent` tool, or a leaked
-       `silent(` call): no final reply (a leaked `silent(` drops the earlier
-       text too)
-      for each part in the order written — earlier text, then the reply:
-        if wake turn AND the part predates any shift: suppress
-         (shift-or-silent, #170)
-        else: BotHandle.send_text(the part's shift target, else channel C)
-      append the reply as an assistant turn in the channel it went to (never
-       the global focus read at send time — #170's cross-channel misroute);
-       earlier text is already the content of its tool-call turn
+       `silent(` call) or wrote nothing after a look: no final reply (earlier
+       text already posted stands)
+      else: BotHandle.send_text(this turn's shift target, else channel C, reply)
+            append assistant turn to that same channel  (never the global focus
+            read at send time — #170's cross-channel misroute)
+      wake turn: any part written before a shift is held back
+       (shift-or-silent, #170); held-back earlier text stays on its tool-call
+       turn
+      a part posted outside channel C threads only onto a message that lives
+       in the channel it goes to, and resolves `[@Name]` against that channel
       router.end_turn(scope)
       FocusManager.end_turn()  (idle-clock bookkeeping only)
 

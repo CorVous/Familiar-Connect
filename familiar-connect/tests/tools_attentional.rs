@@ -346,7 +346,7 @@ async fn shift_focus_unusable_channel_id_still_lists_available_channels() {
             parsed["available_channels"][0]["channel_id"], "55",
             "{args}"
         );
-        assert!(fm.shift_calls.lock().unwrap().is_empty(), "{args}");
+        assert_eq!(*fm.shift_calls.lock().unwrap(), [] as [i64; 0], "{args}");
     }
 }
 

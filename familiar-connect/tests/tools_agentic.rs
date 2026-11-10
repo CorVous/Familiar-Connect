@@ -1032,7 +1032,7 @@ async fn reply_after_a_look_first_call_is_spoken() {
     let result = run(scripts, &look_registry(), &mut msgs).await;
     assert!(!result.is_silent);
     assert_eq!(result.final_content, "there you are");
-    assert!(result.earlier.is_empty());
+    assert_eq!(result.earlier, []);
 }
 
 #[tokio::test]
@@ -1047,7 +1047,7 @@ async fn nothing_written_after_a_look_first_call_is_just_empty() {
     let mut msgs = vec![user("hi")];
     let result = run(scripts, &look_registry(), &mut msgs).await;
     assert!(!result.is_silent);
-    assert!(result.final_content.is_empty());
+    assert_eq!(result.final_content, "");
 }
 
 #[tokio::test]
@@ -1065,7 +1065,7 @@ async fn silent_tool_after_a_look_first_call_stays_silent() {
     let mut msgs = vec![user("hi")];
     let result = run(scripts, &look_registry(), &mut msgs).await;
     assert!(result.is_silent);
-    assert!(result.final_content.is_empty());
+    assert_eq!(result.final_content, "");
 }
 
 #[tokio::test]
@@ -1080,7 +1080,7 @@ async fn explicit_silent_true_on_a_look_first_call_silences_the_turn() {
     let mut msgs = vec![user("hi")];
     let result = run(scripts, &look_registry(), &mut msgs).await;
     assert!(result.is_silent);
-    assert!(result.final_content.is_empty());
+    assert_eq!(result.final_content, "");
 }
 
 /// An acting tool anywhere in the turn keeps its silence, look or no look —
@@ -1110,7 +1110,7 @@ async fn an_acting_call_still_silences_a_turn_that_also_looked() {
         let mut msgs = vec![user("hi")];
         let result = run(scripts, &look_registry(), &mut msgs).await;
         assert!(result.is_silent);
-        assert!(result.final_content.is_empty());
+        assert_eq!(result.final_content, "");
     }
 }
 
@@ -1262,7 +1262,7 @@ async fn text_beside_an_acting_call_is_not_earlier_text() {
         let mut msgs = vec![user("hi")];
         let result = run(scripts, &look_registry(), &mut msgs).await;
         assert!(result.is_silent, "{name}");
-        assert!(result.earlier.is_empty(), "{name}");
+        assert_eq!(result.earlier, [], "{name}");
     }
 }
 
@@ -1280,7 +1280,7 @@ async fn earlier_text_goes_through_the_leak_guard() {
     ];
     let mut msgs = vec![user("hi")];
     let result = run(scripts, &look_registry(), &mut msgs).await;
-    assert!(result.earlier.is_empty());
+    assert_eq!(result.earlier, []);
 }
 
 #[tokio::test]
@@ -1366,4 +1366,169 @@ async fn silent_tool_still_persists_the_other_calls_in_its_iteration() {
     // The private reasoning never reaches the hook.
     let dump = format!("{assistant:?}{tool_msgs:?}");
     assert!(!dump.contains("slip away"), "{dump}");
+}
+
+/// A turn cut off at the iteration cap on "text + look" has said that text
+/// once, as earlier text. It is not the final reply as well.
+#[tokio::test]
+async fn earlier_text_at_the_iteration_cap_is_not_also_the_final_text() {
+    let scripts = vec![vec![
+        delta_text("heading over"),
+        delta_tool_call("c1", "peek", &json!({})),
+        delta_finish("tool_calls"),
+    ]];
+    let llm = ScriptedLlm::new(scripts);
+    let mut msgs = vec![user("hi")];
+    let result = agentic_loop(&llm, &mut msgs, &look_registry(), &ctx(), None, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.earlier,
+        [EarlierText {
+            text: "heading over".to_owned(),
+            shifted_to: None,
+        }]
+    );
+    assert_eq!(result.final_content, "");
+}
+
+/// The silence latch covers earlier text too: once an acting call has silenced
+/// the turn, text beside a later look stays unsaid, exactly as it did before
+/// look-first tools existed.
+#[tokio::test]
+async fn text_beside_a_look_stays_unsaid_once_an_acting_call_silenced_the_turn() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "noop", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_text("done, let me look"),
+            delta_tool_call("c2", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("final"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(result.is_silent);
+    assert_eq!(result.final_content, "");
+    assert_eq!(result.earlier, []);
+}
+
+/// `silent: true` on a look means quiet whatever follows, including text
+/// written beside a later look.
+#[tokio::test]
+async fn text_beside_a_look_stays_unsaid_after_an_explicitly_silent_look() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "peek", &json!({"silent": true})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_text("hmm, interesting"),
+            delta_tool_call("c2", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("final"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(result.is_silent);
+    assert_eq!(result.earlier, []);
+}
+
+/// The `silent: false` opt-in latches for the turn, so a turn that opted into
+/// speech beside an acting call still says what it writes ahead of a look.
+#[tokio::test]
+async fn text_beside_a_look_is_said_when_the_turn_opted_into_speech() {
+    let scripts = vec![
+        vec![
+            delta_tool_call("c1", "noop", &json!({"silent": false})),
+            delta_finish("tool_calls"),
+        ],
+        vec![
+            delta_text("done, let me look"),
+            delta_tool_call("c2", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("final"), delta_finish("stop")],
+    ];
+    let mut msgs = vec![user("hi")];
+    let result = run(scripts, &look_registry(), &mut msgs).await;
+    assert!(!result.is_silent);
+    assert_eq!(result.final_content, "final");
+    assert_eq!(result.earlier.len(), 1);
+    assert_eq!(result.earlier[0].text, "done, let me look");
+}
+
+/// Records what the earlier-text hook was handed and what the iteration hook
+/// then persisted; `deliver` is the hook's answer.
+struct EarlierRecorder {
+    deliver: bool,
+    earlier: Mutex<Vec<EarlierText>>,
+    persisted: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl AgenticHooks for EarlierRecorder {
+    async fn on_earlier_text(&self, earlier: &EarlierText) -> bool {
+        self.earlier.lock().unwrap().push(earlier.clone());
+        self.deliver
+    }
+    async fn on_iteration_end(&self, assistant: &Message, _tool_msgs: &[Message]) {
+        self.persisted.lock().unwrap().push(assistant.content_str());
+    }
+}
+
+async fn run_with_earlier_recorder(deliver: bool) -> (EarlierRecorder, Vec<Message>) {
+    let recorder = EarlierRecorder {
+        deliver,
+        earlier: Mutex::new(Vec::new()),
+        persisted: Mutex::new(Vec::new()),
+    };
+    let llm = ScriptedLlm::new(vec![
+        vec![
+            delta_text("one moment"),
+            delta_tool_call("c1", "peek", &json!({})),
+            delta_finish("tool_calls"),
+        ],
+        vec![delta_text("there you are"), delta_finish("stop")],
+    ]);
+    let mut msgs = vec![user("hi")];
+    agentic_loop(
+        &llm,
+        &mut msgs,
+        &look_registry(),
+        &ctx(),
+        Some(&recorder),
+        DEFAULT_MAX_ITERATIONS,
+    )
+    .await
+    .unwrap();
+    (recorder, msgs)
+}
+
+/// Text a hook delivered is recorded by that hook, so the iteration hook gets
+/// the tool-call message without it — while the model's own transcript keeps
+/// what it wrote.
+#[tokio::test]
+async fn delivered_earlier_text_is_left_out_of_the_persisted_tool_call_turn() {
+    let (recorder, msgs) = run_with_earlier_recorder(true).await;
+    assert_eq!(recorder.earlier.lock().unwrap().len(), 1);
+    assert_eq!(recorder.persisted.lock().unwrap()[0], "");
+    assert!(
+        msgs.iter()
+            .any(|m| m.role == "assistant" && m.content_str() == "one moment"),
+        "the in-flight transcript keeps her words"
+    );
+}
+
+/// Text the hook did not deliver (a wake turn holding it back, a failed send)
+/// stays on the tool-call turn, where it was always recorded.
+#[tokio::test]
+async fn undelivered_earlier_text_stays_on_the_persisted_tool_call_turn() {
+    let (recorder, _msgs) = run_with_earlier_recorder(false).await;
+    assert_eq!(recorder.earlier.lock().unwrap().len(), 1);
+    assert_eq!(recorder.persisted.lock().unwrap()[0], "one moment");
 }

@@ -426,7 +426,8 @@ const SILENT_ARG_DESCRIPTION: &str = "Silence is the default: calling this tool 
 /// ([`Tool::look_first`]), where the default is the other way round.
 const LOOK_FIRST_SILENT_ARG_DESCRIPTION: &str = "This tool shows you something \
      before you decide: after its result you can reply in the same turn, or call \
-     silent() to say nothing. Pass true to stay quiet whatever follows.";
+     silent() to say nothing. Anything you write alongside the call is posted \
+     first, where you are now. Pass true to stay quiet whatever follows.";
 
 /// Inject [`SILENT_ARG`] into a tool's `parameters` schema.
 ///

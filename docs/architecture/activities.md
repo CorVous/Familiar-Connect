@@ -93,8 +93,9 @@ top of `handle()`, before any prompt assembly. Three outcomes:
   with a state line appended to the trailing system message, this
   turn only: how long she's been out, who pinged, and that replying
   means heading back while `silent()` means staying out. A real reply
-  triggers a cut-short return (`notify_reply_sent`); a silent verdict
-  keeps her out. One judgment turn per author per absence: after an
+  triggers a cut-short return (`notify_reply_sent`), and so does
+  anything else the turn posts (text written beside a look-first tool
+  call); a turn that posts nothing keeps her out. One judgment turn per author per absence: after an
   author's verdict, their further pings are suppressed and noted like
   any other; the latch clears when the next activity starts. Real
   pings from unfocused channels never earn judgment — they are

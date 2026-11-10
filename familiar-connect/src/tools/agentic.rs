@@ -21,9 +21,12 @@
 //! away. Calling one does not silence the turn ([`calls_default_to_silence`]):
 //! text after the result is the reply; `silent()`, an explicit `silent: true`,
 //! or writing nothing stays quiet. Text written in the *same* message as a
-//! look-first call was said before the look, so it is returned separately
-//! ([`AgenticResult::earlier`]) with the channel the turn stood in then — a
-//! remark made before `shift_focus` belongs to the channel being left.
+//! look-first call was said before the look: it is handed to
+//! [`AgenticHooks::on_earlier_text`] at once, ahead of the handlers, with the
+//! channel the turn stood in then — a remark made before `shift_focus` belongs
+//! to the channel being left — and kept in [`AgenticResult::earlier`]. It
+//! counts as said only while the turn can still speak: once an earlier call
+//! has silenced the turn, text beside a later look stays unsaid too.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -62,10 +65,11 @@ pub struct EarlierText {
 /// Outcome of an [`agentic_loop`] run.
 #[derive(Debug, Clone)]
 pub struct AgenticResult {
-    /// Text written ahead of look-first calls, oldest first. Chronologically it
-    /// precedes [`final_content`](Self::final_content), and it stands whatever
-    /// the turn did afterwards — [`is_silent`](Self::is_silent) speaks only for
-    /// the final text.
+    /// Text written ahead of look-first calls while the turn could still
+    /// speak, oldest first. Chronologically it precedes
+    /// [`final_content`](Self::final_content) and never repeats in it, and it
+    /// stands whatever the turn did afterwards — [`is_silent`](Self::is_silent)
+    /// speaks only for the final text.
     pub earlier: Vec<EarlierText>,
     /// Final assistant text (leak-guarded).
     pub final_content: String,
@@ -90,6 +94,16 @@ pub trait AgenticHooks: Send + Sync {
     /// Awaited after the assistant message is built but before any handler runs
     /// (voice filler-phrase hook), only when tool calls exist.
     async fn on_before_tools(&self, _assistant: &Message) {}
+    /// Awaited when the model wrote text in the same message as a look-first
+    /// call, before any handler runs — so a `shift_focus` in that message has
+    /// not moved the turn yet (the text responder posts it here).
+    ///
+    /// Return `true` once the text is delivered and recorded; the assistant
+    /// message [`on_iteration_end`](Self::on_iteration_end) then receives for
+    /// this iteration carries no text, so it is not recorded twice.
+    async fn on_earlier_text(&self, _earlier: &EarlierText) -> bool {
+        false
+    }
     /// Awaited once per non-silent iteration (responders persist intermediate
     /// turns here).
     async fn on_iteration_end(&self, _assistant: &Message, _tool_msgs: &[Message]) {}
@@ -466,26 +480,46 @@ pub async fn agentic_loop(
         };
         messages.push(assistant_msg.clone());
 
+        // This message's text was said ahead of a look (so it is not also the
+        // turn's final text), and a hook delivered and recorded it.
+        let mut said_earlier = false;
+        let mut delivered = false;
         if !tool_calls.is_empty() {
             let silencing = calls_default_to_silence(&tool_calls, registry);
-            if !silencing {
-                // Look-first calls only: what she wrote alongside them was said
-                // before the look. Captured now, ahead of the handlers, so a
-                // `shift_focus` in this very message has not moved it yet.
-                let (said, silent_leak) = strip_leaked_tool_calls(&strip_think_artifacts(&content));
-                if !silent_leak && !said.trim().is_empty() {
-                    earlier.push(EarlierText {
-                        text: said,
-                        shifted_to: ctx.shifted_to(),
-                    });
-                }
-            }
             silenced_by_call |= silencing;
             speak_opt_in |= calls_opt_into_speech(&tool_calls);
+            // Look-first calls only, and only while the turn can still speak:
+            // what she wrote alongside them was said before the look. Handed
+            // over now, ahead of the handlers, so a `shift_focus` in this very
+            // message has not moved the turn yet.
+            if !silencing && (!silenced_by_call || speak_opt_in) {
+                let (said, silent_leak) = strip_leaked_tool_calls(&strip_think_artifacts(&content));
+                if !silent_leak && !said.trim().is_empty() {
+                    let said = EarlierText {
+                        text: said,
+                        shifted_to: ctx.shifted_to(),
+                    };
+                    if let Some(h) = hooks {
+                        delivered = h.on_earlier_text(&said).await;
+                    }
+                    earlier.push(said);
+                    said_earlier = true;
+                }
+            }
             if let Some(h) = hooks {
                 h.on_before_tools(&assistant_msg).await;
             }
         }
+        // What the iteration hooks persist: without the text a hook already
+        // recorded as a message of its own.
+        let recorded_msg = if delivered {
+            Message {
+                content: Content::Text(String::new()),
+                ..assistant_msg.clone()
+            }
+        } else {
+            assistant_msg
+        };
 
         let mut tool_msgs: Vec<Message> = Vec::new();
         let multimodal = llm.multimodal();
@@ -525,7 +559,7 @@ pub async fn agentic_loop(
                         .collect();
                     let assistant_kept = Message {
                         tool_calls: Some(kept_calls),
-                        ..assistant_msg.clone()
+                        ..recorded_msg.clone()
                     };
                     h.on_iteration_end(&assistant_kept, &kept_msgs).await;
                 }
@@ -541,10 +575,12 @@ pub async fn agentic_loop(
         }
 
         if let Some(h) = hooks {
-            h.on_iteration_end(&assistant_msg, &tool_msgs).await;
+            h.on_iteration_end(&recorded_msg, &tool_msgs).await;
         }
 
-        last_content = content;
+        // Text already said ahead of a look is not the final text as well: a
+        // turn cut off at the iteration cap must not say it twice.
+        last_content = if said_earlier { String::new() } else { content };
         if tool_calls.is_empty() {
             break;
         }

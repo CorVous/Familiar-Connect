@@ -288,7 +288,10 @@ mod tests {
         }
         assert_eq!(look_first(&text), expected);
         // Voice speaks as it streams and keeps every tool silent by default.
-        assert!(look_first(&build_voice_registry(&scheduler(), true)).is_empty());
+        assert_eq!(
+            look_first(&build_voice_registry(&scheduler(), true)),
+            BTreeSet::new()
+        );
     }
 
     /// Every shipped tool carries the shared `silent` flag — the whole

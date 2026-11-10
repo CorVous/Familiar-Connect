@@ -183,9 +183,12 @@ their result is what the model has to see before it can know whether to
 answer, so the flag defaults to `false` and calling one does not silence the
 turn. Text written after the result is the reply; `silent()` or an explicit
 `silent: true` keeps the turn quiet. Text written *beside* a look-first call
-is posted too, in the order written and to the channel the turn stood in at
-that moment: words ahead of a `shift_focus` go to the channel she is leaving,
-the reply after it to the one she moved to. Voice registers no look-first
+is posted too, at once and before the call runs, to the channel the turn
+stands in at that moment: words ahead of a `shift_focus` go to the channel
+she is leaving, the reply after it to the one she moved to. Each posted
+message is recorded as its own assistant turn in the channel it went to. A
+turn already silenced by an earlier call says nothing beside a later look
+either. Voice registers no look-first
 tools; it speaks sentence by sentence as text streams and keeps its own
 "a tool call means silence" latch.
 The `silent(reasoning)` tool is the explicit no-op — do nothing, say nothing —

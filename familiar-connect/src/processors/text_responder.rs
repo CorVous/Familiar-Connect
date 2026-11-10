@@ -476,17 +476,16 @@ impl TextResponder {
         // records the channel it moved to here, so the send target follows THIS
         // turn's own shift rather than the mutable global focus (#170).
         let shift_target: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+        let post = PostContext {
+            channel_id,
+            guild_id,
+            message_id: message_id.as_deref(),
+            label_to_key: &label_to_key,
+            is_wake,
+        };
         let speech = with_call_context(
             CallContext::new(anchor_turn_id, &scope.turn_id, channel_id),
-            self.stream_reply(
-                &scope,
-                channel_id,
-                guild_id,
-                images,
-                activity_state_line,
-                &shift_target,
-                is_wake,
-            ),
+            self.stream_reply(&scope, &post, images, activity_state_line, &shift_target),
         )
         .await;
 
@@ -496,153 +495,45 @@ impl TextResponder {
             }
             return Ok(());
         }
-        if speech.reply.as_ref().is_some_and(|r| r.trim().is_empty()) {
+        let mut reply = speech.reply;
+        if reply.as_ref().is_some_and(|r| r.trim().is_empty()) {
             tracing::warn!(
                 "{} {} {}",
                 ls::tag("Text", ls::Y),
                 ls::kv_styled("skip", "empty_reply", ls::W, ls::LY),
                 ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
             );
+            reply = None;
         }
 
-        // What the turn says, in the order it was written, each part bound for
-        // the channel the turn stood in when she wrote it (#170: the turn's own
-        // shift target or the triggering channel — never the mutable global
-        // focus read at send time). Text ahead of a `shift_focus` goes to the
-        // channel she is leaving; the reply after it goes where she went.
+        // Per-turn routing (#170): the reply goes to the turn's own shift target
+        // (set by `shift_focus` this turn) or the triggering channel — never the
+        // mutable global focus read at send time (the cross-channel misroute).
+        // Text she wrote ahead of a look was already posted where the turn stood
+        // then (`TextToolHooks::on_earlier_text`), so the reply comes last.
         let shifted_to = *shift_target.lock().expect("shift target mutex");
-        let mut posts: Vec<Post> = speech
-            .earlier
-            .into_iter()
-            .map(|e| Post {
-                text: e.text,
-                shifted_to: e.shifted_to,
-                is_reply: false,
-            })
-            .collect();
-        if let Some(reply) = speech.reply.filter(|r| !r.trim().is_empty()) {
-            posts.push(Post {
-                text: reply,
-                shifted_to,
-                is_reply: true,
-            });
+        if reply.is_some() && post.wake_suppresses(shifted_to) {
+            log_wake_suppressed(&scope);
+            reply = None;
         }
 
-        // Wake = shift-or-silent (#170): on a wake turn only text written after
-        // a shift the model made this turn is posted; anything before one would
-        // land in the stale focus channel, so it is suppressed (treated as
-        // silent).
-        if is_wake {
-            let before = posts.len();
-            posts.retain(|p| p.shifted_to.is_some());
-            if posts.len() < before {
-                tracing::info!(
-                    "{} {} {} {}",
-                    ls::tag("\u{1f4a4} Text", ls::B),
-                    ls::kv_styled("guard", "wake_shift_or_silent", ls::W, ls::LB),
-                    ls::kv_styled("action", "suppress", ls::W, ls::LB),
-                    ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
-                );
+        let mut said_something = speech.said_earlier;
+        if let Some(reply) = reply {
+            let send_channel_id = shifted_to.unwrap_or(channel_id);
+            match self
+                .post_part(&scope, &post, &reply, send_channel_id)
+                .await?
+            {
+                Posted::Sent => said_something = true,
+                Posted::Failed => {}
+                Posted::Cancelled => return Ok(()),
             }
         }
-        if posts.is_empty() {
+        if !said_something {
             if let Some(engine) = &self.activity_engine {
                 engine.end_turn().await;
             }
             return Ok(());
-        }
-
-        for post in posts {
-            // Output rewriting: thread marker → leaked-metadata strip → pings.
-            let (unthreaded, wants_thread, target_id) = consume_thread_marker(&post.text);
-            let unthreaded = strip_leaked_metadata_prefix(&unthreaded);
-            let (rewritten, mention_user_ids) = rewrite_pings(&unthreaded, &label_to_key);
-            let thread_target: Option<String> = if wants_thread {
-                if let Some(tid) = &target_id {
-                    let found = self
-                        .history
-                        .lookup_turn_by_platform_message_id(self.familiar_id.clone(), tid.clone())
-                        .await?;
-                    if found.is_some() {
-                        Some(tid.clone())
-                    } else {
-                        message_id.clone()
-                    }
-                } else {
-                    message_id.clone()
-                }
-            } else {
-                None
-            };
-
-            let send_channel_id = post.shifted_to.unwrap_or(channel_id);
-
-            let sent_message_id = match self
-                .send_text
-                .send(
-                    send_channel_id,
-                    &rewritten,
-                    thread_target.as_deref(),
-                    &mention_user_ids,
-                )
-                .await
-            {
-                Ok(id) => id,
-                Err(exc) => {
-                    tracing::warn!(
-                        "{} {}",
-                        ls::tag("Text", ls::R),
-                        ls::kv_styled("send_error", &format!("{exc:?}"), ls::W, ls::R),
-                    );
-                    if let Some(engine) = &self.activity_engine {
-                        engine.end_turn().await;
-                    }
-                    return Ok(());
-                }
-            };
-            let (ch, srv) = self.origin_fields(channel_id);
-            tracing::info!(
-                "{} {}{}{} {} {} {}",
-                ls::tag("\u{1f4ac} Text", ls::G),
-                ch,
-                srv,
-                ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
-                ls::kv_styled(
-                    "chars",
-                    &rewritten.chars().count().to_string(),
-                    ls::W,
-                    ls::LW
-                ),
-                ls::kv_styled(
-                    "thread",
-                    if wants_thread { "1" } else { "0" },
-                    ls::W,
-                    ls::LB
-                ),
-                ls::kv_styled("text", &ls::trunc(&rewritten, 200), ls::W, ls::LW),
-            );
-
-            if scope.is_cancelled() {
-                return Ok(());
-            }
-
-            // Earlier text is already in history: it is the content of the
-            // tool-call turn `on_iteration_end` persisted. Only the reply gets
-            // a turn of its own.
-            if post.is_reply {
-                let mut append =
-                    AppendTurn::new(&self.familiar_id, send_channel_id, "assistant", &rewritten);
-                if let Some(g) = guild_id {
-                    append = append.guild_id(g);
-                }
-                if let Some(id) = &sent_message_id {
-                    append = append.platform_message_id(id);
-                }
-                if let Some(tt) = &thread_target {
-                    append = append.reply_to_message_id(tt);
-                }
-                self.history.append_turn(append).await?;
-            }
         }
         self.router.end_turn(&scope);
         if let Some(fm) = &self.focus_manager {
@@ -655,6 +546,122 @@ impl TextResponder {
             engine.end_turn().await;
         }
         Ok(())
+    }
+
+    /// Send one message of the turn to `send_channel_id` and record it there
+    /// as an assistant turn of its own.
+    ///
+    /// Output rewriting runs per message: thread marker → leaked-metadata strip
+    /// → pings. A message bound for a channel other than the triggering one
+    /// resolves both against the channel it goes to: it can thread only onto a
+    /// message that lives there, and its pings are looked up among the people
+    /// who spoke there.
+    ///
+    /// # Errors
+    /// Propagates a store failure on the lookup / persistence path.
+    async fn post_part(
+        &self,
+        scope: &TurnScope,
+        post: &PostContext<'_>,
+        text: &str,
+        send_channel_id: i64,
+    ) -> anyhow::Result<Posted> {
+        let elsewhere = send_channel_id != post.channel_id;
+        let (unthreaded, wants_thread, target_id) = consume_thread_marker(text);
+        let unthreaded = strip_leaked_metadata_prefix(&unthreaded);
+        let labels_there;
+        let label_to_key = if elsewhere {
+            labels_there = self
+                .build_ping_resolver(send_channel_id, post.guild_id)
+                .await?;
+            &labels_there
+        } else {
+            post.label_to_key
+        };
+        let (rewritten, mention_user_ids) = rewrite_pings(&unthreaded, label_to_key);
+
+        // A bare `[↩]` threads onto the triggering message, which only exists
+        // in the triggering channel.
+        let trigger_message = if elsewhere {
+            None
+        } else {
+            post.message_id.map(str::to_owned)
+        };
+        let thread_target: Option<String> = if !wants_thread {
+            None
+        } else if let Some(tid) = &target_id {
+            let found = self
+                .history
+                .lookup_turn_by_platform_message_id(self.familiar_id.clone(), tid.clone())
+                .await?;
+            if found.is_some_and(|t| t.channel_id == send_channel_id) {
+                Some(tid.clone())
+            } else {
+                trigger_message
+            }
+        } else {
+            trigger_message
+        };
+
+        let sent_message_id = match self
+            .send_text
+            .send(
+                send_channel_id,
+                &rewritten,
+                thread_target.as_deref(),
+                &mention_user_ids,
+            )
+            .await
+        {
+            Ok(id) => id,
+            Err(exc) => {
+                tracing::warn!(
+                    "{} {}",
+                    ls::tag("Text", ls::R),
+                    ls::kv_styled("send_error", &format!("{exc:?}"), ls::W, ls::R),
+                );
+                return Ok(Posted::Failed);
+            }
+        };
+        let (ch, srv) = self.origin_fields(send_channel_id);
+        tracing::info!(
+            "{} {}{}{} {} {} {}",
+            ls::tag("\u{1f4ac} Text", ls::G),
+            ch,
+            srv,
+            ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
+            ls::kv_styled(
+                "chars",
+                &rewritten.chars().count().to_string(),
+                ls::W,
+                ls::LW
+            ),
+            ls::kv_styled(
+                "thread",
+                if wants_thread { "1" } else { "0" },
+                ls::W,
+                ls::LB
+            ),
+            ls::kv_styled("text", &ls::trunc(&rewritten, 200), ls::W, ls::LW),
+        );
+
+        if scope.is_cancelled() {
+            return Ok(Posted::Cancelled);
+        }
+
+        let mut append =
+            AppendTurn::new(&self.familiar_id, send_channel_id, "assistant", &rewritten);
+        if let Some(g) = post.guild_id {
+            append = append.guild_id(g);
+        }
+        if let Some(id) = &sent_message_id {
+            append = append.platform_message_id(id);
+        }
+        if let Some(tt) = &thread_target {
+            append = append.reply_to_message_id(tt);
+        }
+        self.history.append_turn(append).await?;
+        Ok(Posted::Sent)
     }
 
     fn origin_fields(&self, channel_id: i64) -> (String, String) {
@@ -769,13 +776,12 @@ impl TextResponder {
     async fn stream_reply(
         &self,
         scope: &TurnScope,
-        channel_id: i64,
-        guild_id: Option<i64>,
+        post: &PostContext<'_>,
         images: HashMap<String, String>,
         activity_state_line: Option<String>,
         shift_target: &Arc<Mutex<Option<i64>>>,
-        is_wake: bool,
     ) -> TurnSpeech {
+        let (channel_id, guild_id, is_wake) = (post.channel_id, post.guild_id, post.is_wake);
         let mut ctx = AssemblyContext::new(&self.familiar_id, Some(channel_id))
             .with_viewer_mode("text")
             .with_model(self.llm.model());
@@ -873,18 +879,11 @@ impl TextResponder {
         messages.push(Message::new("system", trailing));
 
         if tool_mode {
-            self.stream_reply_with_tools(
-                scope,
-                channel_id,
-                guild_id,
-                messages,
-                images,
-                shift_target,
-            )
-            .await
+            self.stream_reply_with_tools(scope, post, messages, images, shift_target)
+                .await
         } else {
             TurnSpeech {
-                earlier: Vec::new(),
+                said_earlier: false,
                 reply: self.stream_reply_bare(scope, channel_id, messages).await,
             }
         }
@@ -986,8 +985,7 @@ impl TextResponder {
     async fn stream_reply_with_tools(
         &self,
         scope: &TurnScope,
-        channel_id: i64,
-        guild_id: Option<i64>,
+        post: &PostContext<'_>,
         mut messages: Vec<Message>,
         images: HashMap<String, String>,
         shift_target: &Arc<Mutex<Option<i64>>>,
@@ -997,7 +995,7 @@ impl TextResponder {
             return TurnSpeech::default();
         };
         let registry: &ToolRegistry = registry;
-        let mut ctx = factory(channel_id, &scope.turn_id, images);
+        let mut ctx = factory(post.channel_id, &scope.turn_id, images);
         // Intercept `shift_focus` at its call site so the turn's send target is
         // the channel focus actually moved to (not the requested one on a failed
         // shift, and not the mutable global focus at send time) — issue #170.
@@ -1011,16 +1009,17 @@ impl TextResponder {
         let hooks = TextToolHooks {
             responder: self,
             scope,
-            channel_id,
-            guild_id,
+            post,
+            shift_target,
             gate: Mutex::new(StreamGate::new()),
             typing: Mutex::new(None),
             typing_started: AtomicBool::new(false),
             bail_silent: AtomicBool::new(false),
+            said_earlier: AtomicBool::new(false),
         };
         let llm: &dyn LlmClient = self.llm.as_ref();
 
-        let out: TurnSpeech = 'block: {
+        let reply: Option<String> = 'block: {
             let mut result = match agentic_loop(
                 llm,
                 &mut messages,
@@ -1034,7 +1033,7 @@ impl TextResponder {
                 Ok(r) => r,
                 Err(exc) => {
                     log_agentic_error(&exc);
-                    break 'block TurnSpeech::default();
+                    break 'block None;
                 }
             };
             // qwen leak quirk: an empty completion (no text, no tool, not
@@ -1065,39 +1064,35 @@ impl TextResponder {
                     Ok(r) => r,
                     Err(exc) => {
                         log_agentic_error(&exc);
-                        break 'block TurnSpeech::default();
+                        break 'block None;
                     }
                 };
             }
-            let bailed = hooks.bail_silent.load(Ordering::SeqCst);
-            if bailed || result.is_silent {
+            // Staying quiet after a look is a decision, not a fault: she read
+            // the channel and wrote nothing.
+            let read_and_said_nothing =
+                result.tool_calls_made > 0 && result.final_content.trim().is_empty();
+            if hooks.bail_silent.load(Ordering::SeqCst) || result.is_silent || read_and_said_nothing
+            {
                 tracing::info!(
                     "{} {} {}",
                     ls::tag("\u{1f4a4} Text", ls::B),
                     ls::kv_styled("decision", "silent", ls::W, ls::LB),
                     ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
                 );
-                // A leaked `silent(…)` abandons the turn outright. A turn that
-                // went quiet later keeps what it had already said before a look.
-                break 'block TurnSpeech {
-                    earlier: if bailed { Vec::new() } else { result.earlier },
-                    reply: None,
-                };
+                break 'block None;
             }
             if scope.is_cancelled() {
-                break 'block TurnSpeech::default();
+                break 'block None;
             }
-            TurnSpeech {
-                earlier: result.earlier,
-                reply: Some(result.final_content),
-            }
+            Some(result.final_content)
         };
 
-        let ind = hooks.typing.lock().expect("typing mutex").take();
-        if let Some(ind) = ind {
-            ind.close().await;
+        hooks.close_typing().await;
+        TurnSpeech {
+            said_earlier: hooks.said_earlier.load(Ordering::SeqCst),
+            reply,
         }
-        out
     }
 }
 
@@ -1110,22 +1105,57 @@ fn log_agentic_error(exc: &dyn std::fmt::Debug) {
     );
 }
 
-/// What one turn has to say, in the order it was written.
+/// What one tool-enabled turn said.
 #[derive(Default)]
 struct TurnSpeech {
-    /// Text written ahead of a look-first call (`shift_focus`, …), oldest first.
-    earlier: Vec<EarlierText>,
-    /// The turn's final reply; `None` when it stayed silent or was abandoned.
+    /// Text written ahead of a look-first call (`shift_focus`, …) was already
+    /// posted during the turn.
+    said_earlier: bool,
+    /// The turn's final reply, still to post; `None` when it stayed silent or
+    /// was abandoned.
     reply: Option<String>,
 }
 
-/// One message to send: its text and where the turn stood when it was written.
-struct Post {
-    text: String,
-    /// The turn's shift target at that moment; `None` = the triggering channel.
-    shifted_to: Option<i64>,
-    /// The final reply (persisted as its own turn) rather than earlier text.
-    is_reply: bool,
+/// The per-turn facts every message the turn posts needs.
+struct PostContext<'a> {
+    /// The channel the turn was triggered in.
+    channel_id: i64,
+    guild_id: Option<i64>,
+    /// The triggering message, the target of a bare `[↩]`.
+    message_id: Option<&'a str>,
+    /// `[@Label]` → account key, for the triggering channel.
+    label_to_key: &'a HashMap<String, String>,
+    is_wake: bool,
+}
+
+impl PostContext<'_> {
+    /// Wake = shift-or-silent (#170): a wake turn has nobody to answer where it
+    /// woke, so only text written after a shift the model made this turn is
+    /// posted. Anything before one would land in the stale focus channel.
+    const fn wake_suppresses(&self, shifted_to: Option<i64>) -> bool {
+        self.is_wake && shifted_to.is_none()
+    }
+}
+
+/// How [`TextResponder::post_part`] ended.
+enum Posted {
+    /// Sent and recorded.
+    Sent,
+    /// The send failed (logged); nothing recorded.
+    Failed,
+    /// The turn was cancelled around the send; nothing recorded.
+    Cancelled,
+}
+
+/// Log a wake turn's text being held back by the shift-or-silent guard.
+fn log_wake_suppressed(scope: &TurnScope) {
+    tracing::info!(
+        "{} {} {} {}",
+        ls::tag("\u{1f4a4} Text", ls::B),
+        ls::kv_styled("guard", "wake_shift_or_silent", ls::W, ls::LB),
+        ls::kv_styled("action", "suppress", ls::W, ls::LB),
+        ls::kv_styled("turn", &scope.turn_id, ls::W, ls::LC),
+    );
 }
 
 /// Preferred display label for an author (`display_name`, else `"unknown"`).
@@ -1140,12 +1170,26 @@ fn author_display(author: &Author) -> &str {
 struct TextToolHooks<'a> {
     responder: &'a TextResponder,
     scope: &'a TurnScope,
-    channel_id: i64,
-    guild_id: Option<i64>,
+    post: &'a PostContext<'a>,
+    /// Where `shift_focus` has moved this turn so far.
+    shift_target: &'a Arc<Mutex<Option<i64>>>,
     gate: Mutex<StreamGate>,
     typing: Mutex<Option<Box<dyn TypingIndicator>>>,
     typing_started: AtomicBool,
     bail_silent: AtomicBool,
+    /// Some text ahead of a look was posted this turn.
+    said_earlier: AtomicBool,
+}
+
+impl TextToolHooks<'_> {
+    /// Close the typing indicator, if one is open; the next text reopens it.
+    async fn close_typing(&self) {
+        let ind = self.typing.lock().expect("typing mutex").take();
+        if let Some(ind) = ind {
+            ind.close().await;
+        }
+        self.typing_started.store(false, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -1173,11 +1217,52 @@ impl AgenticHooks for TextToolHooks<'_> {
                 if !self.typing_started.swap(true, Ordering::SeqCst)
                     && let Some(trigger) = &self.responder.trigger_typing
                 {
-                    let ind = trigger.open(self.channel_id).await;
+                    // She types where she is now: the channel this turn
+                    // shifted to, else the one it was triggered in.
+                    let here = self
+                        .shift_target
+                        .lock()
+                        .expect("shift target mutex")
+                        .unwrap_or(self.post.channel_id);
+                    let ind = trigger.open(here).await;
                     *self.typing.lock().expect("typing mutex") = Some(ind);
                 }
             }
             StreamDecision::Suppress | StreamDecision::Pending => {}
+        }
+    }
+
+    /// Post what she wrote ahead of a look right away, where the turn stands:
+    /// words before a `shift_focus` reach the channel she is leaving before she
+    /// leaves it.
+    async fn on_earlier_text(&self, earlier: &EarlierText) -> bool {
+        if self.scope.is_cancelled() || self.bail_silent.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.post.wake_suppresses(earlier.shifted_to) {
+            log_wake_suppressed(self.scope);
+            return false;
+        }
+        let send_channel_id = earlier.shifted_to.unwrap_or(self.post.channel_id);
+        let posted = self
+            .responder
+            .post_part(self.scope, self.post, &earlier.text, send_channel_id)
+            .await;
+        // The message is out: the indicator has done its job for this part.
+        self.close_typing().await;
+        match posted {
+            Ok(Posted::Sent) => {
+                self.said_earlier.store(true, Ordering::SeqCst);
+                true
+            }
+            Ok(Posted::Failed | Posted::Cancelled) => false,
+            Err(e) => {
+                tracing::warn!(
+                    "{} earlier-text persist failed: {e}",
+                    ls::tag("Text", ls::R)
+                );
+                false
+            }
         }
     }
 
@@ -1189,12 +1274,12 @@ impl AgenticHooks for TextToolHooks<'_> {
         let tcj = serde_json::to_string(tool_calls).unwrap_or_else(|_| "[]".to_owned());
         let mut append = AppendTurn::new(
             &self.responder.familiar_id,
-            self.channel_id,
+            self.post.channel_id,
             "assistant",
             assistant.content_str(),
         )
         .tool_calls_json(tcj);
-        if let Some(g) = self.guild_id {
+        if let Some(g) = self.post.guild_id {
             append = append.guild_id(g);
         }
         // Hook returns ``; a store failure here is logged and dropped.
@@ -1204,14 +1289,14 @@ impl AgenticHooks for TextToolHooks<'_> {
         for tm in tool_msgs {
             let mut a = AppendTurn::new(
                 &self.responder.familiar_id,
-                self.channel_id,
+                self.post.channel_id,
                 "tool",
                 tool_content_as_text(&tm.content),
             );
             if let Some(id) = &tm.tool_call_id {
                 a = a.tool_call_id(id);
             }
-            if let Some(g) = self.guild_id {
+            if let Some(g) = self.post.guild_id {
                 a = a.guild_id(g);
             }
             if let Err(e) = self.responder.history.append_turn(a).await {
