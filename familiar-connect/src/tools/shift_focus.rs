@@ -25,14 +25,19 @@ fn error_output(msg: &str) -> ToolOutput {
 }
 
 /// Shortest digit run that is taken for a channel id inside a longer string
-/// (`<#123…>`, `#general(123…)`); shorter runs are part of a name.
-const MIN_EMBEDDED_ID_DIGITS: usize = 15;
+/// (`<#123…>`, `#general(123…)`). Every Discord snowflake has at least 17
+/// digits; a shorter run is part of a name, or a float's 16-digit mantissa.
+const MIN_EMBEDDED_ID_DIGITS: usize = 17;
 
-/// Whether `id` is `approx` once both are float64s, give or take one ULP.
+/// Below 2^53 a float64 holds every integer exactly, so nothing gets rounded.
+const FLOAT_EXACT_LIMIT: f64 = 9_007_199_254_740_992.0;
+
+/// Whether `id` is `approx` once both are float64s.
 ///
-/// The slack covers `serde_json` (built without `float_roundtrip`) parsing an
-/// exponent-form number one ULP off. At snowflake magnitude that is a few
-/// hundred ids — still inside one Discord millisecond.
+/// Past 2^53, where rounding happens, one ULP of slack is allowed: it covers
+/// `serde_json` (built without `float_roundtrip`) parsing an exponent-form
+/// number one ULP off. At snowflake magnitude that is a few hundred ids — still
+/// inside one Discord millisecond. Below 2^53 the match must be exact.
 fn same_float(id: i64, approx: f64) -> bool {
     if id <= 0 || !approx.is_finite() || approx <= 0.0 {
         return false;
@@ -42,7 +47,8 @@ fn same_float(id: i64, approx: f64) -> bool {
         reason = "deliberately reproducing the provider's float64 rounding"
     )]
     let as_float = id as f64;
-    as_float.to_bits().abs_diff(approx.to_bits()) <= 1
+    let slack = u64::from(approx >= FLOAT_EXACT_LIMIT);
+    as_float.to_bits().abs_diff(approx.to_bits()) <= slack
 }
 
 /// Read the model's `channel_id` as `(exact id, float64 value)`, generously:
@@ -162,10 +168,17 @@ pub async fn shift_focus_handler(args: &Value, ctx: &ToolContext) -> anyhow::Res
                         .to_owned()
                 },
                 |given| {
-                    format!(
-                        "channel {given} is not subscribed — cannot focus there. \
-                         Pick one of available_channels."
-                    )
+                    if resolved.is_some() {
+                        format!(
+                            "channel {given} is not subscribed — cannot focus there. \
+                             Pick one of available_channels."
+                        )
+                    } else {
+                        format!(
+                            "could not read a channel id from '{given}' — pass the \
+                             channel_id of one of available_channels, as a string."
+                        )
+                    }
                 },
             );
             return Ok(ToolOutput::Text(
@@ -332,6 +345,9 @@ mod tests {
         assert_eq!(resolve(&json!(55), &[55, 66]), Some(55));
         assert_eq!(resolve(&json!(77), &[55, 66]), Some(77));
         assert_eq!(resolve(&json!(-5), &[55, 66]), Some(-5));
+        // Below 2^53 nothing is rounded, so a near-miss float is not a match.
+        assert_eq!(resolve(&json!(54.999_999_999_999_99), &[55, 66]), None);
+        assert_eq!(resolve(&json!(55.0), &[55, 66]), Some(55));
     }
 
     #[test]
@@ -342,6 +358,8 @@ mod tests {
             json!(true),
             json!("general"),
             json!("#general2"),
+            // A float inside other text: its mantissa is not an id.
+            json!("about 1.2571656770521702e18"),
             json!(""),
             json!([DM]),
             json!(u64::MAX),

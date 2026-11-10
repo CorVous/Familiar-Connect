@@ -330,9 +330,12 @@ async fn shift_focus_unusable_channel_id_still_lists_available_channels() {
         (json!({"channel_id": null}), "missing 'channel_id'"),
         (
             json!({"channel_id": "#general"}),
-            "channel #general is not subscribed",
+            "could not read a channel id from '#general'",
         ),
-        (json!({"channel_id": 1.5e18}), "is not subscribed"),
+        (
+            json!({"channel_id": 1.5e18}),
+            "could not read a channel id from",
+        ),
     ] {
         let fm = Arc::new(MockFocus::new());
         let ctx = ctx_with(Some(fm.clone()), None);
