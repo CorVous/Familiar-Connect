@@ -69,11 +69,13 @@ whose content mentions the quiet, frames staying around (via
 `silent()`) as the usual choice, and keeps `start_activity` open for
 when the familiar truly wants a change of scene. The wording is soft
 on purpose: some models (Gemini, for one) take any "you could head
-out" as a go-ahead and leave on every nudge. When another channel
-she is subscribed to holds unread messages, the nudge instead says so
-and points at `shift_focus` (one channel at a time, `silent()` to
-simply read), leaving `start_activity` out: a quiet stretch is when
-she clears what is waiting. The
+out" as a go-ahead and leave on every nudge. When another text
+channel she is subscribed to holds unread messages, the nudge leads
+with that instead: it points at `shift_focus` (one channel at a time,
+`silent()` to simply read) and then repeats the stay-or-head-out
+framing, so a quiet stretch is first of all when she clears what is
+waiting. `[focus].unread_nudge_enabled = false` switches the unread
+lead off along with the unread nudge. The
 quiet clock is fed by the responder (`note_traffic` on every handled
 text event); firing marks the nudge pending so the debounce window
 starts. The nudge only earns the model a turn — going out remains

@@ -850,7 +850,7 @@ as `#channel (id N) (2)`; DMs render as `DM from <name> (id N)`, and a
 channel the gateway name cache missed as `unnamed channel (id N)` —
 never a bare `#<snowflake>`, which would claim the channel is *named*
 after its id (issue #222). Digest ids come from staged turns in the
-history store, narrowed to subscribed channels (see
+history store, narrowed to text-subscribed channels (see
 [Unread digest](#unread-digest)), while names come from the gateway cache, so an id with
 no name is routine rather than exceptional. Both clauses omit when
 their source is empty. This is the model-facing surface of the
@@ -1296,13 +1296,15 @@ a transcript, which is always a user turn.
 
 `staged_channels(familiar_id)` returns `{channel_id: staged_count}`
 for channels with unconsumed turns. The text responder keeps the
-channels she is subscribed to (`FocusManager::is_subscribed`) and
-passes those to the [final reminder](#final-reminder) as
-`unread_digest`, so the model sees a prose nudge naming channels with
-pending messages and the `shift_focus` tool. The subscription filter
-keeps the digest to channels `shift_focus` accepts: a turn left staged
-in a channel she has since unsubscribed from stays in the store but is
-not offered to her. `/diagnostics` renders the unfiltered counts
+channels she holds a text subscription to
+(`FocusManager::is_text_subscribed`) and passes those to the
+[final reminder](#final-reminder) as `unread_digest`, so the model
+sees a prose nudge naming channels with pending messages and the
+`shift_focus` tool. The filter keeps the digest to channels a
+`shift_focus` reads and clears: a turn left staged in a channel she
+has since unsubscribed from stays in the store but is not offered to
+her, and neither is one staged in a voice-only channel, where a shift
+moves the voice pointer and promotes nothing. `/diagnostics` renders the unfiltered counts
 (`Unreads: #<id> (<count>), …`) alongside the live focus pointers
 (`Focus: text=#<id> voice=#<id>`), so an operator still sees the
 leftover turns.

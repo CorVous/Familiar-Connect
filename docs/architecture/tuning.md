@@ -290,7 +290,8 @@ catch_up_limit         = 20
 | `catch_up_limit` | `20` | How many staged turns she actually catches up on when attention lands on a channel — the `shift_focus` preview size and the per-channel cap on activity-return promotion. Staged backlog beyond this is **missed** (dropped from her window and rolling summary), not silently consumed. Direct @-mentions/replies-to-her are always caught regardless of age. |
 
 Set `unread_nudge_enabled = false` to keep attention pinned to the
-focused channel and never nudge for backgrounded traffic; when enabled,
+focused channel and never nudge for backgrounded traffic (the idle
+nudge then also stops pointing at channels with messages waiting); when enabled,
 `nudge_debounce_seconds` is the sole throttle.
 
 `catch_up_limit` makes perception match consumption: she only takes in
@@ -370,7 +371,7 @@ active_hours          = "10:00-23:00"
 | Knob | Default | Purpose |
 |---|---|---|
 | `archive_after_minutes` | `45` | Absence at/above this sets the per-channel archive watermark at the departure turn — prompt window resets there; `read_channel` scrollback doesn't. |
-| `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge may offer `start_activity`; also the nudge debounce window. |
+| `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge fires (it offers staying, `start_activity`, and catching up on unread channels); also the nudge debounce window. |
 | `min_gap_minutes` | `90` | Minimum gap after a return before the next nudge. |
 | `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges only fire inside this window. |
 

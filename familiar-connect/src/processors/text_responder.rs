@@ -816,10 +816,11 @@ impl TextResponder {
             Some(
                 staged
                     .into_iter()
-                    // Only channels `shift_focus` can reach: a turn left staged
-                    // in a channel she has since stopped following would send
-                    // her after a channel the tool refuses.
-                    .filter(|(cid, _)| fm.is_subscribed(*cid))
+                    // Only text channels she follows: a turn left staged in
+                    // a channel she has since stopped following would send
+                    // her after a channel `shift_focus` refuses or cannot
+                    // clear.
+                    .filter(|(cid, _)| fm.is_text_subscribed(*cid))
                     .map(|(cid, cu)| (cid, (cu.unread(), cu.pings())))
                     .collect(),
             )
