@@ -50,11 +50,16 @@ static API_CALL_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
 /// A thought-channel marker Gemini leaks ahead of a reply: `[thought\n]`,
-/// seen with one stray character in front (`?[thought\n]`).
+/// seen behind one stray `?` (`?[thought\n]`; U+FFFD covers the same stray
+/// byte decoded lossily). The whitespace before the closing bracket is part of
+/// the leak's shape, so a bracketed aside she writes herself (`[thought]`)
+/// stays prose.
 static LEADING_THOUGHT_MARKER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*[^\s\[]?\[thoughts?\s*\]\s*").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"(?i)^\s*[?\x{FFFD}]?\[thought\s+\]\s*").expect("valid regex"));
 /// The marker's fixed opening, lowercased, for the still-streaming check.
 const THOUGHT_MARKER_OPEN: &str = "[thought";
+/// The stray characters seen (or decoded) in front of the marker.
+const THOUGHT_MARKER_STRAYS: [char; 2] = ['?', '\u{FFFD}'];
 
 /// `content` without a leading leaked thought marker (`?[thought\n]`).
 ///
@@ -68,28 +73,64 @@ pub fn strip_leading_thought_marker(content: &str) -> &str {
 }
 
 /// Could `stripped` (left-trimmed, non-empty) still grow into a leading
-/// thought marker? True while it is a prefix of `[thought…]`, with or without
-/// one stray leading character, and the closing bracket has not arrived.
+/// thought marker? True while it is a prefix of `[thought ` plus whitespace,
+/// with or without the stray leading character, and the closing bracket has
+/// not arrived.
 fn thought_marker_prefix_possible(stripped: &str) -> bool {
     let lc = stripped.to_ascii_lowercase();
-    let mut chars = lc.chars();
-    let after_stray = match chars.next() {
-        Some(c) if c != '[' => Some(chars.as_str()),
-        _ => None,
-    };
+    let after_stray = lc.strip_prefix(THOUGHT_MARKER_STRAYS);
     std::iter::once(lc.as_str())
         .chain(after_stray)
         .any(|candidate| {
             THOUGHT_MARKER_OPEN.starts_with(candidate)
                 || candidate
                     .strip_prefix(THOUGHT_MARKER_OPEN)
-                    .is_some_and(|rest| {
-                        rest.strip_prefix('s')
-                            .unwrap_or(rest)
-                            .chars()
-                            .all(char::is_whitespace)
-                    })
+                    .is_some_and(|rest| rest.chars().all(char::is_whitespace))
         })
+}
+
+/// Drops a leaked thought marker from the start of one streamed message.
+///
+/// For a path that hands deltas straight on (voice): the start of the message
+/// is held back until a marker is either complete (dropped) or ruled out
+/// (released untouched); after that every delta passes through. One filter per
+/// assistant message — a turn that calls tools starts a fresh one for each
+/// message the model writes.
+#[derive(Debug, Default)]
+pub struct ThoughtMarkerFilter {
+    held: String,
+    passed: bool,
+}
+
+impl ThoughtMarkerFilter {
+    /// A filter for the start of a new message.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one streamed delta; returns the text to hand on (possibly empty
+    /// while the start of the message is still being judged).
+    pub fn feed(&mut self, delta: &str) -> String {
+        if self.passed {
+            return delta.to_owned();
+        }
+        self.held.push_str(delta);
+        let trimmed = self.held.trim_start();
+        if trimmed.is_empty() || thought_marker_prefix_possible(trimmed) {
+            return String::new();
+        }
+        self.passed = true;
+        let held = std::mem::take(&mut self.held);
+        strip_leading_thought_marker(&held).to_owned()
+    }
+
+    /// The message ended: release whatever is still held (a marker that never
+    /// closed is text after all) and reset for the next message.
+    pub fn finish(&mut self) -> String {
+        self.passed = false;
+        std::mem::take(&mut self.held)
+    }
 }
 
 /// Whether `content` leads with a leaked `<tool_call …>` block.
@@ -183,16 +224,6 @@ impl StreamGate {
     #[must_use]
     pub const fn decided(&self) -> Option<StreamDecision> {
         self.decided
-    }
-
-    /// When the text fed so far led with a leaked thought marker, the text
-    /// that follows it; `None` when there was no marker. A caller that buffers
-    /// the raw stream for speech uses this to drop the marker once the gate
-    /// opens.
-    #[must_use]
-    pub fn text_after_marker(&self) -> Option<&str> {
-        let rest = strip_leading_thought_marker(&self.buf);
-        (rest.len() != self.buf.len()).then_some(rest)
     }
 
     const fn latch(&mut self, decision: StreamDecision) -> StreamDecision {
@@ -325,7 +356,7 @@ fn is_xml_name(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        LeadingLeak, StreamDecision, StreamGate, classify_leading_leak,
+        LeadingLeak, StreamDecision, StreamGate, ThoughtMarkerFilter, classify_leading_leak,
         strip_leading_thought_marker,
     };
 
@@ -424,17 +455,24 @@ mod tests {
     #[test]
     fn thought_marker_is_stripped_only_when_it_leads() {
         assert_eq!(strip_leading_thought_marker("?[thought\n]Hello."), "Hello.");
-        assert_eq!(strip_leading_thought_marker("[thought]\nHello."), "Hello.");
         assert_eq!(
-            strip_leading_thought_marker("  ?[Thoughts ] Hello."),
+            strip_leading_thought_marker("[thought\n]\nHello."),
+            "Hello."
+        );
+        assert_eq!(
+            strip_leading_thought_marker("  \u{FFFD}[Thought ] Hello."),
             "Hello."
         );
         assert_eq!(strip_leading_thought_marker("?[thought\n]"), "");
         for prose in [
             "Hello there.",
-            "A [thought] mid-sentence stays.",
-            "?? [thought] after two stray characters stays.",
+            "A [thought\n] mid-sentence stays.",
+            "?? [thought\n] after two stray characters stays.",
             "[thoughtful] of you.",
+            // Her own bracketed aside, and a marker shape never seen leaked.
+            "[thought] Hm, umu.",
+            "[thoughts ] Hm, umu.",
+            "x[thought\n]Hello.",
         ] {
             assert_eq!(strip_leading_thought_marker(prose), prose);
         }
@@ -464,10 +502,10 @@ mod tests {
         assert_eq!(decided, StreamDecision::Silent);
     }
 
-    /// The marker ahead of an ordinary reply: the gate opens on the reply and
-    /// hands back the text without the marker.
+    /// The marker ahead of an ordinary reply: the gate waits out the marker
+    /// and opens on the reply.
     #[test]
-    fn gate_thought_marker_then_prose_speaks_without_the_marker() {
+    fn gate_thought_marker_then_prose_speaks() {
         let mut g = StreamGate::new();
         assert_eq!(g.feed("?[thought"), StreamDecision::Pending);
         assert_eq!(g.feed("\n]"), StreamDecision::Pending);
@@ -475,11 +513,73 @@ mod tests {
             g.feed("Then keep your matches away."),
             StreamDecision::Speak
         );
-        assert_eq!(g.text_after_marker(), Some("Then keep your matches away."));
+    }
 
-        let mut plain = StreamGate::new();
-        assert_eq!(plain.feed("Hello there."), StreamDecision::Speak);
-        assert_eq!(plain.text_after_marker(), None);
+    /// Run `deltas` through a fresh [`ThoughtMarkerFilter`], end of message
+    /// included; returns what it handed on.
+    fn filter_run(deltas: &[&str]) -> String {
+        let mut f = ThoughtMarkerFilter::new();
+        let mut out: String = deltas.iter().map(|d| f.feed(d)).collect();
+        out.push_str(&f.finish());
+        out
+    }
+
+    #[test]
+    fn filter_drops_a_leading_marker_however_it_is_split() {
+        let reply = "?[thought\n]Then keep your matches away.";
+        assert_eq!(filter_run(&[reply]), "Then keep your matches away.");
+        assert_eq!(
+            filter_run(&[
+                "?",
+                "[thou",
+                "ght",
+                "\n",
+                "]",
+                "Then keep",
+                " your matches away."
+            ]),
+            "Then keep your matches away."
+        );
+        let by_char: Vec<String> = reply.chars().map(String::from).collect();
+        let by_char: Vec<&str> = by_char.iter().map(String::as_str).collect();
+        assert_eq!(filter_run(&by_char), "Then keep your matches away.");
+        // Nothing of the marker is handed on while it is still arriving.
+        let mut f = ThoughtMarkerFilter::new();
+        for part in ["?", "[thought", "\n", "]"] {
+            assert_eq!(f.feed(part), "", "{part:?}");
+        }
+        assert_eq!(f.feed("Hello."), "Hello.");
+    }
+
+    #[test]
+    fn filter_leaves_everything_else_untouched() {
+        for text in [
+            "Hello there.",
+            "  leading space kept.",
+            "? What was that",
+            "[the harpy laughs] Hm.",
+            "[thought] her own aside.",
+            "?",
+            "[thought",
+            "Mid-reply ?[thought\n] stays.",
+        ] {
+            assert_eq!(filter_run(&[text]), text, "{text}");
+            let by_char: Vec<String> = text.chars().map(String::from).collect();
+            let by_char: Vec<&str> = by_char.iter().map(String::as_str).collect();
+            assert_eq!(filter_run(&by_char), text, "{text} by char");
+        }
+    }
+
+    /// One filter serves a whole turn: after `finish` it judges the start of
+    /// the next message afresh.
+    #[test]
+    fn filter_judges_each_message_afresh() {
+        let mut f = ThoughtMarkerFilter::new();
+        assert_eq!(f.feed("?[thought\n]One."), "One.");
+        assert_eq!(f.finish(), "");
+        assert_eq!(f.feed("?[thought\n]"), "");
+        assert_eq!(f.feed("Two."), "Two.");
+        assert_eq!(f.finish(), "");
     }
 
     #[test]
@@ -487,6 +587,10 @@ mod tests {
         assert_eq!(gate_run(&["[the harpy laughs]"]), StreamDecision::Speak);
         assert_eq!(gate_run(&["?! what was that"]), StreamDecision::Speak);
         assert_eq!(gate_run(&["[thoughtful pause] Hm."]), StreamDecision::Speak);
+        assert_eq!(
+            gate_run(&["[thought] her own aside."]),
+            StreamDecision::Speak
+        );
         assert_eq!(gate_run(&["I", " see."]), StreamDecision::Speak);
     }
 

@@ -520,14 +520,16 @@ pub async fn agentic_loop(
             }
         }
         // What the iteration hooks persist: without the text a hook already
-        // recorded as a message of its own.
-        let recorded_msg = if delivered {
-            Message {
-                content: Content::Text(String::new()),
-                ..assistant_msg.clone()
-            }
-        } else {
-            assistant_msg
+        // recorded as a message of its own, and never the raw text — a leaked
+        // thought marker or call written beside a real call must not reach
+        // history, where it would be replayed to the model as her own words.
+        let recorded_msg = Message {
+            content: Content::Text(if delivered {
+                String::new()
+            } else {
+                guard_leaked_content(&content)
+            }),
+            ..assistant_msg
         };
 
         let mut tool_msgs: Vec<Message> = Vec::new();
@@ -678,7 +680,7 @@ mod tests {
             "Then keep your matches away, umu."
         );
         assert_eq!(
-            strip_think_artifacts("<think>hm</think>\n[thought]\nUmu."),
+            strip_think_artifacts("<think>hm</think>\n[thought\n]\nUmu."),
             "Umu."
         );
     }

@@ -810,6 +810,54 @@ async fn on_iteration_end_receives_assistant_and_tool_messages() {
     assert!(tools2.is_empty());
 }
 
+/// What a tool-call turn records is guarded like the reply: a leaked thought
+/// marker or a call written as text beside a real call never reaches the hook
+/// that persists the turn, while real text beside the call is kept.
+#[tokio::test]
+async fn on_iteration_end_never_receives_leaked_text() {
+    for (written, recorded) in [
+        ("?[thought\n]", ""),
+        (
+            "?[thought\n]CALL:default_api:silent{reasoning: nobody asked}",
+            "",
+        ),
+        ("CALL:default_api:t{}", ""),
+        ("?[thought\n]Working...", "Working..."),
+        ("Working...", "Working..."),
+    ] {
+        let mut registry = ToolRegistry::new();
+        registry.register(named_ok_tool("t")).unwrap();
+        let scripts = vec![
+            vec![
+                delta_text(written),
+                delta_tool_call("c1", "t", &json!({})),
+                delta_finish("tool_calls"),
+            ],
+            vec![delta_text("Done"), delta_finish("stop")],
+        ];
+        let recorder = IterRecorder {
+            events: Mutex::new(Vec::new()),
+        };
+        let llm = ScriptedLlm::new(scripts);
+        let mut msgs = vec![user("x")];
+        agentic_loop(
+            &llm,
+            &mut msgs,
+            &registry,
+            &ctx(),
+            Some(&recorder),
+            DEFAULT_MAX_ITERATIONS,
+        )
+        .await
+        .unwrap();
+        let events = recorder.events.lock().unwrap().clone();
+        let (asst, tools) = &events[0];
+        assert_eq!(asst.content_str(), recorded, "{written:?}");
+        assert!(asst.tool_calls.is_some(), "{written:?}");
+        assert_eq!(tools.len(), 1, "{written:?}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ImageResult serialization
 // ---------------------------------------------------------------------------

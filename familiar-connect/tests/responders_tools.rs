@@ -372,6 +372,53 @@ async fn thought_marker_is_stripped_from_the_posted_and_recorded_reply() {
     assert_eq!(said, [reply]);
 }
 
+/// The marker (or a call written as text) beside a real tool call: the
+/// tool-call turn is recorded without it, so it is never replayed to her as
+/// her own words.
+#[tokio::test]
+async fn leaked_text_beside_a_tool_call_is_not_recorded() {
+    for written in [
+        "?[thought\n]",
+        "?[thought\n]CALL:default_api:silent{reasoning: nobody asked}",
+    ] {
+        let s = store();
+        let mut reg = ToolRegistry::new();
+        let handler = FnHandler(|_args: Value, _ctx: ToolContext| async move {
+            Ok(ToolOutput::Text(json!({"ok": true}).to_string()))
+        });
+        reg.register(Tool::new("set_alarm", "", json!({}), Arc::new(handler)))
+            .unwrap();
+        let llm = Arc::new(ScriptedToolLlm::new(vec![
+            vec![
+                text_delta(written),
+                tc_delta(
+                    "c1",
+                    "set_alarm",
+                    json!({"reason": "a", "delay_seconds": 5}),
+                ),
+                finish("tool_calls"),
+            ],
+            vec![finish("stop")],
+        ]));
+        let send = Arc::new(CapturingSend::new());
+        let r = responder_with_tools(Arc::clone(&s), llm, send.clone(), Arc::new(reg));
+        r.handle(
+            &discord_text_event(text_payload(42, "wake me at six"), "e-1"),
+            &bus(),
+        )
+        .await
+        .unwrap();
+        assert!(send.calls().is_empty(), "{written:?}: {:?}", send.calls());
+        let turns = s.sync().recent("fam", 42, 20, None, None).unwrap();
+        let call_turns: Vec<&str> = turns
+            .iter()
+            .filter(|t| t.role == "assistant")
+            .map(|t| t.content.as_str())
+            .collect();
+        assert_eq!(call_turns, [""], "{written:?}");
+    }
+}
+
 #[tokio::test]
 async fn loop_max_iterations_caps_agentic_loop() {
     let s = store();

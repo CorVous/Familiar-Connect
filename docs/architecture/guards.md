@@ -131,10 +131,16 @@ Locations verified against the current tree. Paths are under
    otherwise). A leaked thought marker ahead of the reply (`?[thought\n]`,
    also Gemini) is not content: `strip_leading_thought_marker` drops it, the
    gate judges what follows, and the reply behind it is posted, spoken and
-   recorded without it. That matters beyond the one message: a leak that is
-   posted is also stored as her own turn, and the model then copies the shape
-   from its history on the next turn. The agentic loop's finished
-   reply is covered as well by the return-time strip guard in `tools::agentic`.
+   recorded without it. The marker is matched in the shape it leaks in (an
+   optional stray `?`, whitespace before the closing bracket), so a bracketed
+   aside she writes herself (`[thought]`) stays prose. Voice hands deltas
+   straight to TTS, so it runs a `ThoughtMarkerFilter` ahead of the gate, one
+   check per message the model writes in the turn. That matters beyond the one
+   message: a leak that is posted is also stored as her own turn, and the
+   model then copies the shape from its history on the next turn. The agentic
+   loop's finished reply is covered as well by the return-time strip guard in
+   `tools::agentic`, and so is the text it records on a tool-call turn
+   (`on_iteration_end` never receives the raw text).
    There is no text sentinel for silence: `<silent>` in model output is ordinary
    prose.
 8. **Turn silence gate** — `reply_gate`, predicate veto. `tools::agentic`
