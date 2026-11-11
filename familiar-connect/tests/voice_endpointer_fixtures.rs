@@ -53,7 +53,7 @@ fn speech_pcm(duration_ms: f64, phase_offset: f64) -> Vec<u8> {
     let omega = 2.0 * PI * SPEECH_FREQ_HZ / INPUT_SR;
     let mut out = Vec::with_capacity(n_samples * 2);
     for i in 0..n_samples {
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation, clippy::suboptimal_flops)]
         let sample = (SPEECH_AMPLITUDE * (omega * i as f64 + phase_offset).sin()) as i16;
         out.extend_from_slice(&sample.to_le_bytes());
     }
