@@ -159,6 +159,18 @@ pub(crate) fn guard_leaked_content(content: &str) -> String {
     strip_leaked_tool_calls(&stripped).0
 }
 
+/// The text a tool-call turn records: the guarded text, and nothing at all
+/// when what is left leads with a leaked `<tool_call …>` block (the form the
+/// streaming gate suppresses whole and the return-time strip leaves alone).
+fn recorded_text(content: &str) -> String {
+    let cleaned = guard_leaked_content(content);
+    if leads_with_tool_call_block(&cleaned) {
+        String::new()
+    } else {
+        cleaned
+    }
+}
+
 /// The iteration's tool calls as a JSON array, for the call mirror.
 fn tool_calls_wire(tool_calls: &[Value]) -> String {
     Value::Array(tool_calls.to_vec()).to_string()
@@ -527,7 +539,7 @@ pub async fn agentic_loop(
             content: Content::Text(if delivered {
                 String::new()
             } else {
-                guard_leaked_content(&content)
+                recorded_text(&content)
             }),
             ..assistant_msg
         };

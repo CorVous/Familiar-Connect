@@ -411,6 +411,63 @@ async fn thought_marker_after_a_tool_call_is_never_spoken() {
     );
 }
 
+/// A tool call leaked as text after speech has begun (with or without the
+/// marker in front) is caught like one that leads the turn: it is neither
+/// spoken nor recorded, and what was said before it stands.
+#[tokio::test]
+async fn leaked_call_after_a_tool_call_is_never_spoken() {
+    for leak in [
+        "?[thought\n]CALL:default_api:silent{reasoning: nobody asked}",
+        "CALL:default_api:read_channel{limit: 5}",
+        "silent(reasoning=\"done here\")",
+    ] {
+        let (said, recorded) = voice_tool_turn_scripted(vec![
+            vec![
+                text_delta("Let me look. "),
+                tc_delta("c1", "read_channel", json!({"silent": false})),
+                finish("tool_calls"),
+            ],
+            vec![
+                text_delta(&leak[..9]),
+                text_delta(&leak[9..]),
+                finish("stop"),
+            ],
+        ])
+        .await;
+        assert_eq!(said.concat().trim(), "Let me look.", "{leak}");
+        assert!(
+            recorded
+                .iter()
+                .all(|t| !t.contains("default_api") && !t.contains("silent(")),
+            "{leak}: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().any(|t| t.trim() == "Let me look."),
+            "{leak}: {recorded:?}"
+        );
+    }
+}
+
+/// A short second message that could still be a leak token when the turn
+/// ends ("Call") is spoken and recorded after the first.
+#[tokio::test]
+async fn short_reply_after_a_tool_call_is_spoken() {
+    let (said, recorded) = voice_tool_turn_scripted(vec![
+        vec![
+            text_delta("Let me look. "),
+            tc_delta("c1", "read_channel", json!({"silent": false})),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("Call"), finish("stop")],
+    ])
+    .await;
+    assert_eq!(said.concat().replace(' ', ""), "Letmelook.Call");
+    assert!(
+        recorded.iter().any(|t| t == "Let me look. Call"),
+        "{recorded:?}"
+    );
+}
+
 /// A message that is only the marker beside a speaking tool call says
 /// nothing of its own, so the filler covers the wait; the marker is neither
 /// spoken nor recorded.

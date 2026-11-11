@@ -822,6 +822,10 @@ async fn on_iteration_end_never_receives_leaked_text() {
             "",
         ),
         ("CALL:default_api:t{}", ""),
+        (
+            "<tool_call>{\"name\":\"t\",\"arguments\":{}}</tool_call>",
+            "",
+        ),
         ("?[thought\n]Working...", "Working..."),
         ("Working...", "Working..."),
     ] {

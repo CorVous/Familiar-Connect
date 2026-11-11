@@ -595,6 +595,8 @@ impl VoiceInner {
                 gate: StreamGate::new(),
                 pending: VecDeque::new(),
                 gate_open: false,
+                spoke: false,
+                msg_start: 0,
                 first_delta_seen: false,
                 decision_logged: false,
                 saw_tool_calls: false,
@@ -621,18 +623,17 @@ impl VoiceInner {
         };
 
         let mut st = hooks.state.lock().await;
-        // A leaked tool-call block that led the stream (issue #109): abandon the
-        // turn as silent/empty so nothing is spoken or persisted.
-        if matches!(
-            st.gate.decided(),
-            Some(StreamDecision::Silent | StreamDecision::Suppress)
-        ) {
+        // A leaked tool-call block that led the turn (issue #109): abandon the
+        // turn as silent/empty so nothing is spoken or persisted. One that
+        // followed speech was dropped on its own as it streamed; what was
+        // said before it stands.
+        if st.leaked() && !st.spoke {
             return None;
         }
         // A silent turn (no call opted into speech) persists nothing — unless
         // audio already went out, which cannot be recalled: what was said has to
         // be recorded.
-        if result.is_silent && !st.gate_open {
+        if result.is_silent && !st.gate_open && !st.spoke {
             self.log_silent(&scope.turn_id, channel_id);
             return None;
         }
@@ -641,9 +642,11 @@ impl VoiceInner {
         // reply that is still a prefix of a leak token, such as "Silent" or
         // "Call") → treat as the speak path, so what is recorded as said is
         // also spoken.
-        if !st.gate_open && st.gate.decided().is_none() && !st.accumulated.trim().is_empty() {
-            self.log_respond(&scope.turn_id, channel_id);
-            st.decision_logged = true;
+        if !st.gate_open && st.gate.decided().is_none() && !st.unjudged_text().trim().is_empty() {
+            if !st.decision_logged {
+                self.log_respond(&scope.turn_id, channel_id);
+                st.decision_logged = true;
+            }
             st.gate_open = true;
         }
         if st.gate_open {
@@ -788,9 +791,45 @@ impl VoiceToolState {
     /// afresh for the next message.
     fn release_held_text(&mut self) {
         let held = self.marker.finish();
+        if self.leaked() {
+            return;
+        }
         self.accumulated.push_str(&held);
         let sentences = self.streamer.feed(&held);
         self.pending.extend(sentences);
+    }
+
+    /// The gate judged the text it is looking at a leaked tool call.
+    const fn leaked(&self) -> bool {
+        matches!(
+            self.gate.decided(),
+            Some(StreamDecision::Silent | StreamDecision::Suppress)
+        )
+    }
+
+    /// The text the gate is still judging: everything since the last message
+    /// that was spoken.
+    fn unjudged_text(&self) -> &str {
+        &self.accumulated[self.msg_start..]
+    }
+
+    /// The text the gate was judging is a leaked tool call: take it back out
+    /// of the record and the sentence buffer. Nothing of it was spoken — the
+    /// gate had not opened — and what earlier messages said is untouched.
+    fn drop_leaked_text(&mut self) {
+        self.accumulated.truncate(self.msg_start);
+        self.pending.clear();
+        self.streamer = SentenceStreamer::new();
+    }
+
+    /// A message that was spoken is complete: the next one the model writes
+    /// this turn is judged by a fresh gate, so a tool call leaked as text
+    /// after speech has begun is caught like one that leads the turn.
+    fn start_next_message(&mut self) {
+        self.spoke = true;
+        self.gate = StreamGate::new();
+        self.gate_open = false;
+        self.msg_start = self.accumulated.len();
     }
 }
 
@@ -833,9 +872,15 @@ struct VoiceToolState {
     /// Drops a leaked thought marker from the start of each message the model
     /// writes this turn.
     marker: ThoughtMarkerFilter,
+    /// Judges one spoken message at a time (see `start_next_message`).
     gate: StreamGate,
     pending: VecDeque<String>,
+    /// The gate opened on the text it is judging now.
     gate_open: bool,
+    /// An earlier message of this turn was spoken.
+    spoke: bool,
+    /// Where the text the gate is judging starts in `accumulated`.
+    msg_start: usize,
     first_delta_seen: bool,
     decision_logged: bool,
     /// The turn has called at least one tool.
@@ -873,26 +918,35 @@ impl AgenticHooks for VoiceToolHooks<'_> {
         if text.is_empty() {
             return;
         }
+        // A leak already judged says nothing more, this turn.
+        if st.leaked() {
+            return;
+        }
         st.accumulated.push_str(&text);
         if !st.gate_open {
             match st.gate.feed(&text) {
-                StreamDecision::Silent => {
+                // A leaked `silent` call leading the turn is her choosing
+                // silence. After speech has gone out it is a leak like any
+                // other: the turn did respond.
+                StreamDecision::Silent if !st.spoke => {
                     self.inner.log_silent(&self.scope.turn_id, self.channel_id);
-                    st.pending.clear();
+                    st.drop_leaked_text();
                     return;
                 }
-                StreamDecision::Suppress => {
+                StreamDecision::Silent | StreamDecision::Suppress => {
                     // Leaked tool-call block (issue #109): drop the buffered
-                    // sentences; the latched gate decision below abandons the
-                    // turn so nothing reaches TTS or the persisted turn.
+                    // text; the latched gate decision keeps the rest of the
+                    // turn out of TTS and the persisted turn.
                     self.inner.log_leak(&self.scope.turn_id, self.channel_id);
-                    st.pending.clear();
+                    st.drop_leaked_text();
                     return;
                 }
                 StreamDecision::Speak => {
                     st.gate_open = true;
-                    self.inner.log_respond(&self.scope.turn_id, self.channel_id);
-                    st.decision_logged = true;
+                    if !st.decision_logged {
+                        self.inner.log_respond(&self.scope.turn_id, self.channel_id);
+                        st.decision_logged = true;
+                    }
                 }
                 StreamDecision::Pending => {}
             }
@@ -935,6 +989,7 @@ impl AgenticHooks for VoiceToolHooks<'_> {
                     }
                     self.inner.speak(&sentence, self.scope).await;
                 }
+                st.start_next_message();
             }
         }
         // Filler backstop: an imminent tool call with no spoken content →

@@ -1098,11 +1098,21 @@ async fn leaked_tool_call_block_beside_a_shift_is_not_posted() {
         vec![text_delta("hi there"), finish("stop")],
     ]));
     let send = Arc::new(CapturingSend::new());
-    let (r, _fm, _) = real_focus_responder(llm, send.clone());
+    let (r, _fm, s) = real_focus_responder(llm, send.clone());
     r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
         .await
         .unwrap();
     assert_eq!(posted(&send), vec![(200, "hi there".to_owned())]);
+    // Nor is it recorded on the tool-call turn, where it would be replayed
+    // to her as her own words.
+    for channel in [100, 200] {
+        let turns = s.sync().recent("fam", channel, 20, None, None).unwrap();
+        assert!(
+            turns.iter().all(|t| !t.content.contains("<tool_call")),
+            "channel {channel}: {:?}",
+            turns.iter().map(|t| &t.content).collect::<Vec<_>>()
+        );
+    }
 }
 
 /// `[↩ <id>]` threads onto the named message only when that message lives in

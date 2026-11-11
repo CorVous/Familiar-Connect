@@ -135,12 +135,16 @@ Locations verified against the current tree. Paths are under
    optional stray `?`, whitespace before the closing bracket), so a bracketed
    aside she writes herself (`[thought]`) stays prose. Voice hands deltas
    straight to TTS, so it runs a `ThoughtMarkerFilter` ahead of the gate, one
-   check per message the model writes in the turn. That matters beyond the one
+   check per message the model writes in the turn. The voice tool path's gate
+   is per message too: once a message has been spoken, the next one is judged
+   by a fresh gate, so a call leaked as text after speech has begun is dropped
+   on its own and what was said before it stands. That matters beyond the one
    message: a leak that is posted is also stored as her own turn, and the
    model then copies the shape from its history on the next turn. The agentic
    loop's finished reply is covered as well by the return-time strip guard in
    `tools::agentic`, and so is the text it records on a tool-call turn
-   (`on_iteration_end` never receives the raw text).
+   (`on_iteration_end` never receives the raw text, a leaked `<tool_call>`
+   block included).
    There is no text sentinel for silence: `<silent>` in model output is ordinary
    prose.
 8. **Turn silence gate** — `reply_gate`, predicate veto. `tools::agentic`
