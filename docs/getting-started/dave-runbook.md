@@ -39,7 +39,7 @@ see [On-disk layout](on-disk-layout.md#where-the-familiars-root-lives).
 
 ### Build
 
-Toolchain: stable rustc (workspace pins `edition = 2024`, `rust-version = 1.85`).
+Toolchain: rustc 1.99.1, pinned in `rust-toolchain.toml` (workspace pins `edition = 2024`, `rust-version = 1.85`).
 Cargo `--features` are additive over the default set (`store, net, images`).
 
 ```bash
