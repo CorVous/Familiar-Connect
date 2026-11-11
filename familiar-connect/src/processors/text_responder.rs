@@ -34,7 +34,7 @@ use crate::processors::{
     ActivityGate, DiscordTextPayload, FocusManagerApi, GateAction, ResponderLlm, SendText,
     ToolContextFactory, TriggerTyping, TypingIndicator,
 };
-use crate::silence::{StreamDecision, StreamGate};
+use crate::silence::{StreamDecision, StreamGate, strip_leading_thought_marker};
 use crate::tools::agentic::{
     AgenticHooks, DEFAULT_MAX_ITERATIONS, EarlierText, agentic_loop, tool_content_as_text,
 };
@@ -997,7 +997,8 @@ impl TextResponder {
                 StreamDecision::Pending => {}
             }
         }
-        Some(accumulated)
+        // A leaked thought marker ahead of the reply is not part of it.
+        Some(strip_leading_thought_marker(&accumulated).to_owned())
     }
 
     async fn stream_reply_with_tools(

@@ -491,6 +491,7 @@ impl VoiceInner {
             }
             accumulated.push_str(&delta.content);
 
+            let mut just_opened = false;
             if !gate_open {
                 match gate.feed(&delta.content) {
                     StreamDecision::Silent => {
@@ -510,14 +511,20 @@ impl VoiceInner {
                     }
                     StreamDecision::Speak => {
                         gate_open = true;
+                        just_opened = true;
                         self.log_respond(&scope.turn_id, channel_id);
                         decision_logged = true;
                     }
                     StreamDecision::Pending => {}
                 }
             }
-            for sentence in streamer.feed(&delta.content) {
-                pending.push_back(sentence);
+            if just_opened && reseed_after_marker(&gate, &mut streamer, &mut pending) {
+                // The buffered text (this delta included) was re-fed without
+                // its leaked thought marker.
+            } else {
+                for sentence in streamer.feed(&delta.content) {
+                    pending.push_back(sentence);
+                }
             }
             if gate_open {
                 while let Some(sentence) = pending.pop_front() {
@@ -538,6 +545,7 @@ impl VoiceInner {
             self.log_respond(&scope.turn_id, channel_id);
             decision_logged = true;
             gate_open = true;
+            reseed_after_marker(&gate, &mut streamer, &mut pending);
         }
         if gate_open {
             // `speak` is the single speakable gate; push the tail as-is.
@@ -629,6 +637,7 @@ impl VoiceInner {
             self.log_respond(&scope.turn_id, channel_id);
             st.decision_logged = true;
             st.gate_open = true;
+            st.reseed_after_marker();
         }
         if st.gate_open {
             // `speak` is the single speakable gate; push the tail as-is.
@@ -766,6 +775,31 @@ fn log_skip_unspeakable(turn_id: &str, text: &str) {
     );
 }
 
+/// When the reply led with a leaked thought marker, rebuild the sentence
+/// buffer from the text behind it. Call only at the moment the gate opens:
+/// until then nothing has been spoken, so the whole buffered reply can be
+/// re-fed without the marker. Returns whether it did so.
+fn reseed_after_marker(
+    gate: &StreamGate,
+    streamer: &mut SentenceStreamer,
+    pending: &mut VecDeque<String>,
+) -> bool {
+    let Some(rest) = gate.text_after_marker() else {
+        return false;
+    };
+    *streamer = SentenceStreamer::new();
+    pending.clear();
+    pending.extend(streamer.feed(rest));
+    true
+}
+
+impl VoiceToolState {
+    /// [`reseed_after_marker`] over this turn's gate and sentence buffer.
+    fn reseed_after_marker(&mut self) -> bool {
+        reseed_after_marker(&self.gate, &mut self.streamer, &mut self.pending)
+    }
+}
+
 fn log_preempted(turn_id: &str) {
     tracing::info!(
         "{} {} {}",
@@ -837,6 +871,7 @@ impl AgenticHooks for VoiceToolHooks<'_> {
             st.first_delta_seen = true;
         }
         st.accumulated.push_str(&delta.content);
+        let mut just_opened = false;
         if !st.gate_open {
             match st.gate.feed(&delta.content) {
                 StreamDecision::Silent => {
@@ -854,14 +889,20 @@ impl AgenticHooks for VoiceToolHooks<'_> {
                 }
                 StreamDecision::Speak => {
                     st.gate_open = true;
+                    just_opened = true;
                     self.inner.log_respond(&self.scope.turn_id, self.channel_id);
                     st.decision_logged = true;
                 }
                 StreamDecision::Pending => {}
             }
         }
-        for sentence in st.streamer.feed(&delta.content) {
-            st.pending.push_back(sentence);
+        if just_opened && st.reseed_after_marker() {
+            // The buffered text (this delta included) was re-fed without its
+            // leaked thought marker.
+        } else {
+            for sentence in st.streamer.feed(&delta.content) {
+                st.pending.push_back(sentence);
+            }
         }
         if st.gate_open {
             while let Some(sentence) = st.pending.pop_front() {

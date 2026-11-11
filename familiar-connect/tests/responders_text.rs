@@ -401,6 +401,41 @@ async fn leaked_api_call_silent_skips_send_and_assistant_turn() {
     assert!(turns.iter().all(|t| t.role != "assistant"));
 }
 
+/// A leaked thought marker ahead of the reply is dropped on the tool-less
+/// path too, and a leaked call behind it is silence.
+#[tokio::test]
+async fn thought_marker_is_stripped_on_the_bare_text_path() {
+    let s = store();
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&["?[thought", "\n]Good evening."])),
+        send.clone(),
+    );
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(
+        send.calls(),
+        vec![(42, "Good evening.".to_owned(), None, vec![])]
+    );
+    let turns = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert!(turns.iter().all(|t| !t.content.contains("thought")));
+
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        store(),
+        Arc::new(ScriptedLlm::new(&[
+            "?[thought\n]CALL:default_api:silent{reasoning: nobody asked}",
+        ])),
+        send.clone(),
+    );
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-2"), &bus())
+        .await
+        .unwrap();
+    assert!(send.calls().is_empty());
+}
+
 /// A note that merely starts with "Call:" is ordinary prose and is posted.
 #[tokio::test]
 async fn call_led_note_is_posted_as_prose() {

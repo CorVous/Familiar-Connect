@@ -128,7 +128,12 @@ Locations verified against the current tree. Paths are under
    `<invoke>` / `silent(` / `<tool_call>` block, or the
    `CALL:default_api:<tool>{…}` / `callable:…` text Gemini returns when it
    fails to emit a structured call (silent when it names `silent`, suppressed
-   otherwise). The agentic loop's finished
+   otherwise). A leaked thought marker ahead of the reply (`?[thought\n]`,
+   also Gemini) is not content: `strip_leading_thought_marker` drops it, the
+   gate judges what follows, and the reply behind it is posted, spoken and
+   recorded without it. That matters beyond the one message: a leak that is
+   posted is also stored as her own turn, and the model then copies the shape
+   from its history on the next turn. The agentic loop's finished
    reply is covered as well by the return-time strip guard in `tools::agentic`.
    There is no text sentinel for silence: `<silent>` in model output is ordinary
    prose.

@@ -345,6 +345,43 @@ async fn think_tag_after_leaked_silent_still_silent() {
     assert!(result.final_content.is_empty());
 }
 
+/// A leaked thought marker (`?[thought\n]`) ahead of a `silent` call written
+/// as text: the marker is dropped and the call behind it is silence.
+#[tokio::test]
+async fn thought_marker_then_leaked_silent_is_silent() {
+    let leak = "?[thought\n]CALL:default_api:silent{reasoning:Just a popcorn emoji reaction, \
+                nothing addressed to her.}";
+    let mut msgs = vec![user("hi")];
+    let result = run(
+        vec![vec![delta_text(leak), delta_finish("stop")]],
+        &ToolRegistry::new(),
+        &mut msgs,
+    )
+    .await;
+    assert!(result.is_silent);
+    assert!(result.final_content.is_empty());
+}
+
+/// The marker ahead of an ordinary reply is dropped and the reply kept.
+#[tokio::test]
+async fn thought_marker_is_stripped_from_a_reply() {
+    let mut msgs = vec![user("hi")];
+    let result = run(
+        vec![vec![
+            delta_text("?[thought\n]I have two ears and neither was asleep, umu."),
+            delta_finish("stop"),
+        ]],
+        &ToolRegistry::new(),
+        &mut msgs,
+    )
+    .await;
+    assert!(!result.is_silent);
+    assert_eq!(
+        result.final_content,
+        "I have two ears and neither was asleep, umu."
+    );
+}
+
 #[tokio::test]
 async fn think_mention_mid_prose_untouched() {
     let text = "I think </think> is a vulgar rune.";

@@ -345,6 +345,33 @@ async fn leaked_api_call_text_never_reaches_tts_or_history() {
     assert!(recorded.is_empty(), "{recorded:?}");
 }
 
+/// A leaked thought marker ahead of a spoken reply never reaches TTS or the
+/// recorded turn, and a leaked call behind the marker is silence.
+#[tokio::test]
+async fn thought_marker_is_never_spoken() {
+    let (said, recorded) = voice_tool_turn(vec![
+        "?[thou",
+        "ght\n]",
+        "Good evening. ",
+        "I was listening.",
+    ])
+    .await;
+    assert_eq!(said.concat().replace(' ', ""), "Goodevening.Iwaslistening.");
+    assert!(
+        said.iter()
+            .all(|s| !s.contains("thought") && !s.contains('?')),
+        "{said:?}"
+    );
+    assert_eq!(recorded, vec!["Good evening. I was listening.".to_owned()]);
+
+    let (said, recorded) = voice_tool_turn(vec![
+        "?[thought\n]CALL:default_api:silent{reasoning: nobody asked}",
+    ])
+    .await;
+    assert!(said.is_empty(), "{said:?}");
+    assert!(recorded.is_empty(), "{recorded:?}");
+}
+
 /// A one-word reply that is still a prefix of a leak token when the stream
 /// ends is speech: it is spoken, not only recorded.
 #[tokio::test]

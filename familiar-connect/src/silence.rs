@@ -49,6 +49,48 @@ static API_CALL_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
+/// A thought-channel marker Gemini leaks ahead of a reply: `[thought\n]`,
+/// seen with one stray character in front (`?[thought\n]`).
+static LEADING_THOUGHT_MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*[^\s\[]?\[thoughts?\s*\]\s*").expect("valid regex"));
+/// The marker's fixed opening, lowercased, for the still-streaming check.
+const THOUGHT_MARKER_OPEN: &str = "[thought";
+
+/// `content` without a leading leaked thought marker (`?[thought\n]`).
+///
+/// The marker is never part of what she says: a reply behind it is the reply,
+/// and a leaked tool call behind it is still a leaked tool call.
+#[must_use]
+pub fn strip_leading_thought_marker(content: &str) -> &str {
+    LEADING_THOUGHT_MARKER_RE
+        .find(content)
+        .map_or(content, |m| &content[m.end()..])
+}
+
+/// Could `stripped` (left-trimmed, non-empty) still grow into a leading
+/// thought marker? True while it is a prefix of `[thought…]`, with or without
+/// one stray leading character, and the closing bracket has not arrived.
+fn thought_marker_prefix_possible(stripped: &str) -> bool {
+    let lc = stripped.to_ascii_lowercase();
+    let mut chars = lc.chars();
+    let after_stray = match chars.next() {
+        Some(c) if c != '[' => Some(chars.as_str()),
+        _ => None,
+    };
+    std::iter::once(lc.as_str())
+        .chain(after_stray)
+        .any(|candidate| {
+            THOUGHT_MARKER_OPEN.starts_with(candidate)
+                || candidate
+                    .strip_prefix(THOUGHT_MARKER_OPEN)
+                    .is_some_and(|rest| {
+                        rest.strip_prefix('s')
+                            .unwrap_or(rest)
+                            .chars()
+                            .all(char::is_whitespace)
+                    })
+        })
+}
 
 /// Whether `content` leads with a leaked `<tool_call …>` block.
 ///
@@ -143,6 +185,16 @@ impl StreamGate {
         self.decided
     }
 
+    /// When the text fed so far led with a leaked thought marker, the text
+    /// that follows it; `None` when there was no marker. A caller that buffers
+    /// the raw stream for speech uses this to drop the marker once the gate
+    /// opens.
+    #[must_use]
+    pub fn text_after_marker(&self) -> Option<&str> {
+        let rest = strip_leading_thought_marker(&self.buf);
+        (rest.len() != self.buf.len()).then_some(rest)
+    }
+
     const fn latch(&mut self, decision: StreamDecision) -> StreamDecision {
         self.decided = Some(decision);
         decision
@@ -156,8 +208,14 @@ impl StreamGate {
             return decided;
         }
         self.buf.push_str(delta);
-        let stripped = self.buf.trim_start();
-        if stripped.is_empty() {
+        let trimmed = self.buf.trim_start();
+        if trimmed.is_empty() {
+            return StreamDecision::Pending;
+        }
+        // A leaked thought marker is not content: judge what follows it, and
+        // wait while the marker itself is still arriving.
+        let stripped = strip_leading_thought_marker(trimmed);
+        if stripped.is_empty() || thought_marker_prefix_possible(trimmed) {
             return StreamDecision::Pending;
         }
         // Confirmed leaked tool call (shared classifier). A leaked `<invoke …`
@@ -266,7 +324,10 @@ fn is_xml_name(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LeadingLeak, StreamDecision, StreamGate, classify_leading_leak};
+    use super::{
+        LeadingLeak, StreamDecision, StreamGate, classify_leading_leak,
+        strip_leading_thought_marker,
+    };
 
     /// Feed a delta sequence through a fresh gate and return the final decision.
     fn gate_run(deltas: &[&str]) -> StreamDecision {
@@ -356,6 +417,77 @@ mod tests {
         for prose in ["Call", "Callable", "Call:", "Call: Sarah", "call:mom"] {
             assert_eq!(gate_run(&[prose]), StreamDecision::Pending, "{prose}");
         }
+    }
+
+    // -- leaked thought marker ----------------------------------------------
+
+    #[test]
+    fn thought_marker_is_stripped_only_when_it_leads() {
+        assert_eq!(strip_leading_thought_marker("?[thought\n]Hello."), "Hello.");
+        assert_eq!(strip_leading_thought_marker("[thought]\nHello."), "Hello.");
+        assert_eq!(
+            strip_leading_thought_marker("  ?[Thoughts ] Hello."),
+            "Hello."
+        );
+        assert_eq!(strip_leading_thought_marker("?[thought\n]"), "");
+        for prose in [
+            "Hello there.",
+            "A [thought] mid-sentence stays.",
+            "?? [thought] after two stray characters stays.",
+            "[thoughtful] of you.",
+        ] {
+            assert_eq!(strip_leading_thought_marker(prose), prose);
+        }
+    }
+
+    /// The burst seen live: the marker, then a `silent` call written as text.
+    #[test]
+    fn gate_thought_marker_then_leaked_silent_call_is_silent() {
+        let leak = "?[thought\n]CALL:default_api:silent{reasoning: nobody addressed her}";
+        assert_eq!(gate_run(&[leak]), StreamDecision::Silent);
+        assert_eq!(
+            gate_run(&[
+                "?[thou",
+                "ght\n",
+                "]CALL:default_",
+                "api:silent{reasoning: x"
+            ]),
+            StreamDecision::Silent
+        );
+        let mut g = StreamGate::new();
+        let mut decided = StreamDecision::Pending;
+        for c in leak.chars() {
+            let d = g.feed(&c.to_string());
+            assert_ne!(d, StreamDecision::Speak, "opened on a prefix");
+            decided = d;
+        }
+        assert_eq!(decided, StreamDecision::Silent);
+    }
+
+    /// The marker ahead of an ordinary reply: the gate opens on the reply and
+    /// hands back the text without the marker.
+    #[test]
+    fn gate_thought_marker_then_prose_speaks_without_the_marker() {
+        let mut g = StreamGate::new();
+        assert_eq!(g.feed("?[thought"), StreamDecision::Pending);
+        assert_eq!(g.feed("\n]"), StreamDecision::Pending);
+        assert_eq!(
+            g.feed("Then keep your matches away."),
+            StreamDecision::Speak
+        );
+        assert_eq!(g.text_after_marker(), Some("Then keep your matches away."));
+
+        let mut plain = StreamGate::new();
+        assert_eq!(plain.feed("Hello there."), StreamDecision::Speak);
+        assert_eq!(plain.text_after_marker(), None);
+    }
+
+    #[test]
+    fn gate_bracket_led_prose_speaks() {
+        assert_eq!(gate_run(&["[the harpy laughs]"]), StreamDecision::Speak);
+        assert_eq!(gate_run(&["?! what was that"]), StreamDecision::Speak);
+        assert_eq!(gate_run(&["[thoughtful pause] Hm."]), StreamDecision::Speak);
+        assert_eq!(gate_run(&["I", " see."]), StreamDecision::Speak);
     }
 
     // -- StreamGate ----------------------------------------------------------

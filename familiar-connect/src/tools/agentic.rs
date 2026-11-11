@@ -39,7 +39,9 @@ use serde_json::{Value, json};
 
 use crate::llm::{Content, LlmClient, LlmDelta, Message};
 use crate::log_style as ls;
-use crate::silence::{LeadingLeak, classify_leading_leak, leads_with_tool_call_block};
+use crate::silence::{
+    LeadingLeak, classify_leading_leak, leads_with_tool_call_block, strip_leading_thought_marker,
+};
 use crate::tools::registry::{
     Tool, ToolContext, ToolOutput, ToolRegistry, asks_for_silence, opts_into_speech,
 };
@@ -120,9 +122,11 @@ static LEADING_THINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)^\s*(?:<think>.*?</think>|</think>)\s*").expect("valid regex")
 });
 
-/// Strip a leading think-tag artifact; reasoning never ships as text.
+/// Strip a leading think-tag artifact or leaked thought marker
+/// (`?[thought\n]`); reasoning never ships as text.
 fn strip_think_artifacts(content: &str) -> String {
-    LEADING_THINK_RE.replacen(content, 1, "").into_owned()
+    let untagged = LEADING_THINK_RE.replacen(content, 1, "");
+    strip_leading_thought_marker(&untagged).to_owned()
 }
 
 /// Strip a leaked tool invocation emitted as plain text.
@@ -665,6 +669,26 @@ mod tests {
             strip_think_artifacts("<think>\nweigh\n</think>\nUmu."),
             "Umu."
         );
+    }
+
+    #[test]
+    fn strip_leaked_thought_marker_keeps_the_reply() {
+        assert_eq!(
+            strip_think_artifacts("?[thought\n]Then keep your matches away, umu."),
+            "Then keep your matches away, umu."
+        );
+        assert_eq!(
+            strip_think_artifacts("<think>hm</think>\n[thought]\nUmu."),
+            "Umu."
+        );
+    }
+
+    #[test]
+    fn leak_behind_a_thought_marker_is_silent() {
+        let leak = "?[thought\n]CALL:default_api:silent{reasoning: nobody addressed her}";
+        let (cleaned, silent) = strip_leaked_tool_calls(&strip_think_artifacts(leak));
+        assert!(silent);
+        assert!(cleaned.is_empty());
     }
 
     #[test]
