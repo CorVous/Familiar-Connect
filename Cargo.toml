@@ -32,6 +32,12 @@ multiple_crate_versions = "allow" # Transitive deps disagree; not actionable her
 missing_errors_doc = "allow"      # Undocumented error variants are fine
 missing_panics_doc = "allow"      # Ditto
 doc_markdown = "allow"            # Prose names module paths / symbols freely; backticking every one is noise
+# Rust 1.99 lints. `assert_is_empty` wants `assert_eq!(v, [] as [T; 0])` in
+# place of `assert!(v.is_empty())` across the test suite; the plain form reads
+# better. `double_must_use` fires inside `#[async_trait]` expansions, which
+# we do not write.
+assert_is_empty = "allow"
+double_must_use = "allow"
 
 [profile.release]
 # Smaller, faster binaries at the cost of compile time
