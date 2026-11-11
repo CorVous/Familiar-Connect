@@ -205,10 +205,7 @@ impl ActivityRng for LcgRng {
         // SplitMix64-style step.
         let x = self
             .state
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
-                Some(s.wrapping_add(0x9E37_79B9_7F4A_7C15))
-            })
-            .unwrap_or(0)
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
             .wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = x;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
