@@ -65,7 +65,17 @@ eligible — the focused channel quiet for `idle_nudge_minutes`, no
 activity active, at least `min_gap_minutes` since the last return,
 local time inside `active_hours` (in the familiar's `display_tz`) —
 it publishes a synthetic wake event into the focused text channel
-whose content mentions the quiet and offers `start_activity`. The
+whose content mentions the quiet, frames staying around (via
+`silent()`) as the usual choice, and keeps `start_activity` open for
+when the familiar truly wants a change of scene. The wording is soft
+on purpose: some models (Gemini, for one) take any "you could head
+out" as a go-ahead and leave on every nudge. When another text
+channel she is subscribed to holds unread messages, the nudge leads
+with that instead: it points at `shift_focus` (one channel at a time,
+`silent()` to simply read) and then repeats the stay-or-head-out
+framing, so a quiet stretch is first of all when she clears what is
+waiting. `[focus].unread_nudge_enabled = false` switches the unread
+lead off along with the unread nudge. The
 quiet clock is fed by the responder (`note_traffic` on every handled
 text event); firing marks the nudge pending so the debounce window
 starts. The nudge only earns the model a turn — going out remains
@@ -89,8 +99,9 @@ top of `handle()`, before any prompt assembly. Three outcomes:
   with a state line appended to the trailing system message, this
   turn only: how long she's been out, who pinged, and that replying
   means heading back while `silent()` means staying out. A real reply
-  triggers a cut-short return (`notify_reply_sent`); a silent verdict
-  keeps her out. One judgment turn per author per absence: after an
+  triggers a cut-short return (`notify_reply_sent`), and so does
+  anything else the turn posts (text written beside a look-first tool
+  call); a turn that posts nothing keeps her out. One judgment turn per author per absence: after an
   author's verdict, their further pings are suppressed and noted like
   any other; the latch clears when the next activity starts. Real
   pings from unfocused channels never earn judgment — they are
@@ -203,7 +214,7 @@ Top-level knobs (all optional):
 | `archive_after_minutes` | `45` | Absence at/above this sets the archive watermark for all channels at the departure turn. |
 | `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge may fire; also the nudge debounce window. |
 | `min_gap_minutes` | `90` | Minimum gap after a return before the next nudge. Gates nudges only — never blocks a `start_activity` call. |
-| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. Keep it disjoint from the sleep `window` — overlap lets an idle "do something" nudge and the bedtime "go to bed" nudge co-fire in the pre-grace stretch (once force-sleep fires, the active state suppresses the idle nudge). |
+| `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges fire only inside this window. Keep it disjoint from the sleep `window` — overlap lets an idle nudge and the bedtime "go to bed" nudge co-fire in the pre-grace stretch (once force-sleep fires, the active state suppresses the idle nudge). |
 
 Catalog entry (`[[catalog]]`, one per activity type):
 

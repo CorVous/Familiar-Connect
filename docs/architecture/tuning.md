@@ -250,7 +250,7 @@ longer needed.
   judge multi-party flow.
 - **Silence** — already wired (see
   [multi-party addressivity](context-pipeline.md#multi-party-addressivity)).
-  Every tool call is silent unless it passes `silent: false`, and
+  A tool call that acts is silent unless it passes `silent: false`, and
   `silent(reasoning)` is the explicit no-op. Don't override the
   character prompt's silence instruction.
 
@@ -290,7 +290,8 @@ catch_up_limit         = 20
 | `catch_up_limit` | `20` | How many staged turns she actually catches up on when attention lands on a channel — the `shift_focus` preview size and the per-channel cap on activity-return promotion. Staged backlog beyond this is **missed** (dropped from her window and rolling summary), not silently consumed. Direct @-mentions/replies-to-her are always caught regardless of age. |
 
 Set `unread_nudge_enabled = false` to keep attention pinned to the
-focused channel and never nudge for backgrounded traffic; when enabled,
+focused channel and never nudge for backgrounded traffic (the idle
+nudge then also stops pointing at channels with messages waiting); when enabled,
 `nudge_debounce_seconds` is the sole throttle.
 
 `catch_up_limit` makes perception match consumption: she only takes in
@@ -370,7 +371,7 @@ active_hours          = "10:00-23:00"
 | Knob | Default | Purpose |
 |---|---|---|
 | `archive_after_minutes` | `45` | Absence at/above this sets the per-channel archive watermark at the departure turn — prompt window resets there; `read_channel` scrollback doesn't. |
-| `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge may offer `start_activity`; also the nudge debounce window. |
+| `idle_nudge_minutes` | `20` | Focused-channel quiet time before an idle nudge fires (it offers staying, `start_activity`, and catching up on unread channels); also the nudge debounce window. |
 | `min_gap_minutes` | `90` | Minimum gap after a return before the next nudge. |
 | `active_hours` | unset (always) | `"HH:MM-HH:MM"` in `display_tz`; may wrap midnight. Nudges only fire inside this window. |
 
@@ -698,7 +699,7 @@ only) `read_channel` plus `start_activity` (the latter only when the
 [activities catalog](activities.md#configuration) is non-empty).
 
 **Default `true`, and `false` is refused at config load.** Silence is a
-tool call now — every call is silent unless it passes `silent: false`,
+tool call now — a call that acts is silent unless it passes `silent: false`,
 and `silent(reasoning)` is how the familiar declines to reply at all —
 so a slot without tool calling could never stay quiet. Writing
 `tool_calling = false` fails the load with:
@@ -718,10 +719,13 @@ OpenRouter metadata — a model whose `supported_parameters` lack `tools`
 is now a hard mismatch with only one fix, picking a different model. See
 [Startup model diagnostics](configuration-model.md#startup-model-diagnostics).
 
-**Every call is silent by default.** Each tool's schema carries a shared
-`silent` boolean defaulting to `true`, injected by `Tool::new` so a new
-tool cannot forget it. The model passes `silent: false` on a call when it
-also means to speak that turn; the opt-in latches for the whole turn.
+**A call that acts is silent by default.** Each tool's schema carries a
+shared `silent` boolean defaulting to `true`, injected by `Tool::new` so a
+new tool cannot forget it. The model passes `silent: false` on a call when
+it also means to speak that turn; the opt-in latches for the whole turn.
+The text tier's look-first tools (`shift_focus`, `read_channel`,
+`view_image`) default the flag to `false` instead: she reads the result,
+then replies or calls `silent()`.
 
 The loop's per-turn iteration cap (model call → tool execution →
 re-call) is `[tools].loop_max_iterations` (default `5`, shared by

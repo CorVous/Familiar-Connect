@@ -262,6 +262,25 @@ impl FocusManager {
             .is_some()
     }
 
+    /// Whether `channel_id` carries a text subscription. Only a text shift
+    /// promotes staged turns, so unread notices list these channels alone: a
+    /// voice-only channel holding staged text would be offered, accepted by
+    /// `shift_focus`, and still read as unread afterwards.
+    #[must_use]
+    pub fn is_text_subscribed(&self, channel_id: i64) -> bool {
+        // `kind_for` reports text ahead of voice when a channel has both.
+        u64::try_from(channel_id)
+            .ok()
+            .and_then(|cid| self.subscriptions.kind_for(cid))
+            == Some(SubscriptionKind::Text)
+    }
+
+    /// Whether the unread nudge is enabled (`[focus].unread_nudge_enabled`).
+    #[must_use]
+    pub const fn unread_nudge_enabled(&self) -> bool {
+        self.unread_nudge_enabled
+    }
+
     /// Sorted, deduped channel ids across text + voice subscriptions.
     #[must_use]
     pub fn subscribed_channels(&self) -> Vec<i64> {

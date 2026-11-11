@@ -947,8 +947,8 @@ mod tests {
         assert!(
             out.contains(
                 "unnamed channel (id 10) (3) \u{2014} use shift_focus if one pulls your \
-                 attention: it moves you there quietly, or pass silent: false to arrive \
-                 and speak."
+                 attention: it moves you there and shows you the channel, and what you \
+                 write next is your reply there. Call silent() to simply read."
             ),
             "{out}"
         );
@@ -956,8 +956,9 @@ mod tests {
 
     /// Stand-in for the `[prompt].shift_focus_coaching` the wiring supplies.
     fn coaching() -> &'static str {
-        "use shift_focus if one pulls your attention: it moves you there \
-         quietly, or pass silent: false to arrive and speak."
+        "use shift_focus if one pulls your attention: it moves you there and \
+         shows you the channel, and what you write next is your reply there. Call \
+         silent() to simply read."
     }
 
     #[test]

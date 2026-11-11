@@ -388,7 +388,7 @@ splitter on every delta. Sentences finalised before the gate decides are
 buffered; on `silent` they're dropped and TTS is never invoked; on
 `speak` they flush and the streamer feeds TTS as new sentences arrive.
 The gate recognises a tool-call block the model occasionally leaks as
-plain text (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`),
+plain text (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`, `CALL:default_api:silent{…}`),
 staying pending while the token is still split across delta boundaries
 and latching `suppress` (or `silent`, for a leaked `silent` call) so the
 raw XML never reaches TTS or the persisted turn (issue #109). The

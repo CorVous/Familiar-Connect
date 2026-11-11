@@ -1,7 +1,8 @@
 //! `silent` tool + the [`SILENT_RESULT`] sentinel (subsystem 08).
 //!
-//! The explicit no-op: do nothing, say nothing. Every tool call is silent by
-//! default, so this one exists for the turn where there is nothing else to do.
+//! The explicit no-op: do nothing, say nothing. A tool call that acts is silent
+//! by default, so this one exists for the turn where there is nothing else to
+//! do — and for staying quiet after a look-first tool showed her something.
 //! The agentic loop detects [`SILENT_RESULT`] among a turn's tool results, ends
 //! the turn without re-prompting, and keeps this call + its private reasoning
 //! out of history (other calls in the same iteration are still persisted). The

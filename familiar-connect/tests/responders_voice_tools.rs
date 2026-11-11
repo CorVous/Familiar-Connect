@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use familiar_connect::bus::envelope::TurnScope;
 use familiar_connect::bus::in_process::InProcessEventBus;
 use familiar_connect::bus::router::TurnRouter;
+use familiar_connect::llm::LlmDelta;
 use familiar_connect::processors::ToolContextFactory;
 use familiar_connect::processors::voice_responder::VoiceResponder;
 use familiar_connect::tools::registry::{FnHandler, Tool, ToolContext, ToolOutput, ToolRegistry};
@@ -282,6 +283,232 @@ async fn leaked_invoke_xml_content_never_reaches_tts_or_history() {
             .collect::<Vec<_>>()
     );
     assert!(turns.iter().all(|t| !t.content.contains("invoke")));
+}
+
+/// Run one voice turn through the tool loop with a single scripted reply and
+/// return what reached TTS plus the persisted assistant turns.
+async fn voice_tool_turn(deltas: Vec<&str>) -> (Vec<String>, Vec<String>) {
+    let mut script: Vec<_> = deltas.into_iter().map(text_delta).collect();
+    script.push(finish("stop"));
+    voice_tool_turn_scripted(vec![script]).await
+}
+
+/// Run one voice turn through the tool loop, one script per message the model
+/// writes (a `read_channel` tool and the filler "hang on..." are on hand), and
+/// return what reached TTS plus the persisted assistant turns.
+async fn voice_tool_turn_scripted(scripts: Vec<Vec<LlmDelta>>) -> (Vec<String>, Vec<String>) {
+    let spoken = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = FnHandler(|_a: Value, _c: ToolContext| async move {
+        Ok(ToolOutput::Text(json!({"ok": true}).to_string()))
+    });
+    let mut reg = ToolRegistry::new();
+    reg.register(Tool::new("read_channel", "", json!({}), Arc::new(handler)))
+        .unwrap();
+    let llm = Arc::new(ScriptedToolLlm::new(scripts));
+    let player = Arc::new(RecordingVoicePlayer {
+        spoken: Arc::clone(&spoken),
+    });
+    let s = store();
+    let r = VoiceResponder::new(
+        make_assembler(Arc::clone(&s)),
+        llm,
+        player,
+        Arc::clone(&s),
+        Arc::new(TurnRouter::new()),
+        "fam",
+    )
+    .with_tools(Arc::new(reg), voice_ctx_factory())
+    .with_tool_filler_phrases(vec!["hang on...".to_owned()]);
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(
+        &voice_final("anyone there?", "voice:1", "t-1", None),
+        &bus(),
+    )
+    .await
+    .unwrap();
+    r.wait_until_idle().await;
+    let said = spoken.lock().unwrap().clone();
+    let recorded = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.role == "assistant")
+        .map(|t| t.content)
+        .collect();
+    (said, recorded)
+}
+
+/// Gemini's text form of a `silent` call it failed to emit: nothing is
+/// spoken and nothing is recorded.
+#[tokio::test]
+async fn leaked_api_call_text_never_reaches_tts_or_history() {
+    let (said, recorded) = voice_tool_turn(vec![
+        "CALL:default_",
+        "api:silent{reasoning:nobody asked me anything.}",
+    ])
+    .await;
+    assert!(said.is_empty(), "{said:?}");
+    assert!(recorded.is_empty(), "{recorded:?}");
+}
+
+/// A leaked thought marker ahead of a spoken reply never reaches TTS or the
+/// recorded turn, and a leaked call behind the marker is silence.
+#[tokio::test]
+async fn thought_marker_is_never_spoken() {
+    let (said, recorded) = voice_tool_turn(vec![
+        "?[thou",
+        "ght\n]",
+        "Good evening. ",
+        "I was listening.",
+    ])
+    .await;
+    assert_eq!(said.concat().replace(' ', ""), "Goodevening.Iwaslistening.");
+    assert!(
+        said.iter()
+            .all(|s| !s.contains("thought") && !s.contains('?')),
+        "{said:?}"
+    );
+    assert_eq!(recorded, vec!["Good evening. I was listening.".to_owned()]);
+
+    let (said, recorded) = voice_tool_turn(vec![
+        "?[thought\n]CALL:default_api:silent{reasoning: nobody asked}",
+    ])
+    .await;
+    assert!(said.is_empty(), "{said:?}");
+    assert!(recorded.is_empty(), "{recorded:?}");
+}
+
+/// Each message the model writes in a turn gets the check: a marker at the
+/// start of the message after a tool call is dropped too, though speech is
+/// already under way by then.
+#[tokio::test]
+async fn thought_marker_after_a_tool_call_is_never_spoken() {
+    let (said, recorded) = voice_tool_turn_scripted(vec![
+        vec![
+            text_delta("Let me look. "),
+            tc_delta("c1", "read_channel", json!({"silent": false})),
+            finish("tool_calls"),
+        ],
+        vec![
+            text_delta("?[thou"),
+            text_delta("ght\n]"),
+            text_delta("Nothing new there."),
+            finish("stop"),
+        ],
+    ])
+    .await;
+    assert_eq!(said.concat().replace(' ', ""), "Letmelook.Nothingnewthere.");
+    assert!(
+        recorded.iter().all(|t| !t.contains("thought")),
+        "{recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|t| t.contains("Nothing new there.")),
+        "{recorded:?}"
+    );
+}
+
+/// A tool call leaked as text after speech has begun (with or without the
+/// marker in front) is caught like one that leads the turn: it is neither
+/// spoken nor recorded, and what was said before it stands.
+#[tokio::test]
+async fn leaked_call_after_a_tool_call_is_never_spoken() {
+    for leak in [
+        "?[thought\n]CALL:default_api:silent{reasoning: nobody asked}",
+        "CALL:default_api:read_channel{limit: 5}",
+        "silent(reasoning=\"done here\")",
+    ] {
+        let (said, recorded) = voice_tool_turn_scripted(vec![
+            vec![
+                text_delta("Let me look. "),
+                tc_delta("c1", "read_channel", json!({"silent": false})),
+                finish("tool_calls"),
+            ],
+            vec![
+                text_delta(&leak[..9]),
+                text_delta(&leak[9..]),
+                finish("stop"),
+            ],
+        ])
+        .await;
+        assert_eq!(said.concat().trim(), "Let me look.", "{leak}");
+        assert!(
+            recorded
+                .iter()
+                .all(|t| !t.contains("default_api") && !t.contains("silent(")),
+            "{leak}: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().any(|t| t.trim() == "Let me look."),
+            "{leak}: {recorded:?}"
+        );
+    }
+}
+
+/// A short second message that could still be a leak token when the turn
+/// ends ("Call") is spoken and recorded after the first.
+#[tokio::test]
+async fn short_reply_after_a_tool_call_is_spoken() {
+    let (said, recorded) = voice_tool_turn_scripted(vec![
+        vec![
+            text_delta("Let me look. "),
+            tc_delta("c1", "read_channel", json!({"silent": false})),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("Call"), finish("stop")],
+    ])
+    .await;
+    assert_eq!(said.concat().replace(' ', ""), "Letmelook.Call");
+    assert!(
+        recorded.iter().any(|t| t == "Let me look. Call"),
+        "{recorded:?}"
+    );
+}
+
+/// A message that is only the marker beside a speaking tool call says
+/// nothing of its own, so the filler covers the wait; the marker is neither
+/// spoken nor recorded.
+#[tokio::test]
+async fn thought_marker_alone_beside_a_tool_call_gets_the_filler() {
+    let (said, recorded) = voice_tool_turn_scripted(vec![
+        vec![
+            text_delta("?[thought\n]"),
+            tc_delta("c1", "read_channel", json!({"silent": false})),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("Nothing new there."), finish("stop")],
+    ])
+    .await;
+    assert_eq!(said, ["hang on...", "Nothing new there."]);
+    assert!(
+        recorded.iter().all(|t| !t.contains("thought")),
+        "{recorded:?}"
+    );
+}
+
+/// A reply too short to rule a marker out ("?") is held back while it
+/// streams, then spoken and recorded once the message ends.
+#[tokio::test]
+async fn reply_held_as_a_possible_marker_is_still_recorded() {
+    let (_, recorded) = voice_tool_turn(vec!["?"]).await;
+    assert_eq!(recorded, vec!["?".to_owned()]);
+    let (said, recorded) = voice_tool_turn(vec!["[", "thou", "ght"]).await;
+    assert_eq!(said, vec!["[thought".to_owned()]);
+    assert_eq!(recorded, vec!["[thought".to_owned()]);
+}
+
+/// A one-word reply that is still a prefix of a leak token when the stream
+/// ends is speech: it is spoken, not only recorded.
+#[tokio::test]
+async fn short_reply_left_pending_by_the_gate_is_spoken() {
+    for reply in ["Call", "Silent"] {
+        let (said, recorded) = voice_tool_turn(vec![reply]).await;
+        assert_eq!(said, vec![reply.to_owned()], "{reply}");
+        assert_eq!(recorded, vec![reply.to_owned()], "{reply}");
+    }
 }
 
 // ---------------------------------------------------------------------------

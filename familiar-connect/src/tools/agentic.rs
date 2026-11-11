@@ -8,10 +8,25 @@
 //! plain text (they would otherwise ship to the user / seed a mimicry cascade);
 //! a leaked `silent` call is honoured as silence.
 //!
-//! **Silence is the default of any tool call.** A turn that called a tool is
-//! silent unless some call passed `silent: false` ([`calls_opt_into_speech`]) —
-//! the model declares "and say something" the same way it declares any other
-//! argument, so a model that only calls tools never has to invent a reply.
+//! **Silence is the default of a tool call that acts.** A turn that called such
+//! a tool is silent unless some call passed `silent: false`
+//! ([`calls_opt_into_speech`]) — the model declares "and say something" the same
+//! way it declares any other argument, so a model that only calls tools never
+//! has to invent a reply.
+//!
+//! **A look-first tool is the exception** ([`Tool::look_first`]: `shift_focus`,
+//! `read_channel`, `view_image` in the text registry). Its result is what the
+//! model must see before it can know whether to answer, so the opt-in would
+//! have to be given blind — and a reply written after the look was thrown
+//! away. Calling one does not silence the turn ([`calls_default_to_silence`]):
+//! text after the result is the reply; `silent()`, an explicit `silent: true`,
+//! or writing nothing stays quiet. Text written in the *same* message as a
+//! look-first call was said before the look: it is handed to
+//! [`AgenticHooks::on_earlier_text`] at once, ahead of the handlers, with the
+//! channel the turn stood in then — a remark made before `shift_focus` belongs
+//! to the channel being left — and kept in [`AgenticResult::earlier`]. It
+//! counts as said only while the turn can still speak: once an earlier call
+//! has silenced the turn, text beside a later look stays unsaid too.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -24,8 +39,12 @@ use serde_json::{Value, json};
 
 use crate::llm::{Content, LlmClient, LlmDelta, Message};
 use crate::log_style as ls;
-use crate::silence::{LeadingLeak, classify_leading_leak};
-use crate::tools::registry::{Tool, ToolContext, ToolOutput, ToolRegistry, opts_into_speech};
+use crate::silence::{
+    LeadingLeak, classify_leading_leak, leads_with_tool_call_block, strip_leading_thought_marker,
+};
+use crate::tools::registry::{
+    Tool, ToolContext, ToolOutput, ToolRegistry, asks_for_silence, opts_into_speech,
+};
 use crate::tools::silent::SILENT_RESULT;
 
 // Re-exported here so callers can reach it from the `tools::agentic` path.
@@ -34,9 +53,26 @@ pub use crate::tools::registry::serialize_image_result;
 /// Library-default iteration cap.
 pub const DEFAULT_MAX_ITERATIONS: usize = 5;
 
+/// Text the model wrote in the same message as a look-first call — said
+/// *before* it looked, so it belongs to wherever the turn stood at that moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EarlierText {
+    /// The text (leak-guarded, non-blank).
+    pub text: String,
+    /// The channel `shift_focus` had already moved this turn to when the text
+    /// was written; `None` while the turn is still where it was triggered.
+    pub shifted_to: Option<i64>,
+}
+
 /// Outcome of an [`agentic_loop`] run.
 #[derive(Debug, Clone)]
 pub struct AgenticResult {
+    /// Text written ahead of look-first calls while the turn could still
+    /// speak, oldest first. Chronologically it precedes
+    /// [`final_content`](Self::final_content) and never repeats in it, and it
+    /// stands whatever the turn did afterwards — [`is_silent`](Self::is_silent)
+    /// speaks only for the final text.
+    pub earlier: Vec<EarlierText>,
     /// Final assistant text (leak-guarded).
     pub final_content: String,
     /// Iterations run.
@@ -45,8 +81,9 @@ pub struct AgenticResult {
     pub tool_calls_made: usize,
     /// The full transcript (a snapshot of `messages` at return).
     pub transcript: Vec<Message>,
-    /// Set when the turn stays quiet: a `silent` tool (or leaked `silent`
-    /// call), or any tool call at all with no `silent: false` opt-in.
+    /// Set when the final text stays unsaid: a `silent` tool (or leaked `silent`
+    /// call), or a silencing tool call ([`calls_default_to_silence`]) with no
+    /// `silent: false` opt-in.
     pub is_silent: bool,
 }
 
@@ -59,6 +96,16 @@ pub trait AgenticHooks: Send + Sync {
     /// Awaited after the assistant message is built but before any handler runs
     /// (voice filler-phrase hook), only when tool calls exist.
     async fn on_before_tools(&self, _assistant: &Message) {}
+    /// Awaited when the model wrote text in the same message as a look-first
+    /// call, before any handler runs — so a `shift_focus` in that message has
+    /// not moved the turn yet (the text responder posts it here).
+    ///
+    /// Return `true` once the text is delivered and recorded; the assistant
+    /// message [`on_iteration_end`](Self::on_iteration_end) then receives for
+    /// this iteration carries no text, so it is not recorded twice.
+    async fn on_earlier_text(&self, _earlier: &EarlierText) -> bool {
+        false
+    }
     /// Awaited once per non-silent iteration (responders persist intermediate
     /// turns here).
     async fn on_iteration_end(&self, _assistant: &Message, _tool_msgs: &[Message]) {}
@@ -75,9 +122,11 @@ static LEADING_THINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)^\s*(?:<think>.*?</think>|</think>)\s*").expect("valid regex")
 });
 
-/// Strip a leading think-tag artifact; reasoning never ships as text.
+/// Strip a leading think-tag artifact or leaked thought marker
+/// (`?[thought\n]`); reasoning never ships as text.
 fn strip_think_artifacts(content: &str) -> String {
-    LEADING_THINK_RE.replacen(content, 1, "").into_owned()
+    let untagged = LEADING_THINK_RE.replacen(content, 1, "");
+    strip_leading_thought_marker(&untagged).to_owned()
 }
 
 /// Strip a leaked tool invocation emitted as plain text.
@@ -94,6 +143,7 @@ fn strip_leaked_tool_calls(content: &str) -> (String, bool) {
         }
         Some(LeadingLeak::CallSilent) => (String::new(), true),
         Some(LeadingLeak::CallTool) => (String::new(), false),
+        Some(LeadingLeak::ApiCall { silent }) => (String::new(), silent),
         None => (content.to_owned(), false),
     }
 }
@@ -107,6 +157,18 @@ fn strip_leaked_tool_calls(content: &str) -> (String, bool) {
 pub(crate) fn guard_leaked_content(content: &str) -> String {
     let stripped = strip_think_artifacts(content);
     strip_leaked_tool_calls(&stripped).0
+}
+
+/// The text a tool-call turn records: the guarded text, and nothing at all
+/// when what is left leads with a leaked `<tool_call …>` block (the form the
+/// streaming gate suppresses whole and the return-time strip leaves alone).
+fn recorded_text(content: &str) -> String {
+    let cleaned = guard_leaked_content(content);
+    if leads_with_tool_call_block(&cleaned) {
+        String::new()
+    } else {
+        cleaned
+    }
 }
 
 /// The iteration's tool calls as a JSON array, for the call mirror.
@@ -155,14 +217,36 @@ pub fn tool_content_as_text(content: &Content) -> String {
 /// silence is the default and stays it.
 #[must_use]
 pub fn calls_opt_into_speech(tool_calls: &[Value]) -> bool {
+    tool_calls
+        .iter()
+        .any(|tc| call_args(tc).as_ref().is_some_and(opts_into_speech))
+}
+
+/// Whether any call in `tool_calls` makes the turn silent by default.
+///
+/// Every call does, except one to a look-first tool ([`Tool::look_first`]) —
+/// and even that one does when it carries an explicit `silent: true`. A name
+/// the registry does not know is not look-first.
+#[must_use]
+pub fn calls_default_to_silence(tool_calls: &[Value], registry: &ToolRegistry) -> bool {
     tool_calls.iter().any(|tc| {
-        tc.get("function")
-            .and_then(|f| f.get("arguments"))
+        let look_first = tc
+            .get("function")
+            .and_then(|f| f.get("name"))
             .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .as_ref()
-            .is_some_and(opts_into_speech)
+            .and_then(|name| registry.get(name))
+            .is_some_and(|tool| tool.look_first);
+        !look_first || call_args(tc).as_ref().is_some_and(asks_for_silence)
     })
+}
+
+/// A wire-shape tool call's arguments, decoded (`None` when not valid JSON).
+fn call_args(tool_call: &Value) -> Option<Value> {
+    tool_call
+        .get("function")
+        .and_then(|f| f.get("arguments"))
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +454,12 @@ pub async fn agentic_loop(
     let mut last_content = String::new();
     let mut iterations = 0usize;
     let mut tool_calls_made = 0usize;
-    // Silence bookkeeping: any call at all silences the turn; one `silent:
-    // false` anywhere in it opts back into speech, and the opt-in latches.
-    let mut any_tool_call = false;
+    // Silence bookkeeping: a call silences the turn (look-first tools aside —
+    // see `calls_default_to_silence`); one `silent: false` anywhere in it opts
+    // back into speech, and the opt-in latches.
+    let mut silenced_by_call = false;
     let mut speak_opt_in = false;
+    let mut earlier: Vec<EarlierText> = Vec::new();
 
     while iterations < max_iterations {
         iterations += 1;
@@ -411,13 +497,52 @@ pub async fn agentic_loop(
         };
         messages.push(assistant_msg.clone());
 
+        // This message's text was said ahead of a look (so it is not also the
+        // turn's final text), and a hook delivered and recorded it.
+        let mut said_earlier = false;
+        let mut delivered = false;
+        // This message's text is a leaked `<tool_call …>` block beside a look:
+        // the call written out twice, never something to say.
+        let mut leaked_beside_look = false;
         if !tool_calls.is_empty() {
-            any_tool_call = true;
+            let silencing = calls_default_to_silence(&tool_calls, registry);
+            silenced_by_call |= silencing;
             speak_opt_in |= calls_opt_into_speech(&tool_calls);
+            // Look-first calls only, and only while the turn can still speak:
+            // what she wrote alongside them was said before the look. Handed
+            // over now, ahead of the handlers, so a `shift_focus` in this very
+            // message has not moved the turn yet.
+            if !silencing && (!silenced_by_call || speak_opt_in) {
+                let (said, silent_leak) = strip_leaked_tool_calls(&strip_think_artifacts(&content));
+                leaked_beside_look = leads_with_tool_call_block(&said);
+                if !silent_leak && !leaked_beside_look && !said.trim().is_empty() {
+                    let said = EarlierText {
+                        text: said,
+                        shifted_to: ctx.shifted_to(),
+                    };
+                    if let Some(h) = hooks {
+                        delivered = h.on_earlier_text(&said).await;
+                    }
+                    earlier.push(said);
+                    said_earlier = true;
+                }
+            }
             if let Some(h) = hooks {
                 h.on_before_tools(&assistant_msg).await;
             }
         }
+        // What the iteration hooks persist: without the text a hook already
+        // recorded as a message of its own, and never the raw text — a leaked
+        // thought marker or call written beside a real call must not reach
+        // history, where it would be replayed to the model as her own words.
+        let recorded_msg = Message {
+            content: Content::Text(if delivered {
+                String::new()
+            } else {
+                recorded_text(&content)
+            }),
+            ..assistant_msg
+        };
 
         let mut tool_msgs: Vec<Message> = Vec::new();
         let multimodal = llm.multimodal();
@@ -457,12 +582,13 @@ pub async fn agentic_loop(
                         .collect();
                     let assistant_kept = Message {
                         tool_calls: Some(kept_calls),
-                        ..assistant_msg.clone()
+                        ..recorded_msg.clone()
                     };
                     h.on_iteration_end(&assistant_kept, &kept_msgs).await;
                 }
             }
             return Ok(AgenticResult {
+                earlier,
                 final_content: String::new(),
                 iterations,
                 tool_calls_made,
@@ -472,10 +598,17 @@ pub async fn agentic_loop(
         }
 
         if let Some(h) = hooks {
-            h.on_iteration_end(&assistant_msg, &tool_msgs).await;
+            h.on_iteration_end(&recorded_msg, &tool_msgs).await;
         }
 
-        last_content = content;
+        // Text already said ahead of a look is not the final text as well: a
+        // turn cut off at the iteration cap must not say it twice. Nor does a
+        // leaked block beside a look become the reply there.
+        last_content = if said_earlier || leaked_beside_look {
+            String::new()
+        } else {
+            content
+        };
         if tool_calls.is_empty() {
             break;
         }
@@ -506,8 +639,9 @@ pub async fn agentic_loop(
             ls::kv_styled("silent", &silent_leak.to_string(), ls::W, ls::LY),
         );
     }
-    let is_silent = (silent_leak && cleaned.is_empty()) || (any_tool_call && !speak_opt_in);
+    let is_silent = (silent_leak && cleaned.is_empty()) || (silenced_by_call && !speak_opt_in);
     Ok(AgenticResult {
+        earlier,
         // `is_silent` implies empty content, so a caller cannot speak by
         // reading the text and forgetting the flag.
         final_content: if is_silent { String::new() } else { cleaned },
@@ -552,6 +686,26 @@ mod tests {
     }
 
     #[test]
+    fn strip_leaked_thought_marker_keeps_the_reply() {
+        assert_eq!(
+            strip_think_artifacts("?[thought\n]Then keep your matches away, umu."),
+            "Then keep your matches away, umu."
+        );
+        assert_eq!(
+            strip_think_artifacts("<think>hm</think>\n[thought\n]\nUmu."),
+            "Umu."
+        );
+    }
+
+    #[test]
+    fn leak_behind_a_thought_marker_is_silent() {
+        let leak = "?[thought\n]CALL:default_api:silent{reasoning: nobody addressed her}";
+        let (cleaned, silent) = strip_leaked_tool_calls(&strip_think_artifacts(leak));
+        assert!(silent);
+        assert!(cleaned.is_empty());
+    }
+
+    #[test]
     fn strip_think_mid_prose_untouched() {
         let t = "I think </think> is a vulgar rune.";
         assert_eq!(strip_think_artifacts(t), t);
@@ -586,6 +740,28 @@ mod tests {
     fn leak_call_silent_case_insensitive() {
         let (cleaned, silent) = strip_leaked_tool_calls("Silent(reasoning=\"x\")");
         assert!(silent);
+        assert!(cleaned.is_empty());
+    }
+
+    /// Gemini's text form of a call it failed to emit (posted verbatim before
+    /// this guard knew the shape).
+    #[test]
+    fn leak_api_call_silent_is_silent() {
+        let leak = "CALL:default_api:silent{reasoning:The porch bit has already run for many \
+                    turns; Ceri didn't ask a question, so I will let the bit rest.}";
+        let (cleaned, silent) = strip_leaked_tool_calls(leak);
+        assert!(silent);
+        assert!(cleaned.is_empty());
+        let (cleaned, silent) = strip_leaked_tool_calls(" callable:default_api:silent{reasoning:x");
+        assert!(silent);
+        assert!(cleaned.is_empty());
+    }
+
+    #[test]
+    fn leak_api_call_other_tool_stripped_not_silent() {
+        let (cleaned, silent) =
+            strip_leaked_tool_calls("CALL:default_api:shift_focus{channel_id:\"42\"}");
+        assert!(!silent);
         assert!(cleaned.is_empty());
     }
 

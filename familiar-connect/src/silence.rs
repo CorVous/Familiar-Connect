@@ -1,8 +1,8 @@
 //! Leaked-tool-call detection for LLM reply streams (subsystem 06).
 //!
 //! Models occasionally emit a tool call as plain assistant *text*
-//! (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`) instead of
-//! calling it. [`StreamGate`] catches that *mid-stream* — before the raw XML
+//! (`<invoke …`, `silent(…)`, `read_channel(…)`, `<tool_call …`,
+//! `CALL:default_api:silent{…}`) instead of calling it. [`StreamGate`] catches that *mid-stream* — before the raw XML
 //! reaches Discord or TTS (issue #109) — staying pending while the leading text
 //! could still complete a leak token, and latching *speak* once every one is
 //! ruled out. The confirmed-leak classification ([`classify_leading_leak`]) is
@@ -12,7 +12,7 @@
 //! Prefix-only: a stray `silent(` mid-reply is content, not a gate.
 //!
 //! There is no text sentinel for silence. A turn goes quiet by calling a tool
-//! (every call is silent unless it passes `silent: false`); `<silent>` in model
+//! (a call that acts is silent unless it passes `silent: false`); `<silent>` in model
 //! output is ordinary prose.
 
 use std::sync::LazyLock;
@@ -33,8 +33,115 @@ static CALL_SILENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*silent\s*\(").expect("valid regex"));
 static CALL_TOOL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*(read_channel|shift_focus)\s*\(").expect("valid regex"));
+/// Gemini's text rendering of a function call it failed to emit as one:
+/// `CALL:default_api:silent{…}` / `callable:default_api:silent{…}`. Captures
+/// the tool name. Namespace and tool are identifiers and the arguments open
+/// with a brace, so note-style prose (`Call: 10:30 (don't be late)`,
+/// `Call: Sarah:Jones (work)`) stays prose.
+static API_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*call(?:able)?:\s*[a-z_]\w*:([a-z_]\w*)\s*\{").expect("valid regex")
+});
+/// A lowercased prefix that could still grow into an [`API_CALL_RE`] match:
+/// past the `call:` / `callable:` keyword, inside the namespace or tool name,
+/// with no opening brace yet.
+static API_CALL_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^call(?:able)?:\s*(?:[a-z_]\w*(?::(?:[a-z_]\w*\s*)?)?)?$").expect("valid regex")
+});
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
+/// A thought-channel marker Gemini leaks ahead of a reply: `[thought\n]`,
+/// seen behind one stray `?` (`?[thought\n]`; U+FFFD covers the same stray
+/// byte decoded lossily). The whitespace before the closing bracket is part of
+/// the leak's shape, so a bracketed aside she writes herself (`[thought]`)
+/// stays prose.
+static LEADING_THOUGHT_MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*[?\x{FFFD}]?\[thought\s+\]\s*").expect("valid regex"));
+/// The marker's fixed opening, lowercased, for the still-streaming check.
+const THOUGHT_MARKER_OPEN: &str = "[thought";
+/// The stray characters seen (or decoded) in front of the marker.
+const THOUGHT_MARKER_STRAYS: [char; 2] = ['?', '\u{FFFD}'];
+
+/// `content` without a leading leaked thought marker (`?[thought\n]`).
+///
+/// The marker is never part of what she says: a reply behind it is the reply,
+/// and a leaked tool call behind it is still a leaked tool call.
+#[must_use]
+pub fn strip_leading_thought_marker(content: &str) -> &str {
+    LEADING_THOUGHT_MARKER_RE
+        .find(content)
+        .map_or(content, |m| &content[m.end()..])
+}
+
+/// Could `stripped` (left-trimmed, non-empty) still grow into a leading
+/// thought marker? True while it is a prefix of `[thought ` plus whitespace,
+/// with or without the stray leading character, and the closing bracket has
+/// not arrived.
+fn thought_marker_prefix_possible(stripped: &str) -> bool {
+    let lc = stripped.to_ascii_lowercase();
+    let after_stray = lc.strip_prefix(THOUGHT_MARKER_STRAYS);
+    std::iter::once(lc.as_str())
+        .chain(after_stray)
+        .any(|candidate| {
+            THOUGHT_MARKER_OPEN.starts_with(candidate)
+                || candidate
+                    .strip_prefix(THOUGHT_MARKER_OPEN)
+                    .is_some_and(|rest| rest.chars().all(char::is_whitespace))
+        })
+}
+
+/// Drops a leaked thought marker from the start of one streamed message.
+///
+/// For a path that hands deltas straight on (voice): the start of the message
+/// is held back until a marker is either complete (dropped) or ruled out
+/// (released untouched); after that every delta passes through. One filter per
+/// assistant message — a turn that calls tools starts a fresh one for each
+/// message the model writes.
+#[derive(Debug, Default)]
+pub struct ThoughtMarkerFilter {
+    held: String,
+    passed: bool,
+}
+
+impl ThoughtMarkerFilter {
+    /// A filter for the start of a new message.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one streamed delta; returns the text to hand on (possibly empty
+    /// while the start of the message is still being judged).
+    pub fn feed(&mut self, delta: &str) -> String {
+        if self.passed {
+            return delta.to_owned();
+        }
+        self.held.push_str(delta);
+        let trimmed = self.held.trim_start();
+        if trimmed.is_empty() || thought_marker_prefix_possible(trimmed) {
+            return String::new();
+        }
+        self.passed = true;
+        let held = std::mem::take(&mut self.held);
+        strip_leading_thought_marker(&held).to_owned()
+    }
+
+    /// The message ended: release whatever is still held (a marker that never
+    /// closed is text after all) and reset for the next message.
+    pub fn finish(&mut self) -> String {
+        self.passed = false;
+        std::mem::take(&mut self.held)
+    }
+}
+
+/// Whether `content` leads with a leaked `<tool_call …>` block.
+///
+/// The template form the streaming gate suppresses but
+/// [`classify_leading_leak`] leaves to it; for text that is delivered outside
+/// the streaming gate's verdict.
+#[must_use]
+pub fn leads_with_tool_call_block(content: &str) -> bool {
+    TOOL_CALL_RE.is_match(content)
+}
 
 /// A tool-call invocation the model leaked into plain assistant text,
 /// classified by shape. Single source of truth for the return-time strip guard
@@ -48,6 +155,10 @@ pub(crate) enum LeadingLeak {
     CallSilent,
     /// A leaked function-call-style `read_channel(…)` / `shift_focus(…)` string.
     CallTool,
+    /// A leaked `CALL:<namespace>:<tool>{…}` string — the text form Gemini
+    /// falls back to when it fails to emit a structured call. `silent` is true
+    /// when it names the `silent` tool.
+    ApiCall { silent: bool },
 }
 
 /// Classify a leaked tool call that *leads* `content`; `None` when `content`
@@ -64,7 +175,9 @@ pub(crate) fn classify_leading_leak(content: &str) -> Option<LeadingLeak> {
     } else if CALL_TOOL_RE.is_match(content) {
         Some(LeadingLeak::CallTool)
     } else {
-        None
+        API_CALL_RE.captures(content).map(|c| LeadingLeak::ApiCall {
+            silent: c[1].eq_ignore_ascii_case("silent"),
+        })
     }
 }
 
@@ -126,8 +239,14 @@ impl StreamGate {
             return decided;
         }
         self.buf.push_str(delta);
-        let stripped = self.buf.trim_start();
-        if stripped.is_empty() {
+        let trimmed = self.buf.trim_start();
+        if trimmed.is_empty() {
+            return StreamDecision::Pending;
+        }
+        // A leaked thought marker is not content: judge what follows it, and
+        // wait while the marker itself is still arriving.
+        let stripped = strip_leading_thought_marker(trimmed);
+        if stripped.is_empty() || thought_marker_prefix_possible(trimmed) {
             return StreamDecision::Pending;
         }
         // Confirmed leaked tool call (shared classifier). A leaked `<invoke …`
@@ -136,12 +255,12 @@ impl StreamGate {
         // persisted turn), so an as-yet-unnamed invoke latches suppress.
         if let Some(leak) = classify_leading_leak(stripped) {
             let decision = match leak {
-                LeadingLeak::Invoke { silent: true } | LeadingLeak::CallSilent => {
-                    StreamDecision::Silent
-                }
-                LeadingLeak::Invoke { silent: false } | LeadingLeak::CallTool => {
-                    StreamDecision::Suppress
-                }
+                LeadingLeak::Invoke { silent: true }
+                | LeadingLeak::ApiCall { silent: true }
+                | LeadingLeak::CallSilent => StreamDecision::Silent,
+                LeadingLeak::Invoke { silent: false }
+                | LeadingLeak::ApiCall { silent: false }
+                | LeadingLeak::CallTool => StreamDecision::Suppress,
             };
             return self.latch(decision);
         }
@@ -189,12 +308,21 @@ fn local_name_possible(after: &str, local: &str) -> bool {
     is_xml_name(after)
 }
 
-/// Call-style prefixes: `silent(`, `read_channel(`, `shift_focus(`.
+/// Call-style prefixes: `silent(`, `read_channel(`, `shift_focus(`, and the
+/// `call:<namespace>:<tool>{` / `callable:…` form.
 fn call_prefix_possible(stripped: &str) -> bool {
     let lc = stripped.to_ascii_lowercase();
     ["silent", "read_channel", "shift_focus"]
         .iter()
         .any(|name| call_name_possible(&lc, name))
+        || api_call_prefix_possible(&lc)
+}
+
+/// Whether the lowercased `lc` could still complete `call:<namespace>:<tool>{`
+/// or its `callable:` spelling: still typing the keyword, or past it and inside
+/// the namespace or tool name.
+fn api_call_prefix_possible(lc: &str) -> bool {
+    "callable:".starts_with(lc) || API_CALL_PREFIX_RE.is_match(lc)
 }
 
 /// Whether the lowercased `lc` could still complete `name` (optionally followed
@@ -227,7 +355,10 @@ fn is_xml_name(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LeadingLeak, StreamDecision, StreamGate, classify_leading_leak};
+    use super::{
+        LeadingLeak, StreamDecision, StreamGate, ThoughtMarkerFilter, classify_leading_leak,
+        strip_leading_thought_marker,
+    };
 
     /// Feed a delta sequence through a fresh gate and return the final decision.
     fn gate_run(deltas: &[&str]) -> StreamDecision {
@@ -268,6 +399,199 @@ mod tests {
             Some(LeadingLeak::CallTool)
         );
         assert_eq!(classify_leading_leak("Let me invoke my wit."), None);
+    }
+
+    /// The two text forms Gemini has produced in place of a structured call.
+    #[test]
+    fn classify_api_call_text_forms() {
+        assert_eq!(
+            classify_leading_leak("CALL:default_api:silent{reasoning:the bit can rest.}"),
+            Some(LeadingLeak::ApiCall { silent: true })
+        );
+        assert_eq!(
+            classify_leading_leak(" callable:default_api:silent{reasoning:x"),
+            Some(LeadingLeak::ApiCall { silent: true })
+        );
+        assert_eq!(
+            classify_leading_leak("call:default_api:shift_focus{channel_id:\"42\"}"),
+            Some(LeadingLeak::ApiCall { silent: false })
+        );
+        // Only a leading call counts, and only with the namespaced shape.
+        assert_eq!(
+            classify_leading_leak("She wrote CALL:default_api:silent{x} again."),
+            None
+        );
+        assert_eq!(classify_leading_leak("Call: me later {maybe}"), None);
+        assert_eq!(classify_leading_leak("Callable: yes, any time."), None);
+    }
+
+    /// Notes that lead with `Call:` and carry a time, a number or a name are
+    /// prose: the namespace and tool must be identifiers, opened by a brace.
+    #[test]
+    fn classify_call_led_notes_are_prose() {
+        for prose in [
+            "Call: 10:30 (don't be late)",
+            "Call:555:1234(home)",
+            "CALL: 911:now {seriously}",
+            "Call: Sarah:Jones (work)",
+            "call:default_api:silent(reasoning=x)",
+        ] {
+            assert_eq!(classify_leading_leak(prose), None, "{prose}");
+            assert_eq!(gate_run(&[prose]), StreamDecision::Speak, "{prose}");
+        }
+    }
+
+    /// A whole reply that is only a prefix of the call shape never resolves;
+    /// the gate reports Pending and the caller treats the reply as speech.
+    #[test]
+    fn gate_reply_that_is_only_a_call_prefix_stays_pending() {
+        for prose in ["Call", "Callable", "Call:", "Call: Sarah", "call:mom"] {
+            assert_eq!(gate_run(&[prose]), StreamDecision::Pending, "{prose}");
+        }
+    }
+
+    // -- leaked thought marker ----------------------------------------------
+
+    #[test]
+    fn thought_marker_is_stripped_only_when_it_leads() {
+        assert_eq!(strip_leading_thought_marker("?[thought\n]Hello."), "Hello.");
+        assert_eq!(
+            strip_leading_thought_marker("[thought\n]\nHello."),
+            "Hello."
+        );
+        assert_eq!(
+            strip_leading_thought_marker("  \u{FFFD}[Thought ] Hello."),
+            "Hello."
+        );
+        assert_eq!(strip_leading_thought_marker("?[thought\n]"), "");
+        for prose in [
+            "Hello there.",
+            "A [thought\n] mid-sentence stays.",
+            "?? [thought\n] after two stray characters stays.",
+            "[thoughtful] of you.",
+            // Her own bracketed aside, and a marker shape never seen leaked.
+            "[thought] Hm, umu.",
+            "[thoughts ] Hm, umu.",
+            "x[thought\n]Hello.",
+        ] {
+            assert_eq!(strip_leading_thought_marker(prose), prose);
+        }
+    }
+
+    /// The burst seen live: the marker, then a `silent` call written as text.
+    #[test]
+    fn gate_thought_marker_then_leaked_silent_call_is_silent() {
+        let leak = "?[thought\n]CALL:default_api:silent{reasoning: nobody addressed her}";
+        assert_eq!(gate_run(&[leak]), StreamDecision::Silent);
+        assert_eq!(
+            gate_run(&[
+                "?[thou",
+                "ght\n",
+                "]CALL:default_",
+                "api:silent{reasoning: x"
+            ]),
+            StreamDecision::Silent
+        );
+        let mut g = StreamGate::new();
+        let mut decided = StreamDecision::Pending;
+        for c in leak.chars() {
+            let d = g.feed(&c.to_string());
+            assert_ne!(d, StreamDecision::Speak, "opened on a prefix");
+            decided = d;
+        }
+        assert_eq!(decided, StreamDecision::Silent);
+    }
+
+    /// The marker ahead of an ordinary reply: the gate waits out the marker
+    /// and opens on the reply.
+    #[test]
+    fn gate_thought_marker_then_prose_speaks() {
+        let mut g = StreamGate::new();
+        assert_eq!(g.feed("?[thought"), StreamDecision::Pending);
+        assert_eq!(g.feed("\n]"), StreamDecision::Pending);
+        assert_eq!(
+            g.feed("Then keep your matches away."),
+            StreamDecision::Speak
+        );
+    }
+
+    /// Run `deltas` through a fresh [`ThoughtMarkerFilter`], end of message
+    /// included; returns what it handed on.
+    fn filter_run(deltas: &[&str]) -> String {
+        let mut f = ThoughtMarkerFilter::new();
+        let mut out: String = deltas.iter().map(|d| f.feed(d)).collect();
+        out.push_str(&f.finish());
+        out
+    }
+
+    #[test]
+    fn filter_drops_a_leading_marker_however_it_is_split() {
+        let reply = "?[thought\n]Then keep your matches away.";
+        assert_eq!(filter_run(&[reply]), "Then keep your matches away.");
+        assert_eq!(
+            filter_run(&[
+                "?",
+                "[thou",
+                "ght",
+                "\n",
+                "]",
+                "Then keep",
+                " your matches away."
+            ]),
+            "Then keep your matches away."
+        );
+        let by_char: Vec<String> = reply.chars().map(String::from).collect();
+        let by_char: Vec<&str> = by_char.iter().map(String::as_str).collect();
+        assert_eq!(filter_run(&by_char), "Then keep your matches away.");
+        // Nothing of the marker is handed on while it is still arriving.
+        let mut f = ThoughtMarkerFilter::new();
+        for part in ["?", "[thought", "\n", "]"] {
+            assert_eq!(f.feed(part), "", "{part:?}");
+        }
+        assert_eq!(f.feed("Hello."), "Hello.");
+    }
+
+    #[test]
+    fn filter_leaves_everything_else_untouched() {
+        for text in [
+            "Hello there.",
+            "  leading space kept.",
+            "? What was that",
+            "[the harpy laughs] Hm.",
+            "[thought] her own aside.",
+            "?",
+            "[thought",
+            "Mid-reply ?[thought\n] stays.",
+        ] {
+            assert_eq!(filter_run(&[text]), text, "{text}");
+            let by_char: Vec<String> = text.chars().map(String::from).collect();
+            let by_char: Vec<&str> = by_char.iter().map(String::as_str).collect();
+            assert_eq!(filter_run(&by_char), text, "{text} by char");
+        }
+    }
+
+    /// One filter serves a whole turn: after `finish` it judges the start of
+    /// the next message afresh.
+    #[test]
+    fn filter_judges_each_message_afresh() {
+        let mut f = ThoughtMarkerFilter::new();
+        assert_eq!(f.feed("?[thought\n]One."), "One.");
+        assert_eq!(f.finish(), "");
+        assert_eq!(f.feed("?[thought\n]"), "");
+        assert_eq!(f.feed("Two."), "Two.");
+        assert_eq!(f.finish(), "");
+    }
+
+    #[test]
+    fn gate_bracket_led_prose_speaks() {
+        assert_eq!(gate_run(&["[the harpy laughs]"]), StreamDecision::Speak);
+        assert_eq!(gate_run(&["?! what was that"]), StreamDecision::Speak);
+        assert_eq!(gate_run(&["[thoughtful pause] Hm."]), StreamDecision::Speak);
+        assert_eq!(
+            gate_run(&["[thought] her own aside."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(gate_run(&["I", " see."]), StreamDecision::Speak);
     }
 
     // -- StreamGate ----------------------------------------------------------
@@ -312,6 +636,60 @@ mod tests {
             gate_run(&["read_channel(limit=10)"]),
             StreamDecision::Suppress
         );
+    }
+
+    #[test]
+    fn gate_leaked_api_call_silent_is_silent() {
+        assert_eq!(
+            gate_run(&["CALL:default_api:silent{reasoning:the bit can rest.}"]),
+            StreamDecision::Silent
+        );
+        assert_eq!(
+            gate_run(&[" call", "able:default", "_api:sil", "ent{reasoning:x"]),
+            StreamDecision::Silent
+        );
+    }
+
+    #[test]
+    fn gate_leaked_api_call_tool_suppresses() {
+        assert_eq!(
+            gate_run(&["CALL:default_api:shift_focus{channel_id:\"42\"}"]),
+            StreamDecision::Suppress
+        );
+    }
+
+    #[test]
+    fn gate_char_by_char_leaked_api_call_never_speaks() {
+        for leak in [
+            "CALL:default_api:silent{reasoning: the bit can rest}",
+            "callable:default_api:silent{reasoning: the bit can rest}",
+        ] {
+            let mut g = StreamGate::new();
+            let mut decided = StreamDecision::Pending;
+            for c in leak.chars() {
+                let d = g.feed(&c.to_string());
+                assert_ne!(d, StreamDecision::Speak, "opened on prefix of {leak}");
+                decided = d;
+            }
+            assert_eq!(decided, StreamDecision::Silent);
+        }
+    }
+
+    #[test]
+    fn gate_call_led_prose_speaks() {
+        assert_eq!(
+            gate_run(&["Call me when the kettle is on."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(
+            gate_run(&["Callable at any hour, that one."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(
+            gate_run(&["Call: the harpy answers, eventually."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(gate_run(&["Calm down."]), StreamDecision::Speak);
     }
 
     #[test]
