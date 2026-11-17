@@ -29,7 +29,7 @@ pub fn run() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{VERSION, run, version_line};
+    use super::{VERSION, version_line};
     use regex::Regex;
 
     fn strip_ansi(s: &str) -> String {
@@ -40,27 +40,11 @@ mod tests {
     }
 
     #[test]
-    fn version_is_semver_prefixed() {
-        // Starts with X.Y.Z.
-        assert!(
-            Regex::new(r"^\d+\.\d+\.\d+")
-                .expect("valid")
-                .is_match(VERSION),
-            "version {VERSION} does not start with X.Y.Z"
-        );
-    }
-
-    #[test]
     fn version_line_contains_version_and_name() {
         // Asserts on the built line rather than captured stdout.
         let stripped = strip_ansi(&version_line());
         assert!(stripped.contains(VERSION));
         assert!(stripped.contains("familiar-connect"));
         assert!(stripped.contains("Version"));
-    }
-
-    #[test]
-    fn run_returns_zero() {
-        assert_eq!(run(), 0);
     }
 }

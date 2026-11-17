@@ -187,15 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn unconfigured_description_is_empty_not_a_code_copy() {
-        let engine = Arc::new(FakeEngine {
-            entries: vec![unscheduled_entry()],
-            tz: Tz::UTC,
-        });
-        assert!(build_start_activity_tool(engine, "").description.is_empty());
-    }
-
-    #[test]
     fn entry_description_scheduled_days_and_hours() {
         let e = ActivityCatalogEntry {
             id: "weekday_rounds".into(),

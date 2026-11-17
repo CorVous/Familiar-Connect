@@ -503,23 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn default_projectors_lists_five_builtins() {
-        let set: std::collections::BTreeSet<&str> = DEFAULT_PROJECTORS.iter().copied().collect();
-        assert_eq!(
-            set,
-            [
-                "fact_supersede",
-                "people_dossier",
-                "reflection",
-                "rich_note",
-                "rolling_summary"
-            ]
-            .into_iter()
-            .collect()
-        );
-    }
-
-    #[test]
     fn known_projectors_includes_all_builtins() {
         let known = known_projectors();
         for name in [

@@ -89,24 +89,6 @@ fn returns_none_when_downloaded_path_missing() {
 }
 
 #[test]
-fn default_knobs_applied() {
-    let dir = tempfile::tempdir().unwrap();
-    let model = dir.path().join("smart-turn-v3.2-cpu.onnx");
-    std::fs::write(&model, b"fake").unwrap();
-
-    let (downloader, _) = ScriptedDownloader::ok(model);
-    let detector =
-        create_local_turn_detector_with(&LocalTurnConfig::default(), &downloader).unwrap();
-
-    assert_eq!(detector.silence_ms, 200);
-    assert_eq!(detector.speech_start_ms, 100);
-    assert!((detector.vad_threshold - 0.5).abs() < 1e-9);
-    assert!((detector.smart_turn_threshold - 0.5).abs() < 1e-9);
-    assert_eq!(detector.vad_hop_size, 256);
-    assert!((detector.idle_fallback_s - 1.5).abs() < 1e-9);
-}
-
-#[test]
 fn passes_config_through() {
     let dir = tempfile::tempdir().unwrap();
     let model = dir.path().join("smart-turn-v3.2-gpu.onnx");

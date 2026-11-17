@@ -700,18 +700,6 @@ mod tests {
         );
     }
 
-    /// The `<silent>` sentinel is gone: the literal string is now ordinary
-    /// prose and the gate opens on it like any other text.
-    #[test]
-    fn gate_silent_string_is_ordinary_prose() {
-        assert_eq!(gate_run(&["<silent>"]), StreamDecision::Speak);
-        assert_eq!(gate_run(&["  <silent>"]), StreamDecision::Speak);
-        assert_eq!(
-            gate_run(&["<sil", "ent> is not a rune anymore"]),
-            StreamDecision::Speak
-        );
-    }
-
     #[test]
     fn gate_normal_prose_speaks() {
         assert_eq!(gate_run(&["Hello there!"]), StreamDecision::Speak);

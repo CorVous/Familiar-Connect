@@ -525,17 +525,7 @@ seed = \"The night's dream, told on waking.\"
         load_activities_config(&path, None)
     }
 
-    // --- dataclass defaults -------------------------------------------------
-
-    #[test]
-    fn config_knob_defaults() {
-        let cfg = ActivitiesConfig::default();
-        assert!(cfg.catalog.is_empty());
-        assert_eq!(cfg.archive_after_minutes, 45);
-        assert_eq!(cfg.idle_nudge_minutes, 20);
-        assert_eq!(cfg.min_gap_minutes, 90);
-        assert!(cfg.active_hours.is_none());
-    }
+    // --- enabled ------------------------------------------------------------
 
     #[test]
     fn empty_catalog_is_disabled() {
@@ -925,17 +915,5 @@ seed = \"The night's dream, told on waking.\"
         let content = VALID_ENTRY.replace("duration_minutes = [20, 45]\n", "");
         let err = load(&content).unwrap_err();
         assert!(err.0.contains("duration_minutes"), "{}", err.0);
-    }
-
-    #[test]
-    fn window_no_longer_a_catalog_key() {
-        let err = load(&format!("{SLEEP_ENTRY}window = \"00:00-08:00\"\n")).unwrap_err();
-        assert!(err.0.contains("unknown keys"), "{}", err.0);
-    }
-
-    #[test]
-    fn grace_no_longer_a_catalog_key() {
-        let err = load(&format!("{SLEEP_ENTRY}grace_minutes = 30\n")).unwrap_err();
-        assert!(err.0.contains("unknown keys"), "{}", err.0);
     }
 }

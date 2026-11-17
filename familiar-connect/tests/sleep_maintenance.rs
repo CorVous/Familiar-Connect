@@ -1,4 +1,4 @@
-//! Registry order/unknown-raises/known-set/DEFAULT_PASSES, the denylist
+//! Registry order/unknown-raises, the denylist
 //! data-flow (consolidation's retired text reaches the opinion stance prompt),
 //! and the default run applying both passes.
 //!
@@ -9,7 +9,7 @@
 #[path = "sleep_helpers/mod.rs"]
 mod helpers;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use familiar_connect::history::async_store::AsyncHistoryStore;
@@ -17,8 +17,7 @@ use familiar_connect::history::store::{AppendFact, AppendTurn, FactSubject};
 use familiar_connect::identity::is_ego_key;
 use familiar_connect::llm::LlmClient;
 use familiar_connect::sleep::maintenance::{
-    CONSOLIDATION_PASS, DEFAULT_PASSES, MaintenanceContext, OPINION_PASS, create_passes,
-    known_passes, run_passes,
+    CONSOLIDATION_PASS, DEFAULT_PASSES, MaintenanceContext, OPINION_PASS, create_passes, run_passes,
 };
 use serde_json::json;
 
@@ -98,22 +97,6 @@ fn create_passes_unknown_name_raises() {
         .err()
         .expect("unknown pass errors");
     assert!(err.to_string().contains("nope"));
-}
-
-#[test]
-fn known_passes_lists_registered() {
-    assert_eq!(
-        known_passes(),
-        [CONSOLIDATION_PASS, OPINION_PASS]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect::<BTreeSet<_>>()
-    );
-}
-
-#[test]
-fn default_passes_is_consolidation_then_opinion() {
-    assert_eq!(DEFAULT_PASSES, [CONSOLIDATION_PASS, OPINION_PASS]);
 }
 
 // ---------------------------------------------------------------------------

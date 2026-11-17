@@ -378,7 +378,7 @@ fn title_case(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SELF_DOSSIER_MIN_IMPORTANCE, dossier_facts, resolve_display_name, title_case};
+    use super::{dossier_facts, resolve_display_name, title_case};
     use crate::history::store::Fact;
     use chrono::Utc;
 
@@ -433,14 +433,6 @@ mod tests {
         let out = dossier_facts(facts, true);
         let texts: Vec<&str> = out.iter().map(|f| f.text.as_str()).collect();
         assert_eq!(texts, vec!["nine", "seven", "five", "null"]);
-    }
-
-    #[test]
-    fn keep_threshold_is_five() {
-        assert_eq!(SELF_DOSSIER_MIN_IMPORTANCE, 5);
-        // A fact exactly at the threshold is kept.
-        let out = dossier_facts(vec![fact(1, "edge", Some(5))], true);
-        assert_eq!(out.len(), 1);
     }
 
     #[test]

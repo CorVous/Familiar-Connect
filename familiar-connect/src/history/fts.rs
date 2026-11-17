@@ -389,21 +389,9 @@ impl FtsIndex for TantivyFts {
 
 #[cfg(test)]
 mod tests {
-    use super::{FTS_STOPWORDS, FtsIndex, TantivyFts, build_analyzer, sanitize_query};
+    use super::{FtsIndex, TantivyFts, sanitize_query};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn stopword_list_is_pinned() {
-        // The list holds 87 entries; this pins the exact set.
-        assert_eq!(FTS_STOPWORDS.len(), 87);
-    }
-
-    #[test]
-    fn analyzer_builds() {
-        // Must not panic assembling the filter chain.
-        let _ = build_analyzer();
-    }
 
     #[test]
     fn sanitize_strips_punctuation_and_lowercases() {

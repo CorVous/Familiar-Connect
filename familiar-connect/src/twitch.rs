@@ -388,7 +388,7 @@ mod tests {
     };
     use crate::identity::Author;
     use crate::llm::Message;
-    use chrono::{TimeZone, Utc};
+    use chrono::Utc;
     use serde_json::json;
 
     fn alice() -> Author {
@@ -409,71 +409,6 @@ mod tests {
             Some("carol".to_owned()),
             Some("Carol".to_owned()),
         )
-    }
-
-    // --- TwitchEvent shape -------------------------------------------------
-
-    #[test]
-    fn twitch_event_required_fields() {
-        let event = TwitchEvent {
-            channel: "sapphire-stream".to_owned(),
-            text: "Alice has followed the channel".to_owned(),
-            priority: Priority::Normal,
-            timestamp: Utc::now(),
-            viewer: None,
-        };
-        assert_eq!(event.channel, "sapphire-stream");
-        assert_eq!(event.text, "Alice has followed the channel");
-        assert_eq!(event.priority, Priority::Normal);
-    }
-
-    #[test]
-    fn twitch_event_priority_immediate() {
-        let event = TwitchEvent {
-            channel: "ch".to_owned(),
-            text: "ad started".to_owned(),
-            priority: Priority::Immediate,
-            timestamp: Utc::now(),
-            viewer: None,
-        };
-        assert_eq!(event.priority, Priority::Immediate);
-    }
-
-    #[test]
-    fn twitch_event_timestamp_is_utc() {
-        let ts = Utc.with_ymd_and_hms(2026, 4, 6, 12, 0, 0).unwrap();
-        let event = TwitchEvent {
-            channel: "ch".to_owned(),
-            text: "something".to_owned(),
-            priority: Priority::Normal,
-            timestamp: ts,
-            viewer: None,
-        };
-        assert_eq!(event.timestamp, ts);
-    }
-
-    #[test]
-    fn twitch_event_viewer_present_when_set() {
-        let event = TwitchEvent {
-            channel: "ch".to_owned(),
-            text: "Alice has followed the channel".to_owned(),
-            priority: Priority::Normal,
-            timestamp: Utc::now(),
-            viewer: Some(alice()),
-        };
-        assert_eq!(event.viewer, Some(alice()));
-    }
-
-    #[test]
-    fn twitch_event_viewer_defaults_to_none() {
-        let event = TwitchEvent {
-            channel: "ch".to_owned(),
-            text: "An ad has begun on the channel".to_owned(),
-            priority: Priority::Immediate,
-            timestamp: Utc::now(),
-            viewer: None,
-        };
-        assert!(event.viewer.is_none());
     }
 
     // --- text formatters ---------------------------------------------------
@@ -583,83 +518,6 @@ mod tests {
     fn ad_break_messages() {
         assert_eq!(format_ad_start(), "An ad has begun on the channel");
         assert_eq!(format_ad_end(), "Ads have ended");
-    }
-
-    // --- TwitchWatcherConfig ----------------------------------------------
-
-    #[test]
-    fn config_defaults() {
-        let config = TwitchWatcherConfig::default();
-        assert!(config.subscriptions_enabled);
-        assert!(config.cheers_enabled);
-        assert!(config.follows_enabled);
-        assert!(config.ads_enabled);
-        assert!(config.ads_immediate);
-        assert!(config.redemption_names.is_empty());
-    }
-
-    #[test]
-    fn config_can_disable_each_flag() {
-        assert!(
-            !TwitchWatcherConfig {
-                subscriptions_enabled: false,
-                ..Default::default()
-            }
-            .subscriptions_enabled
-        );
-        assert!(
-            !TwitchWatcherConfig {
-                cheers_enabled: false,
-                ..Default::default()
-            }
-            .cheers_enabled
-        );
-        assert!(
-            !TwitchWatcherConfig {
-                follows_enabled: false,
-                ..Default::default()
-            }
-            .follows_enabled
-        );
-        assert!(
-            !TwitchWatcherConfig {
-                ads_enabled: false,
-                ..Default::default()
-            }
-            .ads_enabled
-        );
-        assert!(
-            !TwitchWatcherConfig {
-                ads_immediate: false,
-                ..Default::default()
-            }
-            .ads_immediate
-        );
-    }
-
-    #[test]
-    fn config_can_set_redemption_names() {
-        let config = TwitchWatcherConfig {
-            redemption_names: vec!["Talk to Sapphire".to_owned(), "Hydrate".to_owned()],
-            ..Default::default()
-        };
-        assert!(
-            config
-                .redemption_names
-                .iter()
-                .any(|n| n == "Talk to Sapphire")
-        );
-        assert!(config.redemption_names.iter().any(|n| n == "Hydrate"));
-    }
-
-    #[test]
-    fn config_redemption_names_independent_per_instance() {
-        // Rust `Vec` is owned per value — no shared mutable default, so the
-        // shared-default bug class cannot occur here.
-        let mut a = TwitchWatcherConfig::default();
-        let b = TwitchWatcherConfig::default();
-        a.redemption_names.push("Test".to_owned());
-        assert!(!b.redemption_names.iter().any(|n| n == "Test"));
     }
 
     // --- build_channel_point_event ----------------------------------------

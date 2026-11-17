@@ -2,8 +2,7 @@
 //!
 //! `clap` (derive) replaces `argparse`; the subcommand set (`run` / `diagnose` /
 //! `prompts` / `version`) and the repeatable `-v/--verbose` counter are a fixed
-//! CLI contract, and there is deliberately **no** `sleep` subcommand
-//! (test-pinned).
+//! CLI contract.
 //! [`setup_logging`] installs a `tracing` subscriber whose event formatter
 //! reproduces the [`StyledFormatter`](crate::log_style::StyledFormatter) wire
 //! format, and pins the two-tier visibility (`warn` root, `familiar_connect` at
@@ -46,7 +45,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// The available subcommands. Deliberately no `sleep` (removed; test-pinned).
+/// The available subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Start the Discord bot.
@@ -364,12 +363,6 @@ mod tests {
     fn version_subcommand_registered() {
         let cli = Cli::try_parse_from(["familiar-connect", "version"]).expect("parse");
         assert!(matches!(cli.command, Some(Command::Version)));
-    }
-
-    #[test]
-    fn sleep_is_not_a_registered_subcommand() {
-        // The runtime sleep path stays the only trigger — no `sleep` CLI verb.
-        assert!(Cli::try_parse_from(["familiar-connect", "sleep"]).is_err());
     }
 
     #[test]

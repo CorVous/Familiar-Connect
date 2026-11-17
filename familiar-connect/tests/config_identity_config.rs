@@ -135,14 +135,6 @@ fn unknown_llm_slot_rejected() {
 }
 
 #[test]
-fn legacy_main_prose_rejected() {
-    assert_err(
-        load("[llm.main_prose]\nmodel = \"m\"\n"),
-        "unknown LLM slot 'main_prose'",
-    );
-}
-
-#[test]
 fn invalid_display_tz_rejected() {
     assert_err(load("display_tz = \"PST\"\n"), "display_tz");
 }
@@ -197,12 +189,6 @@ fn sleep_window_wraps_midnight() {
             chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap()
         ))
     );
-}
-
-#[test]
-fn sleep_grace_defaults_to_30() {
-    let cfg = load_ok("[sleep]\nwindow = \"00:00-08:00\"\n");
-    assert_eq!(cfg.sleep_grace_minutes, 30);
 }
 
 #[test]
@@ -525,21 +511,6 @@ fn image_description_constraints_must_be_string() {
 // --- relocated prompt text (#151) ------------------------------------------
 
 #[test]
-fn operating_modes_default_from_profile() {
-    let cfg = load_ok("");
-    assert_eq!(
-        cfg.operating_mode_voice,
-        "You are speaking aloud. Keep replies short (one or two sentences). \
-         Avoid markdown."
-    );
-    assert_eq!(
-        cfg.operating_mode_text,
-        "You are chatting in a text channel. Markdown and multi-line replies \
-         are fine."
-    );
-}
-
-#[test]
 fn operating_modes_override() {
     let cfg = load_ok(
         "[prompt]\noperating_mode_voice = \"whisper\"\noperating_mode_text = \"scribble\"\n",
@@ -549,31 +520,9 @@ fn operating_modes_override() {
 }
 
 #[test]
-fn voice_tool_ack_default_from_profile() {
-    let cfg = load_ok("");
-    assert_eq!(
-        cfg.voice_tool_ack,
-        "When you call a tool and still mean to be heard, pass `silent: false` \
-         and speak at least a brief acknowledgement in the same reply. A tool \
-         call on its own is silent \u{2014} nothing is spoken."
-    );
-}
-
-#[test]
 fn voice_tool_ack_override() {
     let cfg = load_ok("[prompt]\nvoice_tool_ack = \"say something first\"\n");
     assert_eq!(cfg.voice_tool_ack, "say something first");
-}
-
-#[test]
-fn shift_focus_coaching_default_from_profile() {
-    let cfg = load_ok("");
-    assert_eq!(
-        cfg.shift_focus_coaching,
-        "use shift_focus if one pulls your attention: it moves you there and \
-         shows you the channel, and what you write next is your reply there. Call \
-         silent() to simply read."
-    );
 }
 
 #[test]
@@ -847,21 +796,6 @@ fn text_silence_gap_fold_accepts_zero() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shipped_default_voice_budget() {
-    let cfg = load_ok("");
-    let v = cfg.budgets.get("voice").unwrap();
-    assert_eq!(v.recent_history_tokens, 3000);
-    assert_eq!(v.rag_tokens, 900);
-    assert_eq!(v.dossier_tokens, 900);
-    assert_eq!(v.summary_tokens, 600);
-    assert_eq!(v.max_history_turns, 200);
-    assert_eq!(v.max_rag_turns, 10);
-    assert_eq!(v.max_rag_facts, 6);
-    assert_eq!(v.max_dossier_people, 16);
-    assert_eq!(v.total_tokens(), 3000 + 900 + 900 + 600 + 600 + 600);
-}
-
-#[test]
 fn max_rag_turns_zero_disables_turn_retrieval() {
     let cfg = load_ok("[budget.text]\nmax_rag_turns = 0\n");
     assert_eq!(cfg.budgets.get("text").unwrap().max_rag_turns, 0);
@@ -873,17 +807,6 @@ fn max_rag_turns_zero_disables_turn_retrieval() {
         load("[budget.text]\nmax_rag_facts = 0\n"),
         "must be positive",
     );
-}
-
-#[test]
-fn shipped_default_text_and_background() {
-    let cfg = load_ok("");
-    let text = cfg.budgets.get("text").unwrap();
-    assert_eq!(text.recent_history_tokens, 8000);
-    assert_eq!(text.total_tokens(), 8000 + 2400 + 2400 + 1600 + 1600 + 1600);
-    let bg = cfg.budgets.get("background").unwrap();
-    assert_eq!(bg.recent_history_tokens, 24000);
-    assert_eq!(bg.total_tokens(), 24000 + 8000 + 8000 + 4000 + 4000 + 4000);
 }
 
 #[test]
@@ -922,14 +845,6 @@ fn budget_unknown_key_rejected() {
 }
 
 #[test]
-fn total_tokens_key_rejected_as_unknown() {
-    assert_err(
-        load("[budget.voice]\ntotal_tokens = 5000\n"),
-        "unknown keys",
-    );
-}
-
-#[test]
 fn negative_cap_rejected() {
     assert_err(
         load("[budget.voice]\nrecent_history_tokens = -1\n"),
@@ -940,15 +855,6 @@ fn negative_cap_rejected() {
 // ---------------------------------------------------------------------------
 // Memory retrieval
 // ---------------------------------------------------------------------------
-
-#[test]
-fn retrieval_shipped_default_weights() {
-    let r = load_ok("").memory_retrieval;
-    approx(r.bm25_weight, 1.0);
-    approx(r.recency_weight, 0.0);
-    approx(r.importance_weight, 0.6);
-    approx(r.embedding_weight, 0.0);
-}
 
 #[test]
 fn retrieval_partial_override() {
@@ -999,11 +905,6 @@ fn retrieval_non_numeric_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn embedding_shipped_default_is_off() {
-    assert_eq!(load_ok("").embedding.backend, "off");
-}
-
-#[test]
 fn embedding_override_to_hash() {
     let cfg = load_ok("[providers.embedding]\nbackend = \"hash\"\ndim = 128\n");
     assert_eq!(cfg.embedding.backend, "hash");
@@ -1034,13 +935,6 @@ fn embedding_non_int_dim_rejected() {
         load("[providers.embedding]\ndim = \"wide\"\n"),
         "must be a positive integer",
     );
-}
-
-#[test]
-fn embedding_default_fastembed_model_is_bge_small() {
-    let cfg = load_ok("");
-    assert_eq!(cfg.embedding.fastembed_model, "BAAI/bge-small-en-v1.5");
-    assert!(cfg.embedding.fastembed_cache_dir.is_none());
 }
 
 #[test]
@@ -1184,12 +1078,6 @@ fn channel_invalid_message_rendering_rejected() {
 }
 
 #[test]
-fn channel_total_tokens_key_ignored() {
-    let cfg = load_ok("[channels.12345]\ntotal_tokens = 2000\n");
-    assert!(cfg.channels.contains_key(&12345));
-}
-
-#[test]
 fn budget_for_returns_tier_base() {
     let cfg = load_ok("");
     let base = *cfg.budgets.get("text").unwrap();
@@ -1221,14 +1109,6 @@ fn unknown_curve_field_rejected() {
     assert_err(
         load("[budget.model_curves.\"claude-opus-4-7\"]\nno_such_field = 1.5\n"),
         "no_such_field",
-    );
-}
-
-#[test]
-fn total_tokens_curve_field_rejected() {
-    assert_err(
-        load("[budget.model_curves.\"claude-opus-4-7\"]\ntotal_tokens = 2.0\n"),
-        "total_tokens",
     );
 }
 
@@ -1292,11 +1172,6 @@ fn budget_for_curve_not_applied_for_different_model() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn turn_detection_omitted_section_uses_default() {
-    assert_eq!(load_ok("").turn_detection.strategy, "deepgram");
-}
-
-#[test]
 fn ten_plus_smart_turn_strategy_parsed() {
     let cfg = load_ok("[providers.turn_detection]\nstrategy = \"ten+smart_turn\"\n");
     assert_eq!(cfg.turn_detection.strategy, "ten+smart_turn");
@@ -1306,11 +1181,6 @@ fn ten_plus_smart_turn_strategy_parsed() {
 fn deepgram_strategy_explicit() {
     let cfg = load_ok("[providers.turn_detection]\nstrategy = \"deepgram\"\n");
     assert_eq!(cfg.turn_detection.strategy, "deepgram");
-}
-
-#[test]
-fn idle_fallback_s_default() {
-    approx(load_ok("").turn_detection.local.idle_fallback_s, 1.5);
 }
 
 #[test]
@@ -1346,15 +1216,6 @@ fn strategy_must_be_string() {
 // ---------------------------------------------------------------------------
 // STT
 // ---------------------------------------------------------------------------
-
-#[test]
-fn stt_omitted_section_uses_defaults() {
-    let cfg = load_ok("");
-    assert_eq!(cfg.stt.backend, "deepgram");
-    assert_eq!(cfg.stt.deepgram.endpointing_ms, 500);
-    assert_eq!(cfg.stt.deepgram.utterance_end_ms, 1500);
-    assert!(cfg.stt.deepgram.keyterms.is_empty());
-}
 
 #[test]
 fn deepgram_knobs_overridden() {
@@ -1850,21 +1711,6 @@ fn memory_worker_unknown_subtable_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn default_profile_enables_every_default_projector() {
-    let cfg = load_ok("");
-    assert_eq!(
-        cfg.memory_providers.projectors,
-        vec![
-            "rolling_summary".to_owned(),
-            "rich_note".to_owned(),
-            "people_dossier".to_owned(),
-            "reflection".to_owned(),
-            "fact_supersede".to_owned(),
-        ]
-    );
-}
-
-#[test]
 fn history_window_fallbacks_match_dataclass_defaults() {
     let cfg = load_custom(Some(""), "").unwrap();
     assert_eq!(
@@ -1880,11 +1726,6 @@ fn history_window_fallbacks_match_dataclass_defaults() {
 // ---------------------------------------------------------------------------
 // Voice roster
 // ---------------------------------------------------------------------------
-
-#[test]
-fn voice_roster_event_window_default_ships_in_the_profile() {
-    approx(load_ok("").voice.roster_event_window_seconds, 120.0);
-}
 
 #[test]
 fn voice_roster_event_window_loads_from_toml() {

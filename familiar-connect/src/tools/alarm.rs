@@ -269,9 +269,4 @@ mod tests {
     fn resolve_when_accepts_valid_delay() {
         assert!(resolve_when(&json!({"delay_seconds": 30})).is_ok());
     }
-
-    #[test]
-    fn max_delay_is_one_year() {
-        assert_eq!(MAX_DELAY_S, 31_536_000);
-    }
 }

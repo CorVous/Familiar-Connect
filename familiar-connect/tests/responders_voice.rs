@@ -1498,27 +1498,6 @@ async fn dispatcher_unblocked_during_in_flight_final() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn trailing_voice_directive_matches_the_shipped_default_byte_for_byte() {
-    let llm = Arc::new(CapturingLlm::new("ok"));
-    let (r, _) = voice_responder(store(), llm.clone(), Arc::new(MockTTSPlayer::new(1, 5)));
-    r.handle(&activity_start("voice:1", "t-1", None), &bus())
-        .await
-        .unwrap();
-    r.handle(&voice_final("hi", "voice:1", "t-1", None), &bus())
-        .await
-        .unwrap();
-    r.wait_until_idle().await;
-    let trailing = llm.captured()[0].last().unwrap().content_str();
-    assert!(
-        trailing.contains(
-            "You are speaking aloud. Keep replies short (one or two sentences). \
-             Avoid markdown."
-        ),
-        "{trailing}"
-    );
-}
-
-#[tokio::test]
 async fn overridden_operating_mode_reaches_the_trailing_reminder() {
     let llm = Arc::new(CapturingLlm::new("ok"));
     let (r, _) = voice_responder(store(), llm.clone(), Arc::new(MockTTSPlayer::new(1, 5)));

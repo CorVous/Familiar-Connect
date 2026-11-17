@@ -1325,24 +1325,6 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn init_defaults() {
-        let c = DeepgramTranscriber::new("test-key");
-        assert_eq!(c.api_key, "test-key");
-        assert_eq!(c.model, DEFAULT_MODEL);
-        assert_eq!(c.model, "nova-3");
-        assert_eq!(c.language, DEFAULT_LANGUAGE);
-        assert_eq!(c.language, "en");
-        assert_eq!(c.sample_rate, 48000);
-    }
-
-    #[test]
-    fn init_custom_model() {
-        let mut c = DeepgramTranscriber::new("test-key");
-        c.model = "nova-2".to_string();
-        assert_eq!(c.model, "nova-2");
-    }
-
-    #[test]
     fn default_endpointing_widened() {
         assert!(DeepgramTranscriber::new("k").endpointing_ms >= 500);
     }

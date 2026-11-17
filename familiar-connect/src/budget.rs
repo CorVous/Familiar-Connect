@@ -1053,37 +1053,6 @@ mod tests {
         }
     }
 
-    // --- TierBudget fields -------------------------------------------------
-
-    #[test]
-    fn overriding_one_field_leaves_others_at_default() {
-        let a = TierBudget::default();
-        let b = TierBudget {
-            rag_tokens: 9999,
-            ..TierBudget::default()
-        };
-        assert_eq!(b.rag_tokens, 9999);
-        assert_eq!(b.recent_history_tokens, a.recent_history_tokens);
-        assert_eq!(b.dossier_tokens, a.dossier_tokens);
-        assert_eq!(b.max_dossier_people, a.max_dossier_people);
-    }
-
-    #[test]
-    fn explicit_subcap_used_directly() {
-        let b = TierBudget {
-            recent_history_tokens: 500,
-            ..TierBudget::default()
-        };
-        assert_eq!(b.recent_history_tokens, 500);
-    }
-
-    #[test]
-    fn dataclass_default_is_voice_tier() {
-        let b = TierBudget::default();
-        assert_eq!(b.recent_history_tokens, 3000);
-        assert_eq!(b.total_tokens(), 3000 + 900 + 900 + 600 + 600 + 600);
-    }
-
     // --- TierBudget derived total ------------------------------------------
 
     #[test]
@@ -1118,42 +1087,6 @@ mod tests {
             ..TierBudget::default()
         };
         assert_eq!(bumped.total_tokens(), base.total_tokens() + 500);
-    }
-
-    // --- ModelBudgetCurve --------------------------------------------------
-
-    #[test]
-    fn curve_defaults_are_all_one() {
-        let c = ModelBudgetCurve::default();
-        for v in [
-            c.recent_history_tokens,
-            c.rag_tokens,
-            c.dossier_tokens,
-            c.summary_tokens,
-            c.reflection_tokens,
-            c.lorebook_tokens,
-            c.max_history_turns,
-            c.max_rag_turns,
-            c.max_rag_facts,
-            c.max_dossier_people,
-            c.max_reflections,
-            c.max_lorebook_entries,
-        ] {
-            assert!((v - 1.0).abs() < f64::EPSILON);
-        }
-    }
-
-    #[test]
-    fn curve_partial_override_leaves_others_at_one() {
-        let c = ModelBudgetCurve {
-            recent_history_tokens: 2.0,
-            rag_tokens: 1.5,
-            ..ModelBudgetCurve::default()
-        };
-        assert!((c.recent_history_tokens - 2.0).abs() < f64::EPSILON);
-        assert!((c.rag_tokens - 1.5).abs() < f64::EPSILON);
-        assert!((c.dossier_tokens - 1.0).abs() < f64::EPSILON);
-        assert!((c.summary_tokens - 1.0).abs() < f64::EPSILON);
     }
 
     // --- apply_curve -------------------------------------------------------

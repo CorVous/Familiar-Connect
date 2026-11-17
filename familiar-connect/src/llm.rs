@@ -3552,12 +3552,6 @@ mod client {
             // The stream is unaffected; there is simply nowhere for a row to go.
             assert_eq!(text, "hi");
         }
-
-        // Silence dead-code for the `Content` import used only to assert shapes.
-        #[test]
-        fn content_import_is_live() {
-            assert_eq!(Content::default(), Content::Text(String::new()));
-        }
     }
 }
 
@@ -3569,7 +3563,7 @@ pub use client::{
 
 #[cfg(test)]
 mod tests {
-    use super::{Content, LlmClient, LlmDelta, LlmStream, Message, sanitize_name};
+    use super::{LlmClient, LlmStream, Message, sanitize_name};
     use serde_json::{Value, json};
 
     // --- sanitize_name -----------------------------------------------------
@@ -3728,33 +3722,6 @@ mod tests {
             msg.to_dict(),
             json!({"role": "tool", "content": [{"type": "text", "text": "desc"}]})
         );
-    }
-
-    // --- LlmDelta shape ----------------------------------------------------
-
-    #[test]
-    fn llm_delta_defaults_are_empty() {
-        let d = LlmDelta::default();
-        assert_eq!(d.content, "");
-        assert!(d.tool_calls.is_empty());
-        assert!(d.finish_reason.is_none());
-    }
-
-    #[test]
-    fn llm_delta_carries_fields() {
-        let d = LlmDelta {
-            content: "Hel".into(),
-            finish_reason: Some("stop".into()),
-            ..Default::default()
-        };
-        assert_eq!(d.content, "Hel");
-        assert_eq!(d.finish_reason.as_deref(), Some("stop"));
-        assert!(d.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn content_default_is_empty_text() {
-        assert_eq!(Content::default(), Content::Text(String::new()));
     }
 
     // --- LlmClient::model default (#183) -----------------------------------

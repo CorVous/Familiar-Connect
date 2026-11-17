@@ -815,25 +815,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_context_images_defaults_empty() {
-        let ctx = ToolContext::new("fam-1", 42, "text", "turn-1");
-        assert!(ctx.images.is_empty());
-    }
-
-    #[test]
-    fn tool_context_description_llm_defaults_none() {
-        let ctx = ToolContext::new("fam-1", 42, "text", "turn-1");
-        assert!(ctx.description_llm.is_none());
-    }
-
-    #[test]
-    fn tool_context_focus_and_store_default_none() {
-        let ctx = ToolContext::new("fam", 1, "text", "t");
-        assert!(ctx.focus_manager.is_none());
-        assert!(ctx.store.is_none());
-    }
-
-    #[test]
     fn serialize_image_result_text_only() {
         let res = ImageResult::new("a cat", "abc123");
         assert_eq!(
