@@ -266,6 +266,25 @@ fn is_subscribed_false() {
     assert!(!fm.is_subscribed(99));
 }
 
+/// A text row counts, alone or beside a voice row; a voice-only channel and
+/// an unknown one do not.
+#[test]
+fn is_text_subscribed_needs_a_text_row() {
+    let store = make_store(None, None, 0);
+    let (_dir, reg) = make_registry(&[
+        (5, SubscriptionKind::Text),
+        (6, SubscriptionKind::Voice),
+        (7, SubscriptionKind::Voice),
+        (7, SubscriptionKind::Text),
+    ]);
+    let fm = FocusManager::new("fam", store, reg);
+    assert!(fm.is_text_subscribed(5));
+    assert!(!fm.is_text_subscribed(6));
+    assert!(fm.is_text_subscribed(7));
+    assert!(!fm.is_text_subscribed(99));
+    assert!(fm.is_subscribed(6));
+}
+
 #[test]
 fn subscribed_channels_lists_text_and_voice() {
     let store = make_store(None, None, 0);

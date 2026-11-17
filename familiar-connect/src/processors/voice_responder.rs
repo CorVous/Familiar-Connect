@@ -35,7 +35,9 @@ use crate::processors::{
     VoiceTranscriptFinal,
 };
 use crate::sentence_streamer::SentenceStreamer;
-use crate::silence::{StreamDecision, StreamGate};
+use crate::silence::{
+    StreamDecision, StreamGate, ThoughtMarkerFilter, strip_leading_thought_marker,
+};
 use crate::support::text::is_speakable;
 use crate::tools::agentic::{
     AgenticHooks, agentic_loop, calls_opt_into_speech, guard_leaked_content, tool_content_as_text,
@@ -447,6 +449,7 @@ impl VoiceInner {
     ) -> Option<String> {
         let mut accumulated = String::new();
         let mut streamer = SentenceStreamer::new();
+        let mut marker = ThoughtMarkerFilter::new();
         let mut gate = StreamGate::new();
         let mut pending: VecDeque<String> = VecDeque::new();
         let mut gate_open = false;
@@ -489,10 +492,16 @@ impl VoiceInner {
                 budget.record(&scope.turn_id, PHASE_LLM_FIRST_TOKEN, None);
                 first_delta_seen = true;
             }
-            accumulated.push_str(&delta.content);
+            // A leaked thought marker at the start of the reply is dropped
+            // here, ahead of everything that hears or records the text.
+            let text = marker.feed(&delta.content);
+            if text.is_empty() {
+                continue;
+            }
+            accumulated.push_str(&text);
 
             if !gate_open {
-                match gate.feed(&delta.content) {
+                match gate.feed(&text) {
                     StreamDecision::Silent => {
                         // Deliberate abandon, not a barge-in — say so before the
                         // stream drops (issue #220).
@@ -516,7 +525,7 @@ impl VoiceInner {
                     StreamDecision::Pending => {}
                 }
             }
-            for sentence in streamer.feed(&delta.content) {
+            for sentence in streamer.feed(&text) {
                 pending.push_back(sentence);
             }
             if gate_open {
@@ -532,6 +541,11 @@ impl VoiceInner {
             }
         }
 
+        // Text the marker filter was still holding (a reply as short as "?")
+        // is part of the reply after all.
+        let held = marker.finish();
+        accumulated.push_str(&held);
+        pending.extend(streamer.feed(&held));
         // Stream ended undecided with non-whitespace content (a very short
         // reply) → treat as the speak path.
         if !gate_open && gate.decided().is_none() && !accumulated.trim().is_empty() {
@@ -577,9 +591,12 @@ impl VoiceInner {
             state: tokio::sync::Mutex::new(VoiceToolState {
                 accumulated: String::new(),
                 streamer: SentenceStreamer::new(),
+                marker: ThoughtMarkerFilter::new(),
                 gate: StreamGate::new(),
                 pending: VecDeque::new(),
                 gate_open: false,
+                spoke: false,
+                msg_start: 0,
                 first_delta_seen: false,
                 decision_logged: false,
                 saw_tool_calls: false,
@@ -606,20 +623,31 @@ impl VoiceInner {
         };
 
         let mut st = hooks.state.lock().await;
-        // A leaked tool-call block that led the stream (issue #109): abandon the
-        // turn as silent/empty so nothing is spoken or persisted.
-        if matches!(
-            st.gate.decided(),
-            Some(StreamDecision::Silent | StreamDecision::Suppress)
-        ) {
+        // A leaked tool-call block that led the turn (issue #109): abandon the
+        // turn as silent/empty so nothing is spoken or persisted. One that
+        // followed speech was dropped on its own as it streamed; what was
+        // said before it stands.
+        if st.leaked() && !st.spoke {
             return None;
         }
         // A silent turn (no call opted into speech) persists nothing — unless
         // audio already went out, which cannot be recalled: what was said has to
         // be recorded.
-        if result.is_silent && !st.gate_open {
+        if result.is_silent && !st.gate_open && !st.spoke {
             self.log_silent(&scope.turn_id, channel_id);
             return None;
+        }
+        st.release_held_text();
+        // Stream ended undecided with non-whitespace content (a very short
+        // reply that is still a prefix of a leak token, such as "Silent" or
+        // "Call") → treat as the speak path, so what is recorded as said is
+        // also spoken.
+        if !st.gate_open && st.gate.decided().is_none() && !st.unjudged_text().trim().is_empty() {
+            if !st.decision_logged {
+                self.log_respond(&scope.turn_id, channel_id);
+                st.decision_logged = true;
+            }
+            st.gate_open = true;
         }
         if st.gate_open {
             // `speak` is the single speakable gate; push the tail as-is.
@@ -631,10 +659,6 @@ impl VoiceInner {
                 }
                 self.speak(&sentence, scope).await;
             }
-        }
-        if !st.gate_open && st.gate.decided().is_none() && !st.accumulated.trim().is_empty() {
-            self.log_respond(&scope.turn_id, channel_id);
-            st.decision_logged = true;
         }
         if scope.is_cancelled() && !st.decision_logged {
             log_preempted(&scope.turn_id);
@@ -761,6 +785,54 @@ fn log_skip_unspeakable(turn_id: &str, text: &str) {
     );
 }
 
+impl VoiceToolState {
+    /// The current message ended: whatever the marker filter was still holding
+    /// (a message as short as "?") is text after all, and the filter starts
+    /// afresh for the next message.
+    fn release_held_text(&mut self) {
+        let held = self.marker.finish();
+        if self.leaked() {
+            return;
+        }
+        self.accumulated.push_str(&held);
+        let sentences = self.streamer.feed(&held);
+        self.pending.extend(sentences);
+    }
+
+    /// The gate judged the text it is looking at a leaked tool call.
+    const fn leaked(&self) -> bool {
+        matches!(
+            self.gate.decided(),
+            Some(StreamDecision::Silent | StreamDecision::Suppress)
+        )
+    }
+
+    /// The text the gate is still judging: everything since the last message
+    /// that was spoken.
+    fn unjudged_text(&self) -> &str {
+        &self.accumulated[self.msg_start..]
+    }
+
+    /// The text the gate was judging is a leaked tool call: take it back out
+    /// of the record and the sentence buffer. Nothing of it was spoken — the
+    /// gate had not opened — and what earlier messages said is untouched.
+    fn drop_leaked_text(&mut self) {
+        self.accumulated.truncate(self.msg_start);
+        self.pending.clear();
+        self.streamer = SentenceStreamer::new();
+    }
+
+    /// A message that was spoken is complete: the next one the model writes
+    /// this turn is judged by a fresh gate, so a tool call leaked as text
+    /// after speech has begun is caught like one that leads the turn.
+    fn start_next_message(&mut self) {
+        self.spoke = true;
+        self.gate = StreamGate::new();
+        self.gate_open = false;
+        self.msg_start = self.accumulated.len();
+    }
+}
+
 fn log_preempted(turn_id: &str) {
     tracing::info!(
         "{} {} {}",
@@ -797,9 +869,18 @@ fn log_agentic_error(exc: &anyhow::Error) {
 struct VoiceToolState {
     accumulated: String,
     streamer: SentenceStreamer,
+    /// Drops a leaked thought marker from the start of each message the model
+    /// writes this turn.
+    marker: ThoughtMarkerFilter,
+    /// Judges one spoken message at a time (see `start_next_message`).
     gate: StreamGate,
     pending: VecDeque<String>,
+    /// The gate opened on the text it is judging now.
     gate_open: bool,
+    /// An earlier message of this turn was spoken.
+    spoke: bool,
+    /// Where the text the gate is judging starts in `accumulated`.
+    msg_start: usize,
     first_delta_seen: bool,
     decision_logged: bool,
     /// The turn has called at least one tool.
@@ -831,31 +912,46 @@ impl AgenticHooks for VoiceToolHooks<'_> {
             get_voice_budget_recorder().record(&self.scope.turn_id, PHASE_LLM_FIRST_TOKEN, None);
             st.first_delta_seen = true;
         }
-        st.accumulated.push_str(&delta.content);
+        // A leaked thought marker at the start of the message is dropped here,
+        // ahead of everything that hears or records the text.
+        let text = st.marker.feed(&delta.content);
+        if text.is_empty() {
+            return;
+        }
+        // A leak already judged says nothing more, this turn.
+        if st.leaked() {
+            return;
+        }
+        st.accumulated.push_str(&text);
         if !st.gate_open {
-            match st.gate.feed(&delta.content) {
-                StreamDecision::Silent => {
+            match st.gate.feed(&text) {
+                // A leaked `silent` call leading the turn is her choosing
+                // silence. After speech has gone out it is a leak like any
+                // other: the turn did respond.
+                StreamDecision::Silent if !st.spoke => {
                     self.inner.log_silent(&self.scope.turn_id, self.channel_id);
-                    st.pending.clear();
+                    st.drop_leaked_text();
                     return;
                 }
-                StreamDecision::Suppress => {
+                StreamDecision::Silent | StreamDecision::Suppress => {
                     // Leaked tool-call block (issue #109): drop the buffered
-                    // sentences; the latched gate decision below abandons the
-                    // turn so nothing reaches TTS or the persisted turn.
+                    // text; the latched gate decision keeps the rest of the
+                    // turn out of TTS and the persisted turn.
                     self.inner.log_leak(&self.scope.turn_id, self.channel_id);
-                    st.pending.clear();
+                    st.drop_leaked_text();
                     return;
                 }
                 StreamDecision::Speak => {
                     st.gate_open = true;
-                    self.inner.log_respond(&self.scope.turn_id, self.channel_id);
-                    st.decision_logged = true;
+                    if !st.decision_logged {
+                        self.inner.log_respond(&self.scope.turn_id, self.channel_id);
+                        st.decision_logged = true;
+                    }
                 }
                 StreamDecision::Pending => {}
             }
         }
-        for sentence in st.streamer.feed(&delta.content) {
+        for sentence in st.streamer.feed(&text) {
             st.pending.push_back(sentence);
         }
         if st.gate_open {
@@ -880,6 +976,9 @@ impl AgenticHooks for VoiceToolHooks<'_> {
         };
         {
             let mut st = self.state.lock().await;
+            // This message is complete; the next one the model writes gets its
+            // own check for a leaked thought marker.
+            st.release_held_text();
             if st.gate_open {
                 // `speak` is the single speakable gate; push the tail as-is.
                 let tail = st.streamer.flush();
@@ -890,13 +989,18 @@ impl AgenticHooks for VoiceToolHooks<'_> {
                     }
                     self.inner.speak(&sentence, self.scope).await;
                 }
+                st.start_next_message();
             }
         }
         // Filler backstop: an imminent tool call with no spoken content →
         // speak the next filler phrase BEFORE the handler runs. Skipped on a
         // silent turn: nothing else will be said, so the filler would be the
         // only thing heard.
-        if !calls.is_empty() && speaking && assistant.content_str().trim().is_empty() {
+        // A leaked thought marker alone is not spoken content.
+        let wrote_nothing = strip_leading_thought_marker(&assistant.content_str())
+            .trim()
+            .is_empty();
+        if !calls.is_empty() && speaking && wrote_nothing {
             let phrase = self.inner.next_filler_phrase();
             if !phrase.is_empty() && !self.scope.is_cancelled() {
                 self.inner.speak(&phrase, self.scope).await;

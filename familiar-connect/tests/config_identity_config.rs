@@ -570,8 +570,9 @@ fn shift_focus_coaching_default_from_profile() {
     let cfg = load_ok("");
     assert_eq!(
         cfg.shift_focus_coaching,
-        "use shift_focus if one pulls your attention: it moves you there \
-         quietly, or pass silent: false to arrive and speak."
+        "use shift_focus if one pulls your attention: it moves you there and \
+         shows you the channel, and what you write next is your reply there. Call \
+         silent() to simply read."
     );
 }
 

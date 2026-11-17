@@ -125,16 +125,37 @@ Locations verified against the current tree. Paths are under
    `Suppress` on a leaked tool-call prefix (`classify_leading_leak`), logged
    `decision=leaked_tool_suppressed`, and `Silent` on a leaked `silent(` call,
    logged `decision=silent`. *Prevents:* speaking / posting a leaked
-   `<invoke>` / `silent(` / `<tool_call>` block. The agentic loop's finished
-   reply is covered as well by the return-time strip guard in `tools::agentic`.
+   `<invoke>` / `silent(` / `<tool_call>` block, or the
+   `CALL:default_api:<tool>{…}` / `callable:…` text Gemini returns when it
+   fails to emit a structured call (silent when it names `silent`, suppressed
+   otherwise). A leaked thought marker ahead of the reply (`?[thought\n]`,
+   also Gemini) is not content: `strip_leading_thought_marker` drops it, the
+   gate judges what follows, and the reply behind it is posted, spoken and
+   recorded without it. The marker is matched in the shape it leaks in (an
+   optional stray `?`, whitespace before the closing bracket), so a bracketed
+   aside she writes herself (`[thought]`) stays prose. Voice hands deltas
+   straight to TTS, so it runs a `ThoughtMarkerFilter` ahead of the gate, one
+   check per message the model writes in the turn. The voice tool path's gate
+   is per message too: once a message has been spoken, the next one is judged
+   by a fresh gate, so a call leaked as text after speech has begun is dropped
+   on its own and what was said before it stands. That matters beyond the one
+   message: a leak that is posted is also stored as her own turn, and the
+   model then copies the shape from its history on the next turn. The agentic
+   loop's finished reply is covered as well by the return-time strip guard in
+   `tools::agentic`, and so is the text it records on a tool-call turn
+   (`on_iteration_end` never receives the raw text, a leaked `<tool_call>`
+   block included).
    There is no text sentinel for silence: `<silent>` in model output is ordinary
    prose.
 8. **Turn silence gate** — `reply_gate`, predicate veto. `tools::agentic`
-   suppresses the reply of any turn that called a tool without passing
+   suppresses the reply of any turn that called an acting tool without passing
    `silent: false` on at least one call (`AgenticResult::is_silent`); the
-   `silent` tool is the explicit no-op. Tool calls are still persisted — only
+   `silent` tool is the explicit no-op. Look-first tools (`shift_focus`,
+   `read_channel`, `view_image` in the text tier) do not trip the gate unless
+   called with `silent: true`. Tool calls are still persisted — only
    the `silent` call and its private reasoning are withheld. *Prevents:* the
-   familiar narrating every tool use, and (historically) a `shift_focus` that
+   familiar narrating every acting tool use (what she writes beside a
+   look-first call is posted as a message), and (historically) a `shift_focus` that
    committed globally but left no trace in history.
 9. **Leaked-metadata prefix scrub** — `reply_gate`, rewrite.
    `processors/text_responder.rs` `strip_leaked_metadata_prefix`

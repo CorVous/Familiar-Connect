@@ -396,6 +396,64 @@ async fn leaked_silent_call_skips_tts_and_assistant_turn() {
     );
 }
 
+/// A leaked thought marker (`?[thought\n]`) ahead of a spoken reply on the
+/// tool-less path never reaches TTS or the recorded turn, and a call written
+/// as text behind the marker is silence.
+#[tokio::test]
+async fn thought_marker_is_never_spoken_bare_path() {
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[
+            "?[thou",
+            "ght\n]",
+            "Good evening. ",
+            "I was listening.",
+        ])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi there", "voice:1", "t-1", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    let said: Vec<String> = player.calls().into_iter().map(|c| c.0).collect();
+    assert_eq!(said.concat().replace(' ', ""), "Goodevening.Iwaslistening.");
+    let recorded: Vec<String> = s
+        .sync()
+        .recent("fam", 1, 10, None, None)
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.role == "assistant")
+        .map(|t| t.content)
+        .collect();
+    assert_eq!(recorded, ["Good evening. I was listening."]);
+
+    let s = store();
+    let player = Arc::new(MockTTSPlayer::new(5, 5));
+    let (r, _) = voice_responder(
+        Arc::clone(&s),
+        Arc::new(ScriptedLlm::new(&[
+            "?[thought\n]",
+            "CALL:default_api:silent{reasoning: nobody asked}",
+        ])),
+        player.clone(),
+    );
+    r.handle(&activity_start("voice:1", "t-2", None), &bus())
+        .await
+        .unwrap();
+    r.handle(&voice_final("hi nobody", "voice:1", "t-2", None), &bus())
+        .await
+        .unwrap();
+    r.wait_until_idle().await;
+    assert!(player.calls().is_empty(), "{:?}", player.calls());
+    let turns = s.sync().recent("fam", 1, 10, None, None).unwrap();
+    assert!(turns.iter().all(|t| t.role != "assistant"));
+}
+
 /// Issue #220: the silent decision abandons the stream, but the transport must
 /// hear `silent`, not the default `cancelled` (barge-in).
 #[tokio::test]

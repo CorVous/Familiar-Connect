@@ -171,10 +171,26 @@ and `false` is refused at config load, because silence is now a tool call:
 a slot without tools could never decline to reply. See
 [`tool_calling`](tuning.md#tool_calling).
 
-**Every tool call is silent by default.** Each tool's schema carries a shared
-`silent` boolean (injected by `Tool::new`, so a new tool cannot forget it)
-that defaults to `true`. A turn that called any tool sends no reply unless at
-least one call passed `silent: false`; that opt-in latches for the whole turn.
+**A tool call that acts is silent by default.** Each tool's schema carries a
+shared `silent` boolean (injected by `Tool::new`, so a new tool cannot forget
+it) that defaults to `true`. A turn that called such a tool sends no reply
+unless at least one call passed `silent: false`; that opt-in latches for the
+whole turn.
+
+**Look-first tools leave the reply open.** In the text tier `shift_focus`,
+`read_channel` and `view_image` are registered with `Tool::look_first()`:
+their result is what the model has to see before it can know whether to
+answer, so the flag defaults to `false` and calling one does not silence the
+turn. Text written after the result is the reply; `silent()` or an explicit
+`silent: true` keeps the turn quiet. Text written *beside* a look-first call
+is posted too, at once and before the call runs, to the channel the turn
+stands in at that moment: words ahead of a `shift_focus` go to the channel
+she is leaving, the reply after it to the one she moved to. Each posted
+message is recorded as its own assistant turn in the channel it went to. A
+turn already silenced by an earlier call says nothing beside a later look
+either. Voice registers no look-first
+tools; it speaks sentence by sentence as text streams and keeps its own
+"a tool call means silence" latch.
 The `silent(reasoning)` tool is the explicit no-op — do nothing, say nothing —
 and is the only call whose own record and private reasoning are withheld from
 history. There is no `<silent>` text sentinel; the literal string is ordinary
