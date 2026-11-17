@@ -839,8 +839,8 @@ When a `FocusManager` is wired, the block also carries a prose
 
 > Your attention is currently on #general. There is a new message in
 > #other-channel (id 456) — use shift_focus if one pulls your
-> attention: it moves you there quietly, or pass silent: false to
-> arrive and speak.
+> attention: it moves you there and shows you the channel, and what
+> you write next is your reply there. Call silent() to simply read.
 
 The focus clause names the active channel; the unread clause lists
 channels with staged (unconsumed) turns and nudges toward the
@@ -850,7 +850,8 @@ as `#channel (id N) (2)`; DMs render as `DM from <name> (id N)`, and a
 channel the gateway name cache missed as `unnamed channel (id N)` —
 never a bare `#<snowflake>`, which would claim the channel is *named*
 after its id (issue #222). Digest ids come from staged turns in the
-history store while names come from the gateway cache, so an id with
+history store, narrowed to text-subscribed channels (see
+[Unread digest](#unread-digest)), while names come from the gateway cache, so an id with
 no name is routine rather than exceptional. Both clauses omit when
 their source is empty. This is the model-facing surface of the
 attentional stream (see [below](#attentional-stream)).
@@ -863,12 +864,15 @@ sees the plain `There is a new message in #other-channel (id 456).`
 instead: coaching a model toward a tool it has no way to call only
 invites it to type the call out as prose (issue #221).
 
-The shipped wording names both ways to use the tool. Since every tool
-call defaults to `silent: true`, a bare `shift_focus` is "move and say
-nothing" — strictly `silent` plus a side effect — so a model told only
-to "use shift_focus if it pulls your attention" reaches for the plainly
-described `silent` every time and never shifts. Spelling out the quiet
-move *and* the `silent: false` opt-in makes the choice legible.
+The shipped wording describes the tool the way the text tier runs it.
+`shift_focus` is **look-first** there (see
+[tools](overview.md#tools)): the call moves her and returns the channel,
+and whatever she writes after that result is posted to it, with no
+`silent: false` needed. The earlier wording ("it moves you there
+quietly, or pass silent: false to arrive and speak") asked for that
+opt-in before she had seen the channel; a model that switched first
+and wrote its reply second had the reply dropped. `silent()` after the
+look is the "just read" path.
 
 Both responders also append a *second* copy of the same block as a
 trailing `system` message, after recent history, with
@@ -1030,8 +1034,9 @@ turn for me?" without a separate gating LLM call:
    between humans. The `#channel_id` disambiguates source once the
    cross-channel window mixes multiple channels.
 2. **Silence as a tool call.** When the latest message isn't for it, the
-   model calls a tool instead of writing a reply. Every tool call is
-   silent unless it passes `silent: false`, and `silent(reasoning)` is
+   model calls a tool instead of writing a reply. A tool call that acts is
+   silent unless it passes `silent: false` (look-first tools leave the
+   reply open — see [tools](overview.md#tools)), and `silent(reasoning)` is
    the explicit "do nothing, say nothing" case: it returns a sentinel
    that makes `agentic_loop` return `AgenticResult(is_silent=true)`
    without re-prompting, and the responder skips Discord posting / TTS
@@ -1109,7 +1114,15 @@ Shifts are **model-decided and applied immediately**:
    returns them in the tool result, so the agentic loop feeds the
    channel's content back into the same turn — the model sees the
    channel before it responds rather than narrating one it can't see.
-   Voice/empty channels yield an empty list.
+   Voice/empty channels yield an empty list. `channel_id` travels as a
+   **string of digits** in both directions: Discord ids exceed 2^53,
+   and some providers (Gemini) round a JSON number argument through a
+   float64, which turned every shift into a "not subscribed" refusal.
+   A number, a `<#id>` mention or a label containing the id is still
+   accepted, and an id that matches no subscription is snapped to the
+   single subscribed channel with the same float64 value (two
+   candidates is a refusal, not a guess). Every refusal, including a
+   missing or unreadable `channel_id`, carries `available_channels`.
 2. `shift_now` applies the move **at tool-call time**, under that
    lock. For a text shift it calls
    `promote_staged_turns(channel_id, catch_up_limit)` — flipping only
@@ -1122,7 +1135,12 @@ Shifts are **model-decided and applied immediately**:
    (presence). Because the move is immediate, any reply later in the
    same turn posts to the **new** channel (the reply routes to the
    channel this turn's own shift moved to, recorded turn-locally —
-   never the global focus read at send time), and a turn that goes
+   never the global focus read at send time), while text she wrote
+   *beside* the `shift_focus` call is posted before the move, to the
+   channel she is leaving (each part goes where the turn stood when it
+   was written).
+   In the text tier the call is look-first, so that later reply needs
+   no `silent: false`. A turn that goes
    **silent** still leaves her
    where she went — there is no deferred state to leak into a later turn.
    (Earlier designs deferred the shift to `end_turn`; an uncommitted
@@ -1277,12 +1295,19 @@ a transcript, which is always a user turn.
 ### Unread digest
 
 `staged_channels(familiar_id)` returns `{channel_id: staged_count}`
-for channels with unconsumed turns. The text responder passes it to
-the [final reminder](#final-reminder) as `unread_digest`, so the
-model sees a prose nudge naming channels with pending messages and the
-`shift_focus` tool. `/diagnostics` renders the same counts
+for channels with unconsumed turns. The text responder keeps the
+channels she holds a text subscription to
+(`FocusManager::is_text_subscribed`) and passes those to the
+[final reminder](#final-reminder) as `unread_digest`, so the model
+sees a prose nudge naming channels with pending messages and the
+`shift_focus` tool. The filter keeps the digest to channels a
+`shift_focus` reads and clears: a turn left staged in a channel she
+has since unsubscribed from stays in the store but is not offered to
+her, and neither is one staged in a voice-only channel, where a shift
+moves the voice pointer and promotes nothing. `/diagnostics` renders the unfiltered counts
 (`Unreads: #<id> (<count>), …`) alongside the live focus pointers
-(`Focus: text=#<id> voice=#<id>`).
+(`Focus: text=#<id> voice=#<id>`), so an operator still sees the
+leftover turns.
 
 ### read_channel tool
 
@@ -1311,13 +1336,26 @@ Discord text on channel C
       (shift_focus, if called, already moved focus + promoted staged, and is
        recorded turn-locally as this turn's send target; its call is persisted
        even when the turn is silent)
-      if the turn is silent (any tool call without `silent: false`, the
-       `silent` tool, or a leaked `silent(` call): bail (no send, no
-       assistant prose turn)
-      if wake turn AND no shift this turn: suppress (shift-or-silent, #170)
+      text written beside a look-first call (shift_focus / read_channel /
+       view_image) while the turn can still speak is earlier text: posted at
+       once, before that message's tools run, to the shift target the turn
+       has at that moment (else channel C), and appended there as an
+       assistant turn of its own; the tool-call turn then carries no text
+      if the turn is silent (an acting tool call without `silent: false`, a
+       look-first call with `silent: true`, the `silent` tool, or a leaked
+       `silent(` call) or wrote nothing after a look: no final reply (earlier
+       text already posted stands)
       else: BotHandle.send_text(this turn's shift target, else channel C, reply)
             append assistant turn to that same channel  (never the global focus
             read at send time — #170's cross-channel misroute)
+      wake turn: any part written before a shift is held back
+       (shift-or-silent, #170); held-back earlier text stays on its tool-call
+       turn
+      a part posted outside channel C threads only onto a message that lives
+       in the channel it goes to, and resolves `[@Name]` against that channel
+      cancellation (someone starts typing in channel C) drops only what
+       is bound for channel C; a part bound for the channel she moved to is
+       still sent
       router.end_turn(scope)
       FocusManager.end_turn()  (idle-clock bookkeeping only)
 
