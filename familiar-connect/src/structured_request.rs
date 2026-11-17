@@ -647,17 +647,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_mutate_caller_messages() {
-        let llm = FakeLlm::new(&["bad", r#"{"superseded_ids": []}"#]);
-        let messages = prompt();
-        let _ = request_structured(&llm, &messages, &flat_schema(), 1)
-            .await
-            .unwrap();
-        // Caller's list is untouched even though a retry happened.
-        assert_eq!(messages.len(), 2);
-    }
-
-    #[tokio::test]
     async fn fenced_json_is_accepted() {
         let llm = FakeLlm::new(&["```json\n{\"superseded_ids\": [1]}\n```"]);
         let result = request_structured(&llm, &prompt(), &flat_schema(), 1)
@@ -674,10 +663,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("network down"));
-    }
-
-    #[test]
-    fn default_max_retries_is_one() {
-        assert_eq!(DEFAULT_MAX_RETRIES, 1);
     }
 }

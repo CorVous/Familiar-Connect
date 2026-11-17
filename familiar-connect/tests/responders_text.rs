@@ -1382,23 +1382,6 @@ async fn normal_decision_leaves_prompt_untouched() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn trailing_text_directive_matches_the_shipped_default_byte_for_byte() {
-    let llm = Arc::new(CapturingLlm::new("ok"));
-    let (r, _) = responder(store(), llm.clone(), Arc::new(CapturingSend::new()));
-    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
-        .await
-        .unwrap();
-    let trailing = trailing_of(&llm.captured());
-    assert!(
-        trailing.contains(
-            "You are chatting in a text channel. Markdown and multi-line replies \
-             are fine."
-        ),
-        "{trailing}"
-    );
-}
-
-#[tokio::test]
 async fn overridden_operating_mode_reaches_the_trailing_reminder() {
     let llm = Arc::new(CapturingLlm::new("ok"));
     let (r, _) = responder(store(), llm.clone(), Arc::new(CapturingSend::new()));

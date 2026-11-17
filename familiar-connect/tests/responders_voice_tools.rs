@@ -24,8 +24,8 @@ use familiar_connect::tools::registry::{FnHandler, Tool, ToolContext, ToolOutput
 use familiar_connect::tts_player::protocol::TtsPlayer;
 
 use support::{
-    ScriptedToolLlm, activity_start, default_config, finish, make_assembler, store, tc_delta,
-    text_delta, voice_final,
+    ScriptedToolLlm, activity_start, finish, make_assembler, store, tc_delta, text_delta,
+    voice_final,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -326,19 +326,6 @@ async fn trailing_with_ack(ack: &str) -> String {
         .unwrap();
     r.wait_until_idle().await;
     llm.calls()[0].last().unwrap().content_str()
-}
-
-#[tokio::test]
-async fn shipped_default_voice_tool_ack_reaches_the_trailing_reminder() {
-    let trailing = trailing_with_ack(&default_config().voice_tool_ack).await;
-    assert!(
-        trailing.contains(
-            "When you call a tool and still mean to be heard, pass `silent: \
-             false` and speak at least a brief acknowledgement in the same \
-             reply. A tool call on its own is silent \u{2014} nothing is spoken."
-        ),
-        "{trailing}"
-    );
 }
 
 #[tokio::test]

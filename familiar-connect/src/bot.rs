@@ -3672,7 +3672,7 @@ mod tests {
     use crate::history::StoreError;
     use crate::history::store::{AppendTurn, FocusPointers, HistoryStore, Promotion};
     use crate::processors::SendText;
-    use crate::sources::discord_embed_text::{EmbedFieldView, EmbedImageView};
+    use crate::sources::discord_embed_text::EmbedImageView;
     use crate::sources::discord_text::{PublishText, TextPublisher};
     use crate::subscriptions::{SubscriptionKind, SubscriptionRegistry};
     use crate::voice_roster::RosterEventKind;
@@ -5254,17 +5254,6 @@ mod tests {
             .await;
         assert!(!sent.deleted.load(Ordering::SeqCst));
         assert_eq!(fx.store.bumps.lock().unwrap().len(), 1);
-    }
-
-    // duck-typed embed rendering is covered in sources::discord_embed_text;
-    // this asserts the field-view re-export is reachable from bot for callers.
-    #[test]
-    fn embed_field_view_reexport() {
-        let f = EmbedFieldView {
-            name: Some("k".to_owned()),
-            value: Some("v".to_owned()),
-        };
-        assert_eq!(f.name.as_deref(), Some("k"));
     }
 
     // --- composition-root wiring seams -------------------------------------

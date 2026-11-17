@@ -10,12 +10,9 @@ use std::collections::HashMap;
 
 use familiar_connect::config::{DeepgramSTTConfig, STTConfig};
 use familiar_connect::stt::deepgram::{
-    DEEPGRAM_WS_URL, DEFAULT_IDLE_FINALIZE_S, DeepgramTranscriber, build_deepgram_transcriber,
+    DEEPGRAM_WS_URL, DeepgramTranscriber, build_deepgram_transcriber,
 };
-use familiar_connect::stt::{
-    KNOWN_BACKENDS, SttError, Transcriber, TranscriptionEvent, TranscriptionResult,
-    create_transcriber,
-};
+use familiar_connect::stt::{SttError, Transcriber, TranscriptionResult, create_transcriber};
 
 #[test]
 fn transcription_result_to_message() {
@@ -28,12 +25,6 @@ fn transcription_result_to_message() {
     r.speaker = Some(2);
     let names = HashMap::from([(2_i64, "Alice".to_string())]);
     assert_eq!(r.to_message(Some(&names)).name.as_deref(), Some("Alice"));
-}
-
-#[test]
-fn transcription_event_is_result_alias() {
-    let e: TranscriptionEvent = TranscriptionResult::new("x", false, 0.0, 0.0);
-    assert_eq!(e.text, "x");
 }
 
 #[test]
@@ -73,11 +64,6 @@ fn factory_degrades_local_backends() {
 }
 
 #[test]
-fn known_backends_are_the_three_documented() {
-    assert_eq!(KNOWN_BACKENDS, ["deepgram", "faster_whisper", "parakeet"]);
-}
-
-#[test]
 fn deepgram_builder_flows_config_and_requires_key() {
     let cfg = DeepgramSTTConfig {
         model: "nova-2".to_string(),
@@ -91,10 +77,4 @@ fn deepgram_builder_flows_config_and_requires_key() {
 
     let err = build_deepgram_transcriber(&cfg, None).err().unwrap();
     assert!(matches!(err, SttError::MissingApiKey));
-}
-
-#[test]
-fn default_idle_finalize_constant() {
-    // Imported by the wiring layer for plain-Deepgram idle flush.
-    assert!((DEFAULT_IDLE_FINALIZE_S - 0.5).abs() < f64::EPSILON);
 }

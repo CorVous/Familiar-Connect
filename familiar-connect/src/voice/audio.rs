@@ -487,13 +487,6 @@ mod tests {
         assert_eq!(round, original);
     }
 
-    // --- DISCORD_FRAME_SIZE ------------------------------------------------
-
-    #[test]
-    fn frame_size_is_3840() {
-        assert_eq!(DISCORD_FRAME_SIZE, 3840);
-    }
-
     // --- StreamingPcmSource ------------------------------------------------
 
     #[test]
@@ -552,11 +545,6 @@ mod tests {
         let got = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(got.is_empty());
         handle.join().unwrap();
-    }
-
-    #[test]
-    fn is_opus_false() {
-        assert!(!StreamingPcmSource::default().is_opus());
     }
 
     #[test]

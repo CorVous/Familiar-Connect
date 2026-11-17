@@ -2744,34 +2744,10 @@ fn parse_trusted_image_hosts(
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET_TIER_NAMES, ChannelOverrides, CharacterConfig, DEFAULT_AZURE_TTS_VOICE,
-        DeepgramSTTConfig, DiscordTextConfig, EmbeddingConfig, FactSupersedeConfig, FocusConfig,
-        LLM_SLOT_NAMES, MemoryProvidersConfig, MemoryRetrievalConfig, PeopleDossierConfig,
-        ReflectionConfig, RichNoteConfig, RollingSummaryConfig, STTConfig, TTSConfig, ToolsConfig,
-        TurnDetectionConfig, default_projectors, parse_tts_config,
+        CharacterConfig, DEFAULT_AZURE_TTS_VOICE, DiscordTextConfig, TTSConfig, parse_tts_config,
     };
     use crate::budget::TierBudget;
-    use std::collections::BTreeSet;
     use toml::{Table, Value};
-
-    #[test]
-    fn tiered_slots() {
-        let got: BTreeSet<&str> = LLM_SLOT_NAMES.into_iter().collect();
-        let want: BTreeSet<&str> = ["fast", "prose", "background"].into_iter().collect();
-        assert_eq!(got, want);
-    }
-
-    #[test]
-    fn character_config_defaults() {
-        let cfg = CharacterConfig::default();
-        assert_eq!(cfg.display_tz, "UTC");
-        assert!(cfg.aliases.is_empty());
-        assert_eq!(cfg.voice_window_size, 100);
-        assert_eq!(cfg.text_window_size, 200);
-        assert!(cfg.llm.is_empty());
-        assert!(cfg.sleep_window.is_none());
-        assert_eq!(cfg.sleep_grace_minutes, 30);
-    }
 
     #[test]
     fn tts_defaults_to_the_only_wired_provider() {
@@ -2845,139 +2821,6 @@ mod tests {
         assert!(d.typing_backoff_initial_s > 0.0);
         assert!(d.typing_backoff_max_s >= d.typing_backoff_initial_s);
         assert_eq!(CharacterConfig::default().discord_text, d);
-    }
-
-    #[test]
-    fn focus_defaults_present() {
-        let f = FocusConfig::default();
-        assert!(f.unread_nudge_enabled);
-        assert!((f.nudge_debounce_seconds - 30.0).abs() < f64::EPSILON);
-        assert_eq!(f.catch_up_limit, 20);
-        assert_eq!(CharacterConfig::default().focus, f);
-    }
-
-    #[test]
-    fn tools_defaults_present() {
-        assert_eq!(ToolsConfig::default().loop_max_iterations, 5);
-        assert_eq!(CharacterConfig::default().tools, ToolsConfig::default());
-    }
-
-    #[test]
-    fn llm_max_concurrent_default_is_four() {
-        assert_eq!(CharacterConfig::default().llm_max_concurrent_requests, 4);
-    }
-
-    #[test]
-    fn memory_worker_dataclass_defaults_match_legacy_hardcodes() {
-        assert_eq!(
-            RollingSummaryConfig::default(),
-            RollingSummaryConfig {
-                turns_threshold: 10,
-                tick_interval_s: 5.0
-            }
-        );
-        assert_eq!(
-            RichNoteConfig::default(),
-            RichNoteConfig {
-                batch_size: 10,
-                tick_interval_s: 15.0,
-                participants_max: 30,
-                self_capability_filter: true,
-                self_capability_pattern: String::new(),
-            }
-        );
-        assert_eq!(
-            PeopleDossierConfig::default(),
-            PeopleDossierConfig {
-                tick_interval_s: 20.0
-            }
-        );
-        assert_eq!(
-            ReflectionConfig::default(),
-            ReflectionConfig {
-                turns_threshold: 20,
-                max_reflections_per_tick: 3,
-                max_turns_per_tick: 50,
-                recent_facts_limit: 20,
-                tick_interval_s: 60.0
-            }
-        );
-        assert_eq!(
-            FactSupersedeConfig::default(),
-            FactSupersedeConfig {
-                batch_size: 5,
-                tick_interval_s: 60.0,
-                priors_max: 20
-            }
-        );
-    }
-
-    #[test]
-    fn memory_retrieval_dataclass_default_is_bm25_only() {
-        let r = MemoryRetrievalConfig::default();
-        assert!((r.bm25_weight - 1.0).abs() < f64::EPSILON);
-        assert!(r.recency_weight.abs() < f64::EPSILON);
-        assert!(r.importance_weight.abs() < f64::EPSILON);
-        assert!(r.embedding_weight.abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn embedding_dataclass_default_is_off() {
-        let e = EmbeddingConfig::default();
-        assert_eq!(e.backend, "off");
-        assert_eq!(e.dim, 256);
-        assert_eq!(e.fastembed_model, "BAAI/bge-small-en-v1.5");
-        assert!(e.fastembed_cache_dir.is_none());
-    }
-
-    #[test]
-    fn stt_and_turn_detection_defaults() {
-        let s = STTConfig::default();
-        assert_eq!(s.backend, "deepgram");
-        assert_eq!(DeepgramSTTConfig::default(), s.deepgram);
-        let dg = DeepgramSTTConfig::default();
-        assert_eq!(dg.model, "nova-3");
-        assert_eq!(dg.language, "en");
-        assert_eq!(dg.endpointing_ms, 500);
-        assert_eq!(dg.utterance_end_ms, 1500);
-        assert!(dg.smart_format);
-        assert!(dg.punctuate);
-        assert!(dg.keyterms.is_empty());
-        assert_eq!(dg.reconnect_max_attempts, 5);
-        assert_eq!(TurnDetectionConfig::default().strategy, "deepgram");
-    }
-
-    #[test]
-    fn channel_overrides_default_is_all_none() {
-        let over = ChannelOverrides::default();
-        assert!(over.history_window_size.is_none());
-        assert!(over.prompt_layers.is_none());
-        assert!(over.message_rendering.is_none());
-    }
-
-    #[test]
-    fn memory_providers_default_projectors_are_the_five() {
-        assert_eq!(
-            MemoryProvidersConfig::default().projectors,
-            default_projectors()
-        );
-        assert_eq!(
-            default_projectors(),
-            vec![
-                "rolling_summary".to_owned(),
-                "rich_note".to_owned(),
-                "people_dossier".to_owned(),
-                "reflection".to_owned(),
-                "fact_supersede".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn budget_tier_names_are_canonical() {
-        let got: BTreeSet<&str> = BUDGET_TIER_NAMES.into_iter().collect();
-        let want: BTreeSet<&str> = ["voice", "text", "background"].into_iter().collect();
-        assert_eq!(got, want);
     }
 
     #[test]

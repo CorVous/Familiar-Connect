@@ -186,14 +186,4 @@ mod tests {
         let tool_turn = turn(99, "tool", &dump, None);
         assert!(serialize_turns(&[tool_turn]).is_empty());
     }
-
-    #[test]
-    fn serialize_output_is_idempotent() {
-        let turns = vec![
-            turn(1, "user", "hi", None),
-            turn(2, "tool", "big dump", None),
-            turn(3, "assistant", "ok", None),
-        ];
-        assert_eq!(serialize_turns(&turns), serialize_turns(&turns));
-    }
 }

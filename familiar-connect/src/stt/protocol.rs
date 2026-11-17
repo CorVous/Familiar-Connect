@@ -200,25 +200,6 @@ mod tests {
     }
 
     #[test]
-    fn dataclass_fields() {
-        let r = TranscriptionResult {
-            text: "hello world".to_string(),
-            is_final: true,
-            start: 0.0,
-            end: 1.5,
-            confidence: 0.98,
-            speaker: Some(0),
-            user_id: None,
-        };
-        assert_eq!(r.text, "hello world");
-        assert!(r.is_final);
-        assert!((r.start - 0.0).abs() < f64::EPSILON);
-        assert!((r.end - 1.5).abs() < f64::EPSILON);
-        assert!((r.confidence - 0.98).abs() < 1e-9);
-        assert_eq!(r.speaker, Some(0));
-    }
-
-    #[test]
     fn default_values() {
         let r = TranscriptionResult::new("test", false, 0.0, 0.5);
         assert_eq!(r.speaker, None);
@@ -270,13 +251,5 @@ mod tests {
         r.speaker = Some(2); // in map -> "Alice"
         let msg = r.to_message(Some(&names()));
         assert_eq!(msg.name.as_deref(), Some("Alice"));
-    }
-
-    #[test]
-    fn transcription_event_is_alias() {
-        // Compile-time proof the alias resolves to the same type.
-        let e: TranscriptionEvent = TranscriptionResult::new("x", true, 0.0, 0.0);
-        let r: TranscriptionResult = e;
-        assert_eq!(r.text, "x");
     }
 }

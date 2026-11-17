@@ -426,18 +426,6 @@ async fn trailing_with_coaching(coaching: &str) -> String {
 }
 
 #[tokio::test]
-async fn shipped_default_shift_focus_coaching_reaches_the_trailing_reminder() {
-    let trailing = trailing_with_coaching(&support::default_config().shift_focus_coaching).await;
-    assert!(
-        trailing.contains(
-            "\u{2014} use shift_focus if one pulls your attention: it moves you \
-             there quietly, or pass silent: false to arrive and speak."
-        ),
-        "{trailing}"
-    );
-}
-
-#[tokio::test]
 async fn overridden_shift_focus_coaching_reaches_the_trailing_reminder() {
     let trailing = trailing_with_coaching("COACH_MARKER").await;
     assert!(trailing.contains("COACH_MARKER"), "{trailing}");

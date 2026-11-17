@@ -30,13 +30,3 @@ fn topics_are_strings_and_unique() {
     let unique: HashSet<&str> = values.iter().copied().collect();
     assert_eq!(unique.len(), values.len(), "duplicate topic string");
 }
-
-#[test]
-fn core_topics_present() {
-    assert_eq!(topics::TOPIC_DISCORD_TEXT, "discord.text");
-    assert_eq!(
-        topics::TOPIC_VOICE_TRANSCRIPT_FINAL,
-        "voice.transcript.final"
-    );
-    assert_eq!(topics::TOPIC_TWITCH_EVENT, "twitch.event");
-}

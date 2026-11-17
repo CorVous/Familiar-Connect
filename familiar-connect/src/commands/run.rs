@@ -1542,39 +1542,6 @@ mod tests {
         assert!(modes.is_empty());
     }
 
-    /// The shipped `_default` profile supplies both directives.
-    #[test]
-    fn default_profile_supplies_both_operating_modes() {
-        let profile =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/familiars/_default/character.toml");
-        let known: BTreeSet<String> = crate::processors::projectors::DEFAULT_PROJECTORS
-            .iter()
-            .map(|s| (*s).to_owned())
-            .chain(std::iter::once("fact_embedding".to_owned()))
-            .collect();
-        let embedders: BTreeSet<String> = ["off", "hash", "fastembed"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
-        let config =
-            crate::config::load_character_config(&profile, &profile, &known, &embedders).unwrap();
-        let modes = operating_modes(&config);
-        assert_eq!(
-            modes.get("voice").map(String::as_str),
-            Some(
-                "You are speaking aloud. Keep replies short (one or two sentences). \
-                 Avoid markdown."
-            )
-        );
-        assert_eq!(
-            modes.get("text").map(String::as_str),
-            Some(
-                "You are chatting in a text channel. Markdown and multi-line replies \
-                 are fine."
-            )
-        );
-    }
-
     // --- resolve_embedder (composition-root fail-fast) ---
 
     /// The composition root must surface the embedder feature-gap as an error

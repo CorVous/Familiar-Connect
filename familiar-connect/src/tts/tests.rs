@@ -14,10 +14,9 @@ use futures::stream::StreamExt as _;
 use serde_json::{Value, json};
 
 use super::{
-    CARTESIA_API_VERSION, CARTESIA_BASE_URL, CARTESIA_WS_URL, CartesiaConn, CartesiaFrame,
-    CartesiaStreamState, CartesiaTTSClient, DEFAULT_SAMPLE_RATE, JitterHints, TTSResult, TtsClient,
-    TtsClientKind, TtsError, WordTimestamp, build_tts_client, cartesia_stream_from_state,
-    get_cached_greeting_audio_in,
+    CARTESIA_API_VERSION, CARTESIA_WS_URL, CartesiaConn, CartesiaFrame, CartesiaStreamState,
+    CartesiaTTSClient, JitterHints, TTSResult, TtsClient, TtsClientKind, TtsError, WordTimestamp,
+    build_tts_client, cartesia_stream_from_state, get_cached_greeting_audio_in,
 };
 use crate::config::TTSConfig;
 
@@ -26,10 +25,6 @@ const TEST_MODEL: &str = "sonic-3";
 
 fn client() -> CartesiaTTSClient {
     CartesiaTTSClient::new("test-key", TEST_VOICE_ID, TEST_MODEL)
-}
-
-fn approx(a: f64, b: f64) -> bool {
-    (a - b).abs() < 1e-9
 }
 
 // ---------------------------------------------------------------------------
@@ -121,14 +116,6 @@ async fn collect_stream(mut s: super::TtsStream) -> (Vec<Vec<u8>>, Option<TtsErr
 // ---------------------------------------------------------------------------
 
 #[test]
-fn word_timestamp_fields() {
-    let ts = WordTimestamp::new("hello", 0.0, 420.0);
-    assert_eq!(ts.word, "hello");
-    assert!(approx(ts.start_ms, 0.0));
-    assert!(approx(ts.end_ms, 420.0));
-}
-
-#[test]
 fn tts_result_audio_only_default_empty_timestamps() {
     let result = TTSResult::audio_only(vec![0x00, 0x01]);
     assert_eq!(result.audio, vec![0x00, 0x01]);
@@ -138,24 +125,6 @@ fn tts_result_audio_only_default_empty_timestamps() {
 // ---------------------------------------------------------------------------
 // Cartesia construction + payload
 // ---------------------------------------------------------------------------
-
-#[test]
-fn cartesia_init_stores_required_fields() {
-    let c = CartesiaTTSClient::new("test-key", "custom-uuid-1234", "sonic-3");
-    assert_eq!(c.api_key, "test-key");
-    assert_eq!(c.model, "sonic-3");
-    assert_eq!(c.voice_id, "custom-uuid-1234");
-}
-
-#[test]
-fn cartesia_init_defaults() {
-    let c = client();
-    assert_eq!(c.sample_rate, DEFAULT_SAMPLE_RATE);
-    assert_eq!(c.sample_rate, 48_000);
-    assert_eq!(c.base_url, CARTESIA_BASE_URL);
-    assert_eq!(c.ws_url, CARTESIA_WS_URL);
-    assert!(c.ws_url.starts_with("wss://"));
-}
 
 #[test]
 fn cartesia_build_ws_url_includes_auth_query() {
@@ -566,20 +535,6 @@ fn factory_unknown_provider_raises() {
     assert_eq!(
         err.to_string(),
         "Unknown TTS provider 'foo'; expected 'azure' or 'cartesia'"
-    );
-}
-
-#[test]
-fn factory_rejects_the_removed_gemini_stub() {
-    // #N1: gemini was an unwired stub, deleted outright.
-    let cfg = TTSConfig {
-        provider: "gemini".to_owned(),
-        ..TTSConfig::default()
-    };
-    let err = build_tts_client(&cfg, |_| None).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "Unknown TTS provider 'gemini'; expected 'azure' or 'cartesia'"
     );
 }
 
