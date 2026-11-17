@@ -1,3 +1,5 @@
+# Pinned so a new stable release (and its new clippy lints) can't turn CI red
+# overnight. Bump deliberately: change this, fix any new lints, commit together.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

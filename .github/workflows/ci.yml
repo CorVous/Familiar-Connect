@@ -1,6 +1,5 @@
-# CI for the Rust port. Mirrors the rust-template shape, adapted for a crate that
-# Rust workspace at the repo root (promoted from rust/ after the port).
-# (not ported). Promote to the repo-root `.github/workflows/` with a
+# CI for the Rust workspace at the repo root. Mirrors the rust-template shape.
+# The Rust version comes from rust-toolchain.toml.
 name: rust-ci
 
 on:
@@ -19,15 +18,13 @@ jobs:
         with:
           fetch-depth: 0 # tags for the git-describe version stamp (build.rs)
 
+      # Installs the toolchain pinned in rust-toolchain.toml (the single source
+      # of truth for the Rust version), with its rustfmt and clippy components.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        run: rustup toolchain install
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
 
       - name: Check formatting
         run: cargo fmt --all --check
