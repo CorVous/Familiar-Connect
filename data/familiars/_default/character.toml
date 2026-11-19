@@ -642,6 +642,10 @@ tool_calling   = true
 # channel, hold off responding by an exponentially doubling window —
 # initial doubles up to max — so two bots don't pingpong on each
 # other's typing indicators.
+# typing_delay: hold each reply until "is typing…" has shown for
+# chars / typing_chars_per_second seconds, clamped to
+# [typing_delay_min_s, typing_delay_max_s]. Time spent generating counts
+# toward it. Set false to post as soon as the reply is ready.
 
 [discord]
 # dm_allowlist = [123456789012345678]  # user IDs whose DMs the familiar will engage
@@ -650,6 +654,10 @@ tool_calling   = true
 respond_to_typing        = true
 typing_backoff_initial_s = 1.0
 typing_backoff_max_s     = 30.0
+typing_delay             = true
+typing_chars_per_second  = 15.0
+typing_delay_min_s       = 1.0
+typing_delay_max_s       = 8.0
 
 # --- Attentional focus -------------------------------------------------------
 #

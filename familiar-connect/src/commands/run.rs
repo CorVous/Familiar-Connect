@@ -1276,6 +1276,11 @@ async fn async_main(
     .with_loop_max_iterations(loop_max);
     if let Some(typing) = &handle.trigger_typing {
         text_responder = text_responder.with_trigger_typing(typing.clone());
+        if let Some(pace) =
+            crate::typing_pace::TypingPace::from_config(&familiar.config.discord_text)
+        {
+            text_responder = text_responder.with_typing_pace(pace);
+        }
     }
     if let Some(handler) = &handle.typing_interrupt {
         text_responder = text_responder.with_typing_handler(handler.clone());

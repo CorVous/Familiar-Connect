@@ -1308,6 +1308,49 @@ fn backoff_max_must_not_be_below_initial() {
 }
 
 #[test]
+fn typing_delay_loads_from_toml() {
+    let cfg = load_ok(
+        "[discord.text]\ntyping_delay = false\ntyping_chars_per_second = 20\ntyping_delay_min_s = 0\ntyping_delay_max_s = 12.5\n",
+    );
+    assert!(!cfg.discord_text.typing_delay);
+    approx(cfg.discord_text.typing_chars_per_second, 20.0);
+    approx(cfg.discord_text.typing_delay_min_s, 0.0);
+    approx(cfg.discord_text.typing_delay_max_s, 12.5);
+}
+
+#[test]
+fn typing_chars_per_second_must_be_positive() {
+    assert_err(
+        load("[discord.text]\ntyping_chars_per_second = 0\n"),
+        "typing_chars_per_second",
+    );
+}
+
+#[test]
+fn typing_delay_min_must_not_be_negative() {
+    assert_err(
+        load("[discord.text]\ntyping_delay_min_s = -1.0\n"),
+        "typing_delay_min_s",
+    );
+}
+
+#[test]
+fn typing_delay_max_must_not_be_below_min() {
+    assert_err(
+        load("[discord.text]\ntyping_delay_min_s = 5.0\ntyping_delay_max_s = 2.0\n"),
+        "typing_delay_max_s",
+    );
+}
+
+#[test]
+fn typing_delay_max_rejects_absurd_values() {
+    assert_err(
+        load("[discord.text]\ntyping_delay_max_s = 1e12\n"),
+        "typing_delay_max_s",
+    );
+}
+
+#[test]
 fn dm_allowlist_parsed_into_ints() {
     let cfg = load_ok("[discord]\ndm_allowlist = [111, 222]\n");
     assert_eq!(cfg.dm_allowlist, vec![111, 222]);

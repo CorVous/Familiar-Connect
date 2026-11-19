@@ -25,6 +25,8 @@ use familiar_connect::processors::{
     DiscordTextPayload, GateAction, GateDecision, ResponderLlm, SendText,
 };
 use familiar_connect::typing_interrupt::TypingInterruptHandler;
+use familiar_connect::typing_pace::TypingPace;
+use tokio::time::{Duration, Instant};
 
 use support::{
     CapturingLlm, CapturingSend, FakeActivityEngine, LogCapture, ModelSpyLayer, RecordingTyping,
@@ -591,6 +593,144 @@ async fn works_without_typing_hook() {
         .await
         .unwrap();
     assert_eq!(send.calls(), vec![(42, "ok".to_owned(), None, vec![])]);
+}
+
+// ---------------------------------------------------------------------------
+// Typing pace (length-based hold before send)
+// ---------------------------------------------------------------------------
+
+const fn pace(cps: f64, min_s: u64, max_s: u64) -> TypingPace {
+    TypingPace {
+        chars_per_second: cps,
+        min: Duration::from_secs(min_s),
+        max: Duration::from_secs(max_s),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn holds_reply_for_length_based_typing_time() {
+    let typing = Arc::new(RecordingTyping::new());
+    let send = Arc::new(CapturingSend::new());
+    // 30 chars at 10/s = 3 s.
+    let reply = "a".repeat(30);
+    let (r, _) = responder(store(), Arc::new(ScriptedLlm::new(&[&reply])), send.clone());
+    let r = r
+        .with_trigger_typing(typing.clone())
+        .with_typing_pace(pace(10.0, 0, 60));
+    let start = Instant::now();
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    let took = start.elapsed();
+    assert!(took >= Duration::from_secs(3), "{took:?}");
+    assert!(took < Duration::from_millis(3_500), "{took:?}");
+    assert_eq!(send.calls().len(), 1);
+    // Short hold: the streaming broadcast still covers it.
+    assert_eq!(typing.entered(), 1);
+    assert_eq!(typing.exited(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn generation_time_counts_toward_hold() {
+    let typing = Arc::new(RecordingTyping::new());
+    let send = Arc::new(CapturingSend::new());
+    // 4 s floor; streaming runs 3 s past the first delta, leaving ~1 s.
+    let (r, _) = responder(
+        store(),
+        Arc::new(ScriptedLlm::with_delay(&["a", "b", "c", "d"], 1_000)),
+        send.clone(),
+    );
+    let r = r
+        .with_trigger_typing(typing.clone())
+        .with_typing_pace(pace(10.0, 4, 60));
+    let start = Instant::now();
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    let took = start.elapsed();
+    // Indicator opens at 1 s (first delta); hold ends 4 s after that.
+    assert!(took >= Duration::from_secs(5), "{took:?}");
+    assert!(took < Duration::from_millis(5_500), "{took:?}");
+    assert_eq!(send.calls().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_hold_capped_and_refreshes_indicator() {
+    let typing = Arc::new(RecordingTyping::new());
+    let send = Arc::new(CapturingSend::new());
+    // 1000 chars at 10/s = 100 s, capped at 20 s.
+    let reply = "a".repeat(1_000);
+    let (r, _) = responder(store(), Arc::new(ScriptedLlm::new(&[&reply])), send.clone());
+    let r = r
+        .with_trigger_typing(typing.clone())
+        .with_typing_pace(pace(10.0, 0, 20));
+    let start = Instant::now();
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    let took = start.elapsed();
+    assert!(took >= Duration::from_secs(20), "{took:?}");
+    assert!(took < Duration::from_secs(21), "{took:?}");
+    assert_eq!(send.calls().len(), 1);
+    // Opened while streaming, refreshed at 8 s and 16 s.
+    assert_eq!(typing.calls(), vec![42, 42, 42]);
+    assert_eq!(typing.exited(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_hold_without_typing_indicator() {
+    let send = Arc::new(CapturingSend::new());
+    let (r, _) = responder(
+        store(),
+        Arc::new(ScriptedLlm::new(&[&"a".repeat(100)])),
+        send.clone(),
+    );
+    let r = r.with_typing_pace(pace(10.0, 0, 60));
+    let start = Instant::now();
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(send.calls().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn user_typing_during_hold_withholds_reply() {
+    let router = Arc::new(TurnRouter::new());
+    let handler = Arc::new(TypingInterruptHandler::new(
+        DiscordTextConfig::default(),
+        Arc::clone(&router),
+        Arc::new(|_ch| true),
+        Arc::new(|| Some(999)),
+    ));
+    let s = store();
+    let typing = Arc::new(RecordingTyping::new());
+    let send = Arc::new(CapturingSend::new());
+    let assembler = make_assembler(Arc::clone(&s));
+    let reply = "a".repeat(50);
+    let r = TextResponder::new(
+        assembler,
+        Arc::new(ScriptedLlm::new(&[&reply])),
+        send.clone(),
+        Arc::clone(&s),
+        router,
+        "fam",
+    )
+    .with_mode_instructions(default_modes())
+    .with_trigger_typing(typing.clone())
+    .with_typing_handler(Arc::clone(&handler))
+    .with_typing_pace(pace(10.0, 0, 60));
+    let task = tokio::spawn(async move {
+        r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+            .await
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    handler.notify_typing(42, 123, false);
+    task.await.unwrap().unwrap();
+    assert!(send.calls().is_empty());
+    let turns = s.sync().recent("fam", 42, 10, None, None).unwrap();
+    assert!(turns.iter().all(|t| t.role != "assistant"));
+    assert_eq!(typing.entered(), typing.exited());
 }
 
 // ---------------------------------------------------------------------------

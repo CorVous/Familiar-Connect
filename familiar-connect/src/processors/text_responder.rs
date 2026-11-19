@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use regex::{Captures, Regex};
 use std::sync::LazyLock;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::bus::envelope::{Event, TurnScope, payload as wrap_payload};
@@ -40,6 +41,7 @@ use crate::tools::agentic::{
 };
 use crate::tools::registry::{FocusControl, ToolRegistry};
 use crate::typing_interrupt::TypingInterruptHandler;
+use crate::typing_pace::{TYPING_REFRESH, TypingPace};
 
 // ---------------------------------------------------------------------------
 // LLM output vocabulary regexes + head addendum
@@ -173,6 +175,7 @@ pub struct TextResponder {
     familiar_id: String,
     trigger_typing: Option<Arc<dyn TriggerTyping>>,
     typing_handler: Option<Arc<TypingInterruptHandler>>,
+    typing_pace: Option<TypingPace>,
     tool_registry: Option<Arc<ToolRegistry>>,
     tool_context_factory: Option<ToolContextFactory>,
     post_history_instructions: String,
@@ -209,6 +212,7 @@ impl TextResponder {
             familiar_id: familiar_id.into(),
             trigger_typing: None,
             typing_handler: None,
+            typing_pace: None,
             tool_registry: None,
             tool_context_factory: None,
             post_history_instructions: String::new(),
@@ -232,6 +236,13 @@ impl TextResponder {
     #[must_use]
     pub fn with_typing_handler(mut self, handler: Arc<TypingInterruptHandler>) -> Self {
         self.typing_handler = Some(handler);
+        self
+    }
+    /// Hold each message until the typing indicator has shown for a
+    /// length-based time (needs [`with_trigger_typing`](Self::with_trigger_typing)).
+    #[must_use]
+    pub const fn with_typing_pace(mut self, pace: TypingPace) -> Self {
+        self.typing_pace = Some(pace);
         self
     }
     /// Wire the agentic-loop tool registry + context factory.
@@ -519,12 +530,12 @@ impl TextResponder {
         let mut said_something = speech.said_earlier;
         if let Some(reply) = reply {
             match self
-                .post_part(&scope, &post, &reply, send_channel_id)
+                .post_part(&scope, &post, &reply, send_channel_id, speech.typing_since)
                 .await?
             {
                 Posted::Sent => said_something = true,
                 Posted::Unrecorded(e) => return Err(e.into()),
-                Posted::Failed => {}
+                Posted::Failed | Posted::Withheld => {}
                 Posted::Cancelled => {
                     // The reply went out as the turn was cancelled: left
                     // unrecorded, as before. Earlier text that was posted and
@@ -576,6 +587,7 @@ impl TextResponder {
         post: &PostContext<'_>,
         text: &str,
         send_channel_id: i64,
+        typing_since: Option<Instant>,
     ) -> anyhow::Result<Posted> {
         let elsewhere = send_channel_id != post.channel_id;
         let (unthreaded, wants_thread, target_id) = consume_thread_marker(text);
@@ -614,6 +626,12 @@ impl TextResponder {
             trigger_message
         };
 
+        if !self
+            .hold_typing(scope, post, send_channel_id, &unthreaded, typing_since)
+            .await
+        {
+            return Ok(Posted::Withheld);
+        }
         let sent_message_id = match self
             .send_text
             .send(
@@ -675,6 +693,63 @@ impl TextResponder {
             Ok(_) => Posted::Sent,
             Err(e) => Posted::Unrecorded(e),
         })
+    }
+
+    /// Hold a message until "is typing…" has shown for the pace's time for
+    /// `text`, counting from `typing_since` so generation time counts. Keeps
+    /// the indicator up meanwhile. `false` = interrupted where the message is
+    /// bound (someone started typing there): don't send.
+    async fn hold_typing(
+        &self,
+        scope: &TurnScope,
+        post: &PostContext<'_>,
+        send_channel_id: i64,
+        text: &str,
+        typing_since: Option<Instant>,
+    ) -> bool {
+        let (Some(pace), Some(trigger)) = (&self.typing_pace, &self.trigger_typing) else {
+            return true;
+        };
+        let deadline =
+            typing_since.unwrap_or_else(Instant::now) + pace.duration_for(text.chars().count());
+        let token = scope.cancellation_token();
+        let mut broadcast_at = typing_since;
+        let mut open: Option<Box<dyn TypingIndicator>> = None;
+        let held = loop {
+            if post.interrupted(scope, send_channel_id) {
+                break false;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break true;
+            }
+            // One broadcast lapses after ~10 s; refresh before it does.
+            let last = match broadcast_at {
+                Some(t) if now.duration_since(t) < TYPING_REFRESH => t,
+                _ => {
+                    if let Some(ind) = open.take() {
+                        ind.close().await;
+                    }
+                    open = Some(trigger.open(send_channel_id).await);
+                    now
+                }
+            };
+            broadcast_at = Some(last);
+            let wake = deadline.min(last + TYPING_REFRESH);
+            if scope.is_cancelled() {
+                // Cancelled, but bound for another channel: nothing to watch.
+                tokio::time::sleep_until(wake).await;
+            } else {
+                tokio::select! {
+                    () = tokio::time::sleep_until(wake) => {}
+                    () = token.cancelled() => {}
+                }
+            }
+        };
+        if let Some(ind) = open {
+            ind.close().await;
+        }
+        held
     }
 
     fn origin_fields(&self, channel_id: i64) -> (String, String) {
@@ -900,9 +975,11 @@ impl TextResponder {
             self.stream_reply_with_tools(scope, post, messages, images, shift_target)
                 .await
         } else {
+            let (reply, typing_since) = self.stream_reply_bare(scope, channel_id, messages).await;
             TurnSpeech {
                 said_earlier: false,
-                reply: self.stream_reply_bare(scope, channel_id, messages).await,
+                reply,
+                typing_since,
             }
         }
     }
@@ -912,15 +989,16 @@ impl TextResponder {
         scope: &TurnScope,
         channel_id: i64,
         messages: Vec<Message>,
-    ) -> Option<String> {
-        let mut typing: Option<Box<dyn TypingIndicator>> = None;
+    ) -> (Option<String>, Option<Instant>) {
+        let mut typing: Option<(Box<dyn TypingIndicator>, Instant)> = None;
         let out = self
             .stream_bare_inner(scope, channel_id, messages, &mut typing)
             .await;
-        if let Some(ind) = typing {
+        let since = typing.as_ref().map(|(_, at)| *at);
+        if let Some((ind, _)) = typing {
             ind.close().await;
         }
-        out
+        (out, since)
     }
 
     async fn stream_bare_inner(
@@ -928,7 +1006,7 @@ impl TextResponder {
         scope: &TurnScope,
         channel_id: i64,
         messages: Vec<Message>,
-        typing: &mut Option<Box<dyn TypingIndicator>>,
+        typing: &mut Option<(Box<dyn TypingIndicator>, Instant)>,
     ) -> Option<String> {
         let mut accumulated = String::new();
         // Same gate voice uses: the leaked-tool-call guard, so a tool-less model
@@ -991,7 +1069,7 @@ impl TextResponder {
                     if typing.is_none()
                         && let Some(trigger) = &self.trigger_typing
                     {
-                        *typing = Some(trigger.open(channel_id).await);
+                        *typing = Some((trigger.open(channel_id).await, Instant::now()));
                     }
                 }
                 StreamDecision::Pending => {}
@@ -1032,6 +1110,7 @@ impl TextResponder {
             shift_target,
             gate: Mutex::new(StreamGate::new()),
             typing: Mutex::new(None),
+            typing_since: Mutex::new(None),
             typing_started: AtomicBool::new(false),
             bail_silent: AtomicBool::new(false),
             said_earlier: AtomicBool::new(false),
@@ -1107,10 +1186,12 @@ impl TextResponder {
             Some(result.final_content)
         };
 
+        let typing_since = hooks.typing_since();
         hooks.close_typing().await;
         TurnSpeech {
             said_earlier: hooks.said_earlier.load(Ordering::SeqCst),
             reply,
+            typing_since,
         }
     }
 }
@@ -1133,6 +1214,8 @@ struct TurnSpeech {
     /// The turn's final reply, still to post; `None` when it stayed silent or
     /// was abandoned.
     reply: Option<String>,
+    /// When the indicator for `reply` went up; `None` if it never did.
+    typing_since: Option<Instant>,
 }
 
 /// The per-turn facts every message the turn posts needs.
@@ -1174,6 +1257,8 @@ enum Posted {
     Failed,
     /// The turn was cancelled around the send; nothing recorded.
     Cancelled,
+    /// Someone started typing during the typing hold; nothing sent.
+    Withheld,
 }
 
 /// Log a wake turn's text being held back by the shift-or-silent guard.
@@ -1204,6 +1289,8 @@ struct TextToolHooks<'a> {
     shift_target: &'a Arc<Mutex<Option<i64>>>,
     gate: Mutex<StreamGate>,
     typing: Mutex<Option<Box<dyn TypingIndicator>>>,
+    /// When the open indicator went up.
+    typing_since: Mutex<Option<Instant>>,
     typing_started: AtomicBool,
     bail_silent: AtomicBool,
     /// Some text ahead of a look was posted this turn.
@@ -1220,9 +1307,15 @@ impl TextToolHooks<'_> {
             .unwrap_or(self.post.channel_id)
     }
 
+    /// When the open indicator went up, if one is open.
+    fn typing_since(&self) -> Option<Instant> {
+        *self.typing_since.lock().expect("typing since mutex")
+    }
+
     /// Close the typing indicator, if one is open; the next text reopens it.
     async fn close_typing(&self) {
         let ind = self.typing.lock().expect("typing mutex").take();
+        *self.typing_since.lock().expect("typing since mutex") = None;
         if let Some(ind) = ind {
             ind.close().await;
         }
@@ -1258,6 +1351,7 @@ impl AgenticHooks for TextToolHooks<'_> {
                 {
                     let ind = trigger.open(self.here()).await;
                     *self.typing.lock().expect("typing mutex") = Some(ind);
+                    *self.typing_since.lock().expect("typing since mutex") = Some(Instant::now());
                 }
             }
             StreamDecision::Suppress | StreamDecision::Pending => {}
@@ -1284,7 +1378,13 @@ impl AgenticHooks for TextToolHooks<'_> {
         }
         let posted = self
             .responder
-            .post_part(self.scope, self.post, &earlier.text, send_channel_id)
+            .post_part(
+                self.scope,
+                self.post,
+                &earlier.text,
+                send_channel_id,
+                self.typing_since(),
+            )
             .await;
         // The message is out: the indicator has done its job for this part.
         self.close_typing().await;
@@ -1307,7 +1407,7 @@ impl AgenticHooks for TextToolHooks<'_> {
                 self.said_earlier.store(true, Ordering::SeqCst);
                 false
             }
-            Ok(Posted::Failed) => false,
+            Ok(Posted::Failed | Posted::Withheld) => false,
             Err(e) => {
                 tracing::warn!("{} earlier text not posted: {e}", ls::tag("Text", ls::R));
                 false

@@ -35,6 +35,7 @@ pub mod voice_roster;
 pub mod processors;
 pub mod silence;
 pub mod typing_interrupt;
+pub mod typing_pace;
 
 // --- subsystem 08: llm + tools ---
 pub mod llm;
