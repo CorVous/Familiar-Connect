@@ -367,11 +367,16 @@ tool call, so a reply resolving to silence never flickers it on. Stops cleanly w
   typed. Each message is held until the indicator has shown for
   `chars / typing_chars_per_second` seconds, clamped to
   `[typing_delay_min_s, typing_delay_max_s]`. The clock starts when the
-  indicator went up, so time spent generating counts: a slow stream adds
-  no extra wait. During the hold the indicator is re-broadcast every 8 s so
-  it never lapses. If someone starts typing in that channel during the hold
-  (with `respond_to_typing` on), the message is withheld, like a mid-stream
-  cancel. Set `typing_delay = false` to post as soon as a reply is ready.
+  indicator went up in the channel the message goes to, so time spent
+  generating counts: a slow stream adds no extra wait. Time it showed in
+  another channel, before a `shift_focus`, doesn't count. During the hold
+  the indicator is re-broadcast every 8 s so it never lapses. If someone
+  starts typing in the triggering channel during the hold (with
+  `respond_to_typing` on), a message bound there is withheld, like a
+  mid-stream cancel; one bound for a channel she shifted to still posts.
+  The text responder handles one turn at a time, so the hold also delays
+  replies in other channels by up to `typing_delay_max_s`; keep the cap
+  modest. Set `typing_delay = false` to post as soon as a reply is ready.
   The hold only applies when the typing indicator is wired (Discord).
 
 ## Activities

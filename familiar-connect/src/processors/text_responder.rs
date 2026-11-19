@@ -698,8 +698,8 @@ impl TextResponder {
     /// Hold a message until "is typing…" has shown for the pace's time for
     /// `text`, counting from `typing_since` so generation time counts (only
     /// when it went up in `send_channel_id`; else the clock starts now). Keeps
-    /// the indicator up meanwhile. `false` = interrupted where the message is
-    /// bound (someone started typing there): don't send.
+    /// the indicator up meanwhile. `false` = [`PostContext::interrupted`] for
+    /// `send_channel_id`: don't send. Blocks this responder's event loop.
     async fn hold_typing(
         &self,
         scope: &TurnScope,

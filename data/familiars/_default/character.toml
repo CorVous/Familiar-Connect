@@ -644,8 +644,10 @@ tool_calling   = true
 # other's typing indicators.
 # typing_delay: hold each reply until "is typing…" has shown for
 # chars / typing_chars_per_second seconds, clamped to
-# [typing_delay_min_s, typing_delay_max_s]. Time spent generating counts
-# toward it. Set false to post as soon as the reply is ready.
+# [typing_delay_min_s, typing_delay_max_s]. Time the indicator already
+# showed in the destination channel (while generating) counts toward it.
+# Replies are handled one at a time, so the hold also delays other
+# channels by up to typing_delay_max_s. Set false to post right away.
 
 [discord]
 # dm_allowlist = [123456789012345678]  # user IDs whose DMs the familiar will engage
