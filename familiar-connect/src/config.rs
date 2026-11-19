@@ -395,6 +395,14 @@ pub struct DiscordTextConfig {
     pub typing_backoff_initial_s: f64,
     /// Max backoff seconds (>= initial).
     pub typing_backoff_max_s: f64,
+    /// Hold each reply until "is typing…" has shown for a length-based time.
+    pub typing_delay: bool,
+    /// Simulated typing speed for the hold.
+    pub typing_chars_per_second: f64,
+    /// Shortest hold, seconds (>= 0).
+    pub typing_delay_min_s: f64,
+    /// Longest hold, seconds (>= min).
+    pub typing_delay_max_s: f64,
 }
 
 impl Default for DiscordTextConfig {
@@ -403,6 +411,10 @@ impl Default for DiscordTextConfig {
             respond_to_typing: true,
             typing_backoff_initial_s: 1.0,
             typing_backoff_max_s: 30.0,
+            typing_delay: true,
+            typing_chars_per_second: 15.0,
+            typing_delay_min_s: 1.0,
+            typing_delay_max_s: 8.0,
         }
     }
 }
@@ -2521,6 +2533,10 @@ fn parse_discord_text_config(raw: &Table) -> Result<DiscordTextConfig, ConfigErr
             "respond_to_typing",
             "typing_backoff_initial_s",
             "typing_backoff_max_s",
+            "typing_delay",
+            "typing_chars_per_second",
+            "typing_delay_min_s",
+            "typing_delay_max_s",
         ],
         "[discord.text]",
     )?;
@@ -2550,11 +2566,54 @@ fn parse_discord_text_config(raw: &Table) -> Result<DiscordTextConfig, ConfigErr
             fmt_num(typing_backoff_initial_s)
         )));
     }
+    let typing_delay = field_bool(raw, "[discord.text]", "typing_delay", d.typing_delay)?;
+    let typing_chars_per_second = positive_float(
+        "[discord.text]",
+        raw,
+        "typing_chars_per_second",
+        d.typing_chars_per_second,
+    )?;
+    let typing_delay_min_s = non_negative_seconds(raw, "typing_delay_min_s", d.typing_delay_min_s)?;
+    let typing_delay_max_s = non_negative_seconds(raw, "typing_delay_max_s", d.typing_delay_max_s)?;
+    if typing_delay_max_s < typing_delay_min_s {
+        return Err(ConfigError(format!(
+            "[discord.text].typing_delay_max_s must be >= typing_delay_min_s, got {} < {}",
+            fmt_num(typing_delay_max_s),
+            fmt_num(typing_delay_min_s)
+        )));
+    }
     Ok(DiscordTextConfig {
         respond_to_typing,
         typing_backoff_initial_s,
         typing_backoff_max_s,
+        typing_delay,
+        typing_chars_per_second,
+        typing_delay_min_s,
+        typing_delay_max_s,
     })
+}
+
+/// A `[discord.text]` seconds value that may be zero, capped at one hour
+/// (a typing hold longer than that is a typo).
+fn non_negative_seconds(raw: &Table, key: &str, default: f64) -> Result<f64, ConfigError> {
+    let v = match raw.get(key) {
+        None => return Ok(default),
+        Some(Value::Integer(n)) => int_as_f64(*n),
+        Some(Value::Float(f)) => *f,
+        Some(other) => {
+            return Err(ConfigError(format!(
+                "[discord.text].{key} must be a number, got {}",
+                value_type_name(other)
+            )));
+        }
+    };
+    if !(0.0..=3600.0).contains(&v) {
+        return Err(ConfigError(format!(
+            "[discord.text].{key} must be between 0 and 3600, got {}",
+            fmt_num(v)
+        )));
+    }
+    Ok(v)
 }
 
 struct PromptFields {

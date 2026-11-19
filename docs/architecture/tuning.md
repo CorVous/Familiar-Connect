@@ -171,6 +171,10 @@ message_rendering   = "prefixed"  # "prefixed" | "name_only"
 respond_to_typing        = true   # cancel in-flight reply on user typing
 typing_backoff_initial_s = 1.0    # first pause when another bot is typing
 typing_backoff_max_s     = 30.0   # ceiling after exponential doubling
+typing_delay             = true   # hold replies so "is typing…" shows a while
+typing_chars_per_second  = 15.0   # simulated typing speed
+typing_delay_min_s       = 1.0    # shortest hold
+typing_delay_max_s       = 8.0    # longest hold
 
 [focus]
 unread_nudge_enabled   = true     # nudge the model when unreads arrive
@@ -332,6 +336,10 @@ events while a reply is mid-flight.
 respond_to_typing        = true
 typing_backoff_initial_s = 1.0
 typing_backoff_max_s     = 30.0
+typing_delay             = true
+typing_chars_per_second  = 15.0
+typing_delay_min_s       = 1.0
+typing_delay_max_s       = 8.0
 ```
 
 - **`respond_to_typing`** — when `true` (default), a typing-start
@@ -353,6 +361,23 @@ indicator (via `BotHandle.trigger_typing`) so users see the in-flight
 signal — including on regenerated replies after a barge-in cancel.
 The indicator opens lazily, only after `StreamGate` rules out a leaked
 tool call, so a reply resolving to silence never flickers it on. Stops cleanly when the streaming context exits.
+
+- **`typing_delay`** / **`typing_chars_per_second`** /
+  **`typing_delay_min_s`** / **`typing_delay_max_s`** — make replies look
+  typed. Each message is held until the indicator has shown for
+  `chars / typing_chars_per_second` seconds, clamped to
+  `[typing_delay_min_s, typing_delay_max_s]`. The clock starts when the
+  indicator went up in the channel the message goes to, so time spent
+  generating counts: a slow stream adds no extra wait. Time it showed in
+  another channel, before a `shift_focus`, doesn't count. During the hold
+  the indicator is re-broadcast every 8 s so it never lapses. If someone
+  starts typing in the triggering channel during the hold (with
+  `respond_to_typing` on), a message bound there is withheld, like a
+  mid-stream cancel; one bound for a channel she shifted to still posts.
+  The text responder handles one turn at a time, so the hold also delays
+  replies in other channels by up to `typing_delay_max_s`; keep the cap
+  modest. Set `typing_delay = false` to post as soon as a reply is ready.
+  The hold only applies when the typing indicator is wired (Discord).
 
 ## Activities
 

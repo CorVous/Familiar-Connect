@@ -20,8 +20,9 @@ use familiar_connect::tools::registry::{FnHandler, Tool, ToolContext, ToolOutput
 use serde_json::{Value, json};
 
 use support::{
-    CapturingSend, ScriptedLlm, ScriptedToolLlm, TestFocusManager, discord_text_event, finish,
-    make_assembler, simple_ctx_factory, store, tc_delta, text_delta, text_payload,
+    CapturingSend, RecordingTyping, ScriptedLlm, ScriptedToolLlm, TestFocusManager,
+    discord_text_event, finish, make_assembler, simple_ctx_factory, store, tc_delta, text_delta,
+    text_payload,
 };
 
 const fn bus() -> InProcessEventBus {
@@ -94,6 +95,50 @@ async fn runs_agentic_loop_full_turn() {
         json!({"ok": true})
     );
     assert_eq!(turns[3].content, "Alarm set.");
+}
+
+#[tokio::test(start_paused = true)]
+async fn tool_path_reply_held_for_typing_pace() {
+    use familiar_connect::typing_pace::TypingPace;
+    use tokio::time::{Duration, Instant};
+
+    let s = store();
+    let mut reg = ToolRegistry::new();
+    reg.register(args_recording_tool(
+        "set_alarm",
+        Arc::new(Mutex::new(Vec::new())),
+    ))
+    .unwrap();
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        vec![
+            tc_delta(
+                "c1",
+                "set_alarm",
+                json!({"reason": "ping", "delay_seconds": 30, "silent": false}),
+            ),
+            finish("tool_calls"),
+        ],
+        vec![text_delta(&"a".repeat(40)), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let typing = Arc::new(RecordingTyping::new());
+    let r = responder_with_tools(Arc::clone(&s), llm, send.clone(), Arc::new(reg))
+        .with_trigger_typing(typing.clone())
+        .with_typing_pace(TypingPace {
+            chars_per_second: 10.0,
+            min: Duration::ZERO,
+            max: Duration::from_secs(60),
+        });
+    let start = Instant::now();
+    r.handle(&discord_text_event(text_payload(42, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    let took = start.elapsed();
+    // 40 chars at 10/s.
+    assert!(took >= Duration::from_secs(4), "{took:?}");
+    assert!(took < Duration::from_millis(4_500), "{took:?}");
+    assert_eq!(send.calls().len(), 1);
+    assert_eq!(typing.entered(), typing.exited());
 }
 
 #[tokio::test]

@@ -670,6 +670,47 @@ async fn shift_focus_plus_silent_moves_focus_and_records_the_shift() {
     assert!(turns.iter().all(|t| !t.content.contains("__SILENT__")));
 }
 
+/// Typing shown in the channel she left doesn't count toward the hold where the
+/// reply lands: the hold restarts there and puts the indicator up.
+#[tokio::test(start_paused = true)]
+async fn typing_hold_restarts_in_the_channel_she_moved_to() {
+    use familiar_connect::typing_pace::TypingPace;
+    use tokio::time::{Duration, Instant};
+
+    let llm = Arc::new(ScriptedToolLlm::new(vec![
+        // Not look-first: the text alongside the shift isn't posted, but it
+        // put the indicator up in 100.
+        vec![
+            text_delta("hmm"),
+            shift_tc_speaking(200),
+            finish("tool_calls"),
+        ],
+        vec![text_delta("hello"), finish("stop")],
+    ]));
+    let send = Arc::new(CapturingSend::new());
+    let typing = Arc::new(support::RecordingTyping::new());
+    let (r, _, _) =
+        focus_responder_with_registry(llm, send.clone(), Arc::new(TurnRouter::new()), |_| {
+            let mut reg = ToolRegistry::new();
+            reg.register(build_shift_focus_tool()).unwrap();
+            reg
+        });
+    let r = r
+        .with_trigger_typing(typing.clone())
+        .with_typing_pace(TypingPace {
+            chars_per_second: 10.0,
+            min: Duration::from_secs(3),
+            max: Duration::from_secs(60),
+        });
+    let start = Instant::now();
+    r.handle(&discord_text_event(text_payload(100, "hi"), "e-1"), &bus())
+        .await
+        .unwrap();
+    assert_eq!(posted(&send), vec![(200, "hello".to_owned())]);
+    assert_eq!(typing.calls(), vec![100, 200]);
+    assert!(start.elapsed() >= Duration::from_secs(3));
+}
+
 #[tokio::test]
 async fn shift_focus_with_reply_posts_to_new_channel() {
     let llm = Arc::new(ScriptedToolLlm::new(vec![
