@@ -128,12 +128,15 @@ Locations verified against the current tree. Paths are under
    `<invoke>` / `silent(` / `<tool_call>` block, or the
    `CALL:default_api:<tool>{…}` / `callable:…` text Gemini returns when it
    fails to emit a structured call (silent when it names `silent`, suppressed
-   otherwise). A leaked thought marker ahead of the reply (`?[thought\n]`,
-   also Gemini) is not content: `strip_leading_thought_marker` drops it, the
-   gate judges what follows, and the reply behind it is posted, spoken and
-   recorded without it. The marker is matched in the shape it leaks in (an
-   optional stray `?`, whitespace before the closing bracket), so a bracketed
-   aside she writes herself (`[thought]`) stays prose. Voice hands deltas
+   otherwise). A leaked thought marker ahead of the reply (`?[thought\n]`
+   or `hthought\n`, also Gemini) is not content:
+   `strip_leading_thought_marker` drops it, the gate judges what follows, and
+   the reply behind it is posted, spoken and recorded without it. The marker
+   is matched in the shapes it leaks in: bracketed (an optional stray `?`,
+   whitespace before the closing bracket), so a bracketed aside she writes
+   herself (`[thought]`) stays prose; or `thought` on a line of its own behind
+   up to two stray characters or a `<|channel>` token, so a reply that opens
+   with the word (`Thought so.`) stays prose. Voice hands deltas
    straight to TTS, so it runs a `ThoughtMarkerFilter` ahead of the gate, one
    check per message the model writes in the turn. The voice tool path's gate
    is per message too: once a message has been spoken, the next one is judged

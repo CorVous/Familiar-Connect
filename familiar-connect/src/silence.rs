@@ -49,19 +49,38 @@ static API_CALL_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*<(?:\w+:)?tool_call\b").expect("valid regex"));
-/// A thought-channel marker Gemini leaks ahead of a reply: `[thought\n]`,
-/// seen behind one stray `?` (`?[thought\n]`; U+FFFD covers the same stray
-/// byte decoded lossily). The whitespace before the closing bracket is part of
-/// the leak's shape, so a bracketed aside she writes herself (`[thought]`)
-/// stays prose.
-static LEADING_THOUGHT_MARKER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*[?\x{FFFD}]?\[thought\s+\]\s*").expect("valid regex"));
-/// The marker's fixed opening, lowercased, for the still-streaming check.
+/// A thought-channel marker Gemini leaks ahead of a reply, in either of the
+/// two shapes seen live:
+///
+/// - bracketed: `[thought\n]`, behind at most one stray `?` (`?[thought\n]`;
+///   U+FFFD covers the same stray byte decoded lossily). The whitespace before
+///   the closing bracket is part of the leak's shape, so a bracketed aside she
+///   writes herself (`[thought]`) stays prose.
+/// - a line of its own: `thought`, behind up to two stray characters
+///   other than whitespace or `[` (`hthought\n`, `<thought>\n`) or the
+///   channel token it comes from
+///   (`<|channel>thought\n`). The line break is part of the shape, so a reply
+///   that opens with the word (`Thought so, umu.`) stays prose.
+static LEADING_THOUGHT_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^\s*(?:[?\x{FFFD}]?\[thought\s+\]|(?:<\|?channel\|?>)?[^\s\[]{0,2}?thought>?[ \t]*\r?\n)\s*",
+    )
+    .expect("valid regex")
+});
+/// The bracketed marker's fixed opening, lowercased, for the still-streaming
+/// check.
 const THOUGHT_MARKER_OPEN: &str = "[thought";
-/// The stray characters seen (or decoded) in front of the marker.
+/// The stray characters seen (or decoded) in front of the bracketed marker.
 const THOUGHT_MARKER_STRAYS: [char; 2] = ['?', '\u{FFFD}'];
+/// The marker word of the line-of-its-own shape.
+const THOUGHT_WORD: &str = "thought";
+/// Channel tokens the line-of-its-own marker can arrive behind, lowercased.
+const THOUGHT_CHANNEL_TOKENS: [&str; 4] = ["<|channel|>", "<|channel>", "<channel|>", "<channel>"];
+/// How many stray characters may precede the line-of-its-own marker.
+const THOUGHT_LINE_MAX_STRAYS: usize = 2;
 
-/// `content` without a leading leaked thought marker (`?[thought\n]`).
+/// `content` without a leading leaked thought marker (`?[thought\n]`,
+/// `hthought\n`).
 ///
 /// The marker is never part of what she says: a reply behind it is the reply,
 /// and a leaked tool call behind it is still a leaked tool call.
@@ -69,24 +88,79 @@ const THOUGHT_MARKER_STRAYS: [char; 2] = ['?', '\u{FFFD}'];
 pub fn strip_leading_thought_marker(content: &str) -> &str {
     LEADING_THOUGHT_MARKER_RE
         .find(content)
+        .filter(|m| !is_thought_word_line(m.as_str()))
         .map_or(content, |m| &content[m.end()..])
 }
 
+/// Words that read as two strays in front of `thought`: a first line that is
+/// only one of these is something she wrote (`Methought`), not the marker.
+const THOUGHT_WORDS: [&str; 4] = ["methought", "bethought", "rethought", "unthought"];
+
+/// Is the matched marker line really one of [`THOUGHT_WORDS`] on its own?
+fn is_thought_word_line(marker: &str) -> bool {
+    let word = marker.trim().trim_end_matches('>');
+    THOUGHT_WORDS.iter().any(|w| word.eq_ignore_ascii_case(w))
+}
+
 /// Could `stripped` (left-trimmed, non-empty) still grow into a leading
-/// thought marker? True while it is a prefix of `[thought ` plus whitespace,
-/// with or without the stray leading character, and the closing bracket has
-/// not arrived.
+/// thought marker? True while the marker could still complete in either
+/// shape: for the bracketed one, a prefix of `[thought ` plus whitespace, with
+/// or without the stray leading character, before the closing bracket; for
+/// the line of its own, a first line with no line break yet that could still
+/// read as the marker.
 fn thought_marker_prefix_possible(stripped: &str) -> bool {
     let lc = stripped.to_ascii_lowercase();
     let after_stray = lc.strip_prefix(THOUGHT_MARKER_STRAYS);
-    std::iter::once(lc.as_str())
+    let bracketed = std::iter::once(lc.as_str())
         .chain(after_stray)
         .any(|candidate| {
             THOUGHT_MARKER_OPEN.starts_with(candidate)
                 || candidate
                     .strip_prefix(THOUGHT_MARKER_OPEN)
                     .is_some_and(|rest| rest.chars().all(char::is_whitespace))
-        })
+        });
+    bracketed || thought_line_prefix_possible(&lc)
+}
+
+/// Could `lc` (lowercased, left-trimmed) still grow into the line-of-its-own
+/// marker? Only while no line break has arrived: once one has,
+/// [`LEADING_THOUGHT_MARKER_RE`] has either matched or ruled it out.
+fn thought_line_prefix_possible(lc: &str) -> bool {
+    if lc.contains('\n') {
+        return false;
+    }
+    if THOUGHT_CHANNEL_TOKENS
+        .iter()
+        .any(|token| token.starts_with(lc))
+    {
+        return true;
+    }
+    let after_token = THOUGHT_CHANNEL_TOKENS
+        .iter()
+        .find_map(|token| lc.strip_prefix(token));
+    std::iter::once(lc).chain(after_token).any(|candidate| {
+        // Skip 0..=2 stray characters (never whitespace, never an opening
+        // bracket: that is the bracketed shape), then the rest must be a
+        // prefix of the word, or the word and only its closing tail.
+        candidate
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(candidate.len()))
+            .take(THOUGHT_LINE_MAX_STRAYS + 1)
+            .take_while(|&i| {
+                !candidate[..i]
+                    .chars()
+                    .any(|c| c.is_whitespace() || c == '[')
+            })
+            .any(|i| {
+                let rest = &candidate[i..];
+                THOUGHT_WORD.starts_with(rest)
+                    || rest.strip_prefix(THOUGHT_WORD).is_some_and(|tail| {
+                        let tail = tail.strip_prefix('>').unwrap_or(tail);
+                        tail.chars().all(|c| matches!(c, ' ' | '\t' | '\r'))
+                    })
+            })
+    })
 }
 
 /// Drops a leaked thought marker from the start of one streamed message.
@@ -475,6 +549,106 @@ mod tests {
             "x[thought\n]Hello.",
         ] {
             assert_eq!(strip_leading_thought_marker(prose), prose);
+        }
+    }
+
+    /// The line-of-its-own shape seen live on 2026-11-21:
+    /// `hthought\nYielding the last piece of pancake…`.
+    #[test]
+    fn thought_line_marker_is_stripped_only_when_it_leads() {
+        let live = "hthought\nYielding the last piece of pancake to the bunny's father, umu.";
+        assert_eq!(
+            strip_leading_thought_marker(live),
+            "Yielding the last piece of pancake to the bunny's father, umu."
+        );
+        for (leak, reply) in [
+            ("thought\nHello.", "Hello."),
+            ("Thought\r\n\nHello.", "Hello."),
+            ("  ?thought \nHello.", "Hello."),
+            ("<thought>\nHello.", "Hello."),
+            ("<|channel>thought\nHello.", "Hello."),
+            ("<|channel|>thought\nHello.", "Hello."),
+            ("\u{d560}thought\nHello.", "Hello."),
+            ("hthought\n", ""),
+        ] {
+            assert_eq!(strip_leading_thought_marker(leak), reply, "{leak:?}");
+        }
+        for prose in [
+            "Thought so, umu.",
+            "thought.\nHello.",
+            "thoughts\nHello.",
+            "A thought\nmid-reply stays.",
+            "Afterthought\nHello.",
+            "abcthought\nHello.",
+            "h thought\nHello.",
+            "Hello.\nthought\nHello.",
+            "hthought",
+            "thought\r\r\nHello.",
+            "<|channel>\nHello.",
+            "Methought\nthe bunny was asleep, umu.",
+            "BETHOUGHT \nHello.",
+        ] {
+            assert_eq!(strip_leading_thought_marker(prose), prose, "{prose:?}");
+        }
+    }
+
+    #[test]
+    fn gate_thought_line_marker_then_prose_speaks() {
+        let reply = "hthought\nYielding the last piece of pancake, umu.";
+        let mut g = StreamGate::new();
+        let mut decided = StreamDecision::Pending;
+        for c in reply.chars() {
+            decided = g.feed(&c.to_string());
+            if decided != StreamDecision::Pending {
+                break;
+            }
+        }
+        assert_eq!(decided, StreamDecision::Speak);
+        assert_eq!(
+            gate_run(&["hthou", "ght\n", "Hello."]),
+            StreamDecision::Speak
+        );
+        assert_eq!(
+            gate_run(&["hthought\nCALL:default_api:silent{reasoning: x"]),
+            StreamDecision::Silent
+        );
+        // A reply of two characters could still be the strays in front of the
+        // marker, so it waits for a third; ordinary openings are judged after
+        // at most a couple of characters.
+        assert_eq!(gate_run(&["Hm"]), StreamDecision::Pending);
+        assert_eq!(gate_run(&["Hm, umu."]), StreamDecision::Speak);
+        assert_eq!(gate_run(&["Thought so, umu."]), StreamDecision::Speak);
+    }
+
+    #[test]
+    fn filter_drops_a_line_marker_however_it_is_split() {
+        let reply = "hthought\nYielding the last piece of pancake, umu.";
+        let want = "Yielding the last piece of pancake, umu.";
+        assert_eq!(filter_run(&[reply]), want);
+        assert_eq!(
+            filter_run(&[
+                "h",
+                "thou",
+                "ght",
+                "\n",
+                "Yielding",
+                " the last piece of pancake, umu."
+            ]),
+            want
+        );
+        let by_char: Vec<String> = reply.chars().map(String::from).collect();
+        let by_char: Vec<&str> = by_char.iter().map(String::as_str).collect();
+        assert_eq!(filter_run(&by_char), want);
+        let mut f = ThoughtMarkerFilter::new();
+        for part in ["<|chan", "nel>", "thought", "\n"] {
+            assert_eq!(f.feed(part), "", "{part:?}");
+        }
+        assert_eq!(f.feed("Hello."), "Hello.");
+        for text in ["Thought so, umu.", "Hm.", "hthought", "Ok"] {
+            assert_eq!(filter_run(&[text]), text, "{text}");
+            let by_char: Vec<String> = text.chars().map(String::from).collect();
+            let by_char: Vec<&str> = by_char.iter().map(String::as_str).collect();
+            assert_eq!(filter_run(&by_char), text, "{text} by char");
         }
     }
 
