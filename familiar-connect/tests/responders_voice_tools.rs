@@ -411,6 +411,60 @@ async fn thought_marker_after_a_tool_call_is_never_spoken() {
     );
 }
 
+/// A message too short for the gate to judge ("Hm", which could still be the
+/// stray in front of a `hthought` marker) is still a whole message once a
+/// tool call ends it: it is spoken, and a call leaked as text in the next
+/// message is judged on its own rather than glued onto it.
+#[tokio::test]
+async fn short_message_before_a_tool_call_does_not_hide_a_later_leak() {
+    for leak in [
+        "CALL:default_api:read_channel{limit: 5}",
+        "hthought\nCALL:default_api:silent{reasoning: nobody asked}",
+    ] {
+        let (said, recorded) = voice_tool_turn_scripted(vec![
+            vec![
+                text_delta("Hm"),
+                tc_delta("c1", "read_channel", json!({"silent": false})),
+                finish("tool_calls"),
+            ],
+            vec![text_delta(leak), finish("stop")],
+        ])
+        .await;
+        assert_eq!(said.concat().trim(), "Hm", "{leak}");
+        assert!(
+            recorded
+                .iter()
+                .all(|t| !t.contains("default_api") && !t.contains("thought")),
+            "{leak}: {recorded:?}"
+        );
+    }
+}
+
+/// The line-of-its-own marker (`hthought\n`) after a tool call is never
+/// spoken or recorded; the reply behind it is.
+#[tokio::test]
+async fn thought_line_marker_after_a_tool_call_is_never_spoken() {
+    let (said, recorded) = voice_tool_turn_scripted(vec![
+        vec![
+            text_delta("Let me look. "),
+            tc_delta("c1", "read_channel", json!({"silent": false})),
+            finish("tool_calls"),
+        ],
+        vec![
+            text_delta("hthou"),
+            text_delta("ght\n"),
+            text_delta("Nothing new there."),
+            finish("stop"),
+        ],
+    ])
+    .await;
+    assert_eq!(said.concat().replace(' ', ""), "Letmelook.Nothingnewthere.");
+    assert!(
+        recorded.iter().all(|t| !t.contains("thought")),
+        "{recorded:?}"
+    );
+}
+
 /// A tool call leaked as text after speech has begun (with or without the
 /// marker in front) is caught like one that leads the turn: it is neither
 /// spoken nor recorded, and what was said before it stands.

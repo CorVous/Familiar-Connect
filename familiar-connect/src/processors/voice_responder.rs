@@ -979,6 +979,21 @@ impl AgenticHooks for VoiceToolHooks<'_> {
             // This message is complete; the next one the model writes gets its
             // own check for a leaked thought marker.
             st.release_held_text();
+            // The message ended undecided (a reply as short as "Hm", or one
+            // that is still a prefix of a leak token): it is complete, so it is
+            // what she said, and the next message gets a fresh gate rather
+            // than being judged glued onto this one.
+            if speaking
+                && !st.gate_open
+                && st.gate.decided().is_none()
+                && !st.unjudged_text().trim().is_empty()
+            {
+                if !st.decision_logged {
+                    self.inner.log_respond(&self.scope.turn_id, self.channel_id);
+                    st.decision_logged = true;
+                }
+                st.gate_open = true;
+            }
             if st.gate_open {
                 // `speak` is the single speakable gate; push the tail as-is.
                 let tail = st.streamer.flush();
